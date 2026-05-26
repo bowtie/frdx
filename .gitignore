@@ -1,6 +1,6 @@
 # Build + staging output
 build/
-dist/
+/dist/
 
 # Downloaded by scripts\get-deps.ps1
 third_party/
