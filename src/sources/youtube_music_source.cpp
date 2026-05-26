@@ -492,15 +492,12 @@ void YouTubeMusicSource::pump(RingBuffer& ring) {
 
     // ---- PCM drain ----
     auto advance_to_next = [&] {
-        if (queue_.size() > 1) {
-            const auto n = static_cast<std::ptrdiff_t>(queue_.size());
-            auto i       = static_cast<std::ptrdiff_t>(queue_idx_) + 1;
-            queue_idx_   = static_cast<std::size_t>(((i % n) + n) % n);
-            start_pipe_locked();
-            if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
-        } else {
-            stop_pipe_locked();
-        }
+        if (queue_.empty()) { stop_pipe_locked(); return; }
+        const auto n = static_cast<std::ptrdiff_t>(queue_.size());
+        auto i       = static_cast<std::ptrdiff_t>(queue_idx_) + 1;
+        queue_idx_   = static_cast<std::size_t>(((i % n) + n) % n);
+        start_pipe_locked();
+        if (pipe_) state_.store(PlaybackState::playing, std::memory_order_release);
     };
 
     auto update_position = [&] {
