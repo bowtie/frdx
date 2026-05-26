@@ -173,9 +173,17 @@ struct Cache {
     const std::byte* col      = nullptr;
     std::byte* vtable         = nullptr;
     std::vector<std::byte*> candidates;
+    int empty_streak          = 0;  // chain-invalid retries since last hit
 };
 std::mutex g_cache_mu;
 Cache g_cache;
+
+// If the cached candidates never resolve (Forza allocated a placeholder
+// wrapper we latched onto, but the real RadioStreamFmod instances haven't
+// been allocated yet), drop the cache after this many empty retries so the
+// next call rescans the heap. Old logs show real wrappers take ~1.5 min to
+// chain-validate, so the threshold is generous enough to avoid thrash.
+constexpr int kRescanThreshold = 30;
 
 } // namespace
 
@@ -280,23 +288,49 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
     }
 
     if (result.instances.empty()) {
-        static std::atomic<int> tick{0};
-        const int n = tick.fetch_add(1, std::memory_order_acq_rel);
-        if (n % 6 == 0) { // ~30s at the 5s retry rate
-            log::info("[discovery] {} heap candidates, none chain-valid yet "
-                      "(chain breaks: +0x48={} +0x18={} string-empty={}). "
-                      "Load into the game and cycle through radio stations.",
-                      local.candidates.size(), step_histogram[0], step_histogram[1],
-                      step_histogram[2]);
+        const bool invalidate = ++local.empty_streak >= kRescanThreshold;
+        {
+            std::scoped_lock lk{g_cache_mu};
+            if (invalidate) {
+                g_cache = Cache{};  // force a full heap rescan next call
+            } else {
+                g_cache.empty_streak = local.empty_streak;
+            }
+        }
+        if (invalidate) {
+            log::info("[discovery] cached candidates stayed chain-invalid for {} retries; "
+                      "dropping cache to rescan the heap",
+                      kRescanThreshold);
+        } else {
+            static std::atomic<int> tick{0};
+            const int n = tick.fetch_add(1, std::memory_order_acq_rel);
+            if (n % 6 == 0) { // ~30s at the 5s retry rate
+                log::info("[discovery] {} heap candidates, none chain-valid yet "
+                          "(chain breaks: +0x48={} +0x18={} string-empty={}). "
+                          "Load into the game and cycle through radio stations.",
+                          local.candidates.size(), step_histogram[0], step_histogram[1],
+                          step_histogram[2]);
+            }
         }
         return result;
     }
 
-    log::info("[discovery] found {} chain-valid RadioStreamFmod instance(s):",
-              result.instances.size());
-    for (auto& i : result.instances) {
-        log::info("[discovery]   @0x{:X}  SoundName=\"{}\"",
-                  reinterpret_cast<uintptr_t>(i.radio_stream), i.sound_name);
+    // Only log the "found" list on the first hit after a miss streak (initial
+    // discovery, or a recovery from a stale-cache rescan). Periodic callers
+    // like the staleness watchdog would otherwise spam the log every second.
+    const bool first_hit_after_misses = local.empty_streak != 0;
+    if (first_hit_after_misses) {
+        std::scoped_lock lk{g_cache_mu};
+        g_cache.empty_streak = 0;
+    }
+    static std::atomic<bool> ever_logged{false};
+    if (first_hit_after_misses || !ever_logged.exchange(true, std::memory_order_acq_rel)) {
+        log::info("[discovery] found {} chain-valid RadioStreamFmod instance(s):",
+                  result.instances.size());
+        for (auto& i : result.instances) {
+            log::info("[discovery]   @0x{:X}  SoundName=\"{}\"",
+                      reinterpret_cast<uintptr_t>(i.radio_stream), i.sound_name);
+        }
     }
     return result;
 }

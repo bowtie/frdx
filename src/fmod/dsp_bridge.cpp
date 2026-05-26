@@ -25,7 +25,21 @@ constexpr FMODSig kAnchored[] = {
     {"ChannelControl::addDSP", "4C 8B DC 56 48 81 EC 70 01 00 00|"
                                "40 53 55 56 57 41 56 48 81 EC 50 01 00 00"},
     {"ChannelControl::removeDSP", "48 89 5C 24 18 48 89 74 24 20 57 48 81 EC 50 01 00 00"},
+    // setMode is best-effort -- tries every FMOD prologue we know; install
+    // proceeds without it. Used to force FMOD_LOOP_NORMAL on the radio
+    // channel so the placeholder sample never reaches its natural end.
+    {"ChannelControl::setMode", "4C 8B DC 56 48 81 EC 70 01 00 00|"
+                                "40 53 55 56 57 41 56 48 81 EC 50 01 00 00|"
+                                "48 89 5C 24 10 57 48 81 EC 50 01 00 00|"
+                                "48 89 5C 24 18 48 89 74 24 20 57 48 81 EC 50 01 00 00|"
+                                "40 53 48 83 EC 20|"
+                                "48 89 5C 24 08 57 48 83 EC 20"},
 };
+
+// FMOD_LOOP_NORMAL: makes the channel loop forever on its source sample.
+// Set once at install time so the placeholder sample doesn't end and
+// drop the channel out from under our DSP.
+constexpr uint32_t kFmodLoopNormal = 0x2;
 
 // FMOD's `Handle::open` / `Handle::unlock` have no .rdata anchor; we match
 // their (unique) prologues directly.
@@ -82,18 +96,27 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
         find_by_anchor(img, kAnchored[2].anchor, kAnchored[2].pattern));
     out.channel_control_rem_dsp = reinterpret_cast<FMODFns::ChannelControlRemDSP_t>(
         find_by_anchor(img, kAnchored[3].anchor, kAnchored[3].pattern));
+    out.channel_control_set_mode = reinterpret_cast<FMODFns::ChannelControlSetMode_t>(
+        find_by_anchor(img, kAnchored[4].anchor, kAnchored[4].pattern));
     out.handle_resolver =
         reinterpret_cast<FMODFns::HandleResolver_t>(find_by_pattern(img, kResolverPattern));
     out.handle_unlock =
         reinterpret_cast<FMODFns::HandleUnlock_t>(find_by_pattern(img, kUnlockPattern));
 
-    log::info("[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} resolver={} unlock={}",
+    log::info("[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} setMode={} "
+              "resolver={} unlock={}",
               (void*)out.system_create_dsp, (void*)out.dsp_release,
               (void*)out.channel_control_add_dsp, (void*)out.channel_control_rem_dsp,
-              (void*)out.handle_resolver, (void*)out.handle_unlock);
+              (void*)out.channel_control_set_mode, (void*)out.handle_resolver,
+              (void*)out.handle_unlock);
     if (!out.handle_unlock) {
         log::warn("[sigscan] Handle::unlock not resolved -- the resolver lock will leak; "
                   "expect the game to freeze a few seconds after DSP install");
+    }
+    if (!out.channel_control_set_mode) {
+        log::warn("[sigscan] ChannelControl::setMode not resolved -- the radio channel "
+                  "will die at the placeholder sample's end and the user will have to "
+                  "toggle the in-game radio to recover");
     }
     return out.ready();
 }
@@ -186,6 +209,18 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     current_dsp_    = dsp;
     current_handle_ = handle;
     log::info("[dsp] installed dsp={} on handle=0x{:X}", dsp, handle);
+
+    // Pin the channel in loop mode so FMOD doesn't tear it down when the
+    // placeholder sample reaches its natural end. Without this, FMOD drops
+    // the channel after ~2 min and Forza only allocates a replacement
+    // handle when the user toggles the in-game radio.
+    if (fns_.channel_control_set_mode) {
+        uint32_t mrc = ~0u;
+        if (!seh_call([&] { mrc = fns_.channel_control_set_mode(channel, kFmodLoopNormal); }) ||
+            mrc != 0) {
+            log::warn("[dsp] setMode(FMOD_LOOP_NORMAL) failed r={}; channel may die early", mrc);
+        }
+    }
 }
 
 void DSPBridge::set_target(const RadioInstance& inst, void* fmod_system) noexcept {
@@ -193,15 +228,26 @@ void DSPBridge::set_target(const RadioInstance& inst, void* fmod_system) noexcep
     radio_stream_ = inst.radio_stream;
 }
 
-void DSPBridge::retarget_if_needed() noexcept {
-    if (mode() != DSPMode::pcm) return;
-    if (!radio_stream_ || !fmod_system_ || !fns_.ready()) return;
-
+uint32_t DSPBridge::read_live_handle(std::byte* radio_stream) const noexcept {
+    if (!radio_stream || !fns_.ready()) return 0;
     // Active FMOD Channel handle sits at +0x20 of the inline RadioStreamFmod.
     uint32_t handle = 0;
-    if (!safe_read(radio_stream_ + 0x20, handle) || !handle || handle == current_handle_) return;
+    if (!safe_read(radio_stream + 0x20, handle) || !handle) return 0;
+    return validate_handle(handle) ? handle : 0;
+}
 
-    if (!validate_handle(handle)) return;
+bool DSPBridge::current_handle_alive() const noexcept {
+    return current_handle_ != 0 && fns_.ready() && validate_handle(current_handle_);
+}
+
+bool DSPBridge::channel_handle_alive(std::byte* radio_stream) const noexcept {
+    return read_live_handle(radio_stream) != 0;
+}
+
+void DSPBridge::retarget_if_needed() noexcept {
+    if (mode() != DSPMode::pcm || !fmod_system_) return;
+    const uint32_t handle = read_live_handle(radio_stream_);
+    if (!handle || handle == current_handle_) return;
 
     log::info("[dsp] retargeting -> handle 0x{:X}", handle);
     release_current_dsp_locked();

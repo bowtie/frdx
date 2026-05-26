@@ -23,8 +23,9 @@ struct FMODFns {
     // ChannelControl* arg is actually FMOD's packed 32-bit handle widened
     // to 64 bits (`(void*)(uint64_t)handle`). Resolver returns the real
     // pointer, but addDSP/removeDSP both want the handle.
-    using ChannelControlAddDSP_t = uint32_t (*)(uint64_t channel_handle, int32_t index, void* dsp);
-    using ChannelControlRemDSP_t = uint32_t (*)(uint64_t channel_handle, void* dsp);
+    using ChannelControlAddDSP_t  = uint32_t (*)(uint64_t channel_handle, int32_t index, void* dsp);
+    using ChannelControlRemDSP_t  = uint32_t (*)(uint64_t channel_handle, void* dsp);
+    using ChannelControlSetMode_t = uint32_t (*)(uint64_t channel_handle, uint32_t mode);
 
     // Handle::open. Third out param is __int64 in the reference; declaring
     // it uint32_t* would risk a 4-byte stack overrun.
@@ -33,15 +34,18 @@ struct FMODFns {
     // slot and the game thread eventually freezes contending on it.
     using HandleUnlock_t = uint32_t (*)(uint64_t lock_state);
 
-    SystemCreateDSP_t system_create_dsp            = nullptr;
-    DSPRelease_t dsp_release                       = nullptr;
-    ChannelControlAddDSP_t channel_control_add_dsp = nullptr;
-    ChannelControlRemDSP_t channel_control_rem_dsp = nullptr;
-    HandleResolver_t handle_resolver               = nullptr;
-    HandleUnlock_t handle_unlock                   = nullptr;
+    SystemCreateDSP_t system_create_dsp              = nullptr;
+    DSPRelease_t dsp_release                         = nullptr;
+    ChannelControlAddDSP_t channel_control_add_dsp   = nullptr;
+    ChannelControlRemDSP_t channel_control_rem_dsp   = nullptr;
+    ChannelControlSetMode_t channel_control_set_mode = nullptr;
+    HandleResolver_t handle_resolver                 = nullptr;
+    HandleUnlock_t handle_unlock                     = nullptr;
 
-    // handle_unlock is best-effort: we still try to install without it,
-    // at the cost of slot leaks on builds where it can't be resolved.
+    // handle_unlock and channel_control_set_mode are best-effort: install
+    // proceeds without them. Missing unlock leaks resolver slots; missing
+    // set_mode means the channel can die when the placeholder sample's
+    // natural duration elapses (Forza won't always allocate a new one).
     bool ready() const noexcept {
         return system_create_dsp && dsp_release && channel_control_add_dsp &&
                channel_control_rem_dsp && handle_resolver;
@@ -67,6 +71,15 @@ public:
     // (station changed, race ended, etc.). Cheap to call every tick.
     void retarget_if_needed() noexcept;
 
+    // True while our currently-installed channel handle is still resolvable.
+    // Goes false when FMOD destroys the channel without writing a fresh
+    // handle to +0x20 (e.g. the placeholder sample reached its natural end).
+    bool current_handle_alive() const noexcept;
+
+    // True when `radio_stream`+0x20 holds a live FMOD channel handle. Used
+    // by the control loop to pick a recovery candidate after staleness.
+    bool channel_handle_alive(std::byte* radio_stream) const noexcept;
+
     DSPMode mode() const noexcept { return mode_.load(std::memory_order_acquire); }
     void set_mode(DSPMode m) noexcept;
 
@@ -91,6 +104,10 @@ public:
 private:
     // True if the resolver accepts the handle (the channel is still live).
     bool validate_handle(uint32_t handle) const noexcept;
+    // Returns the live channel handle at radio_stream+0x20, or 0 if absent
+    // or dead. Centralises the FMOD read+validate that retarget and the
+    // public `*_alive` queries both need.
+    uint32_t read_live_handle(std::byte* radio_stream) const noexcept;
     void release_current_dsp_locked() noexcept;
     void install_dsp_locked(uint32_t handle) noexcept;
 

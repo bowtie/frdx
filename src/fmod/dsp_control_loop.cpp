@@ -15,6 +15,10 @@ constexpr auto kDiscoveryRetry = 5s;
 constexpr int kDiscoveryTries  = 120; // 10-minute budget; the radio system
                                       // isn't wired up until well into launch.
 
+// Ticks of no read_callback progress (while the source is producing PCM)
+// before we conclude the DSP is attached to a dead channel. 1s @ 20ms.
+constexpr int kStaleTickThreshold = 50;
+
 // SoundName of the placeholder sample our DSP overwrites. Matches the carrier
 // shipped by the radio-mod media overlay; if absent, we fall back to the
 // first chain-valid instance so a stale overlay doesn't silently break audio.
@@ -47,15 +51,12 @@ void ControlLoop::run(const std::stop_token& tok) {
         return;
     }
 
-    const RadioInstance* chosen = nullptr;
-    for (auto& i : disc.instances) {
-        if (i.sound_name == kTargetSoundName) {
-            chosen = &i;
-            break;
-        }
-    }
+    const RadioInstance* chosen = select_instance(disc, /*require_live=*/false);
     if (!chosen) {
-        chosen = &disc.instances.front();
+        log::warn("[ctrl] discovery returned no usable instance; control loop exiting");
+        return;
+    }
+    if (chosen->sound_name != kTargetSoundName) {
         log::warn(R"([ctrl] no instance matches target "{}"; falling back to "{}")",
                   kTargetSoundName, chosen->sound_name);
     }
@@ -88,10 +89,28 @@ void ControlLoop::run(const std::stop_token& tok) {
             push_metadata();
         }
 
-        const float target = [this] {
-            auto* a = bridge_.manager().active();
-            if (!a) return 0.0f;
-            switch (a->playback_state()) {
+        // Staleness watchdog: while a source is actively producing audio,
+        // FMOD's mixer should be invoking our read_callback every tick.
+        // If call_count() freezes for ~1s, the channel was destroyed by
+        // FMOD without writing a fresh handle to +0x20 (e.g. placeholder
+        // sample ended). Re-discover and switch to a live channel.
+        auto* active          = bridge_.manager().active();
+        const bool busy       = active && (active->playback_state() == PlaybackState::playing ||
+                                           active->playback_state() == PlaybackState::buffering);
+        const std::uint64_t c = bridge_.call_count();
+        if (busy && c == prev_calls_) {
+            if (++stale_ticks_ >= kStaleTickThreshold) {
+                recover_stale_dsp();
+                stale_ticks_ = 0;
+            }
+        } else {
+            stale_ticks_ = 0;
+        }
+        prev_calls_ = c;
+
+        const float target = [this, active] {
+            if (!active) return 0.0f;
+            switch (active->playback_state()) {
                 case PlaybackState::playing:
                 case PlaybackState::buffering:
                     return configured_gain_.load(std::memory_order_acquire);
@@ -107,6 +126,34 @@ void ControlLoop::run(const std::stop_token& tok) {
         std::this_thread::sleep_until(next);
     }
     log::info("[ctrl] control loop exiting");
+}
+
+const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc,
+                                                  bool require_live) const noexcept {
+    const RadioInstance* fallback = nullptr;
+    for (auto& i : disc.instances) {
+        if (require_live && !bridge_.channel_handle_alive(i.radio_stream)) continue;
+        if (i.sound_name == kTargetSoundName) return &i;
+        if (!fallback) fallback = &i;
+    }
+    return fallback;
+}
+
+void ControlLoop::recover_stale_dsp() noexcept {
+    if (bridge_.current_handle_alive()) return;  // false alarm; channel still live
+
+    auto disc = discover_radio_instances(img_);
+    const RadioInstance* chosen = select_instance(disc, /*require_live=*/true);
+    if (!chosen) return;
+
+    void* fmod_system = resolve_fmod_system(img_, chosen->radio_stream);
+    if (!fmod_system) return;
+
+    bridge_.set_target(*chosen, fmod_system);
+    meta_.set_target(chosen->sample_props_body);
+    log::info(R"([ctrl] DSP stale; recovered onto RadioStreamFmod @0x{:X} SoundName="{}")",
+              reinterpret_cast<uintptr_t>(chosen->radio_stream), chosen->sound_name);
+    // Next tick's retarget_if_needed installs the DSP on chosen's fresh handle.
 }
 
 void ControlLoop::push_metadata() noexcept {
