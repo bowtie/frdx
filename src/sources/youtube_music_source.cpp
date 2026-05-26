@@ -315,6 +315,7 @@ void YouTubeMusicSource::start_pipe_locked() {
                                       L"-acodec pcm_s16le -ar 48000 -ac 2 pipe:1";
 
     std::wstring tl_cmd = quote(yt) + L" --skip-download --no-warnings --no-playlist "
+                                      L"--encoding UTF-8 "
                                       L"--print \"%(title)s\" "
                                       L"--print \"%(uploader)s\" "
                                       L"--print \"%(duration)s\" ";
