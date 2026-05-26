@@ -42,12 +42,17 @@ struct FMODFns {
     HandleResolver_t handle_resolver                 = nullptr;
     HandleUnlock_t handle_unlock                     = nullptr;
 
-    // handle_unlock and channel_control_set_mode are best-effort: install
-    // proceeds without them. Missing unlock leaks resolver slots; missing
-    // set_mode means the channel can die when the placeholder sample's
-    // natural duration elapses (Forza won't always allocate a new one).
+    // Game module base, kept so the bridge can re-scan for createDSP at
+    // install time if the LEA wasn't resident at DLL load.
+    std::byte* host_base = nullptr;
+
+    // system_create_dsp is lazy-resolved on first install. handle_unlock and
+    // channel_control_set_mode are best-effort: install proceeds without
+    // them. Missing unlock leaks resolver slots; missing set_mode means the
+    // channel can die when the placeholder sample's natural duration elapses
+    // (Forza won't always allocate a new one).
     bool ready() const noexcept {
-        return system_create_dsp && dsp_release && channel_control_add_dsp &&
+        return host_base && dsp_release && channel_control_add_dsp &&
                channel_control_rem_dsp && handle_resolver;
     }
 };

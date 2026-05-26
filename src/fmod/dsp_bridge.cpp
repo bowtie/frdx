@@ -84,14 +84,22 @@ struct FMOD_DSP_DESCRIPTION {
 };
 static_assert(sizeof(FMOD_DSP_DESCRIPTION) == 216);
 
+// The `System::createDSP` LEA is sometimes not yet resident in the host
+// process when our scanner runs at DllMain. Pulled out so install_dsp_locked
+// can retry against a fresh parse of the same module.
+FMODFns::SystemCreateDSP_t resolve_create_dsp(const PEImage& img) noexcept {
+    return reinterpret_cast<FMODFns::SystemCreateDSP_t>(
+        find_by_anchor(img, kAnchored[0].anchor, kAnchored[0].pattern));
+}
+
 } // namespace
 
 bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
     if (!img.valid()) return false;
 
-    out.system_create_dsp = reinterpret_cast<FMODFns::SystemCreateDSP_t>(
-        find_by_anchor(img, kAnchored[0].anchor, kAnchored[0].pattern));
-    out.dsp_release = reinterpret_cast<FMODFns::DSPRelease_t>(
+    out.host_base         = img.base;
+    out.system_create_dsp = resolve_create_dsp(img);
+    out.dsp_release       = reinterpret_cast<FMODFns::DSPRelease_t>(
         find_by_anchor(img, kAnchored[1].anchor, kAnchored[1].pattern));
     out.channel_control_add_dsp = reinterpret_cast<FMODFns::ChannelControlAddDSP_t>(
         find_by_anchor(img, kAnchored[2].anchor, kAnchored[2].pattern));
@@ -110,6 +118,10 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
               (void*)out.channel_control_add_dsp, (void*)out.channel_control_rem_dsp,
               (void*)out.channel_control_set_mode, (void*)out.handle_resolver,
               (void*)out.handle_unlock);
+
+    if (!out.system_create_dsp) {
+        log::info("[sigscan] System::createDSP not yet visible -- will retry at first install");
+    }
     if (!out.handle_unlock) {
         log::warn("[sigscan] Handle::unlock not resolved -- the resolver lock will leak; "
                   "expect the game to freeze a few seconds after DSP install");
@@ -169,6 +181,20 @@ void DSPBridge::release_current_dsp_locked() noexcept {
 
 void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     if (!fmod_system_ || !handle) return;
+
+    // Lazy-resolve createDSP. The first install runs long after FMOD is up
+    // (control loop discovery has to finish), so the LEA that DllMain-time
+    // sigscan sometimes misses is reliably present here.
+    if (!fns_.system_create_dsp && fns_.host_base) {
+        fns_.system_create_dsp = resolve_create_dsp(parse(fns_.host_base));
+        if (fns_.system_create_dsp) {
+            log::info("[dsp] resolved System::createDSP late at {}",
+                      (void*)fns_.system_create_dsp);
+        } else {
+            log::warn("[dsp] System::createDSP still unresolved -- install aborted");
+            return;
+        }
+    }
 
     // createDSP rejects a wrong plugin SDK stamp; we try all three FMOD
     // shipped across the 1.x line and keep the first that takes.
