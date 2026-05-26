@@ -26,7 +26,12 @@ An open-source radio mod for **Forza Horizon 6**. Adds a new in-game radio stati
 
 ### YouTube Music
 
-YouTube playback requires [`yt-dlp`](https://github.com/yt-dlp/yt-dlp/releases) and [`ffmpeg`](https://www.gyan.dev/ffmpeg/builds/) on disk. Either put them on your `PATH`, or set `yt_dlp_path` / `ffmpeg_path` in the dashboard under **Settings > YouTube Music**. Private/age-restricted content also needs a Netscape `cookies.txt` exported from your browser.
+YouTube playback requires three external tools on disk:
+
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp/releases) and [`ffmpeg`](https://www.gyan.dev/ffmpeg/builds/) either on your `PATH`, or pointed at explicitly in the dashboard under **Settings > YouTube Music**.
+- [`deno`](https://deno.com/) on `PATH`. Install with `winget install DenoLand.Deno` (or `irm https://deno.land/install.ps1 | iex`).
+
+Private/age-restricted content also needs a Netscape `cookies.txt` exported from your browser.
 
 ## Uninstall
 

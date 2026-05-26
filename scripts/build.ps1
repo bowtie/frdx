@@ -121,11 +121,16 @@ From there:
     volume controls are all in the UI.
 
   * YouTube Music -- paste a video URL, a playlist, or a YT Music
-    link. This path needs `yt-dlp` and `ffmpeg` reachable on disk;
-    either put them on PATH, or point the dashboard at their full
-    paths under Settings > YouTube Music. For age-gated or private
-    content, export your browser's cookies as a Netscape cookies.txt
-    and load that from the same panel.
+    link. This path needs three tools reachable on disk:
+
+      - yt-dlp and ffmpeg: either on PATH, or pointed at explicitly
+        from Settings > YouTube Music in the dashboard.
+      - Deno: a JavaScript runtime that yt-dlp now leans on to solve
+        YouTube's player-side signature challenges. Install it from
+        https://deno.com/ (or `winget install DenoLand.Deno`).
+
+    For age-gated or private content, export your browser's cookies
+    as a Netscape cookies.txt and load that from the same panel.
 
 Edits save the moment you change them -- no need to bounce the game.
 
