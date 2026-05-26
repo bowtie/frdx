@@ -1,0 +1,21 @@
+{
+  "extends": ["stylelint-config-standard"],
+  "ignoreFiles": ["build/**", "dist/**", "third_party/**", "node_modules/**"],
+  "rules": {
+    "no-descending-specificity": null,
+    "alpha-value-notation": "number",
+    "color-function-notation": "legacy",
+    "selector-class-pattern": null,
+    "custom-property-pattern": null,
+    "custom-property-empty-line-before": null,
+    "declaration-block-single-line-max-declarations": 6,
+    "rule-empty-line-before": ["always", { "except": ["first-nested"], "ignore": ["after-comment"] }],
+    "shorthand-property-no-redundant-values": null,
+    "value-keyword-case": ["lower", { "ignoreKeywords": ["dummy"] }],
+    "media-feature-range-notation": "prefix",
+    "property-no-vendor-prefix": null,
+    "selector-no-vendor-prefix": null,
+    "value-no-vendor-prefix": null,
+    "at-rule-no-vendor-prefix": null
+  }
+}

@@ -1,0 +1,71 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+
+AccessModifierOffset: -4
+NamespaceIndentation: None
+FixNamespaceComments: true
+ShortNamespaceLines: 0
+
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: false
+  AlignCompound: true
+  PadOperators: true
+AlignConsecutiveDeclarations:
+  Enabled: false
+AlignTrailingComments: true
+AlignEscapedNewlines: Left
+AlignOperands: AlignAfterOperator
+
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: true
+
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+
+Cpp11BracedListStyle: true
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+
+IncludeBlocks: Preserve
+IndentCaseLabels: true
+IndentPPDirectives: None
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+SortIncludes: Never
+SortUsingDeclarations: false
+
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 1
+SpacesInAngles: Never
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+Standard: c++20
