@@ -312,8 +312,10 @@ struct HttpServer::Impl {
                      }
                      try {
                          auto url = json::parse(q.body).at("url").get<std::string>();
+                         const bool was_active = (mgr.active() == yt);
                          yt->set_target(std::move(url));
                          yt->stop();
+                         if (was_active) mgr.ring().drain();
                          yt->play();
                          mgr.switch_to("youtube_music");
                          ok(r);
