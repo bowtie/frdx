@@ -1,0 +1,213 @@
+[
+  {
+    "schema_version": "1.0",
+    "id": "doujinstyle",
+    "name": "Doujinstyle",
+    "description": "radio_doujinstyle_desc",
+    "icon": "fa-solid fa-radio",
+    "streams": [
+      {
+        "id": "main",
+        "name": "radio_live_stream",
+        "url": "https://streams.radio.co/s5ff57669c/listen",
+        "icon": "fa-solid fa-play"
+      }
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://public.radio.co/api/v2/s5ff57669c/track/current",
+      "poll_interval_secs": 15,
+      "mapping": {
+        "title": "data.track_title",
+        "artist": "data.track_artist",
+        "artwork_url": "data.artwork_urls.large"
+      }
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "id": "asiadreamradio",
+    "name": "Asia DREAM Radio",
+    "description": "radio_asiadreamradio_desc",
+    "icon": "fa-solid fa-radio",
+    "streams": [
+      {
+        "id": "japan_hits",
+        "name": "Japan Hits",
+        "url": "https://quincy.torontocast.com:2020/;?type=http",
+        "icon": "fa-solid fa-fire"
+      },
+      {
+        "id": "natsukashii",
+        "name": "Natsukashii",
+        "url": "https://quincy.torontocast.com:2070/;?type=http",
+        "icon": "fa-solid fa-clock-rotate-left"
+      },
+      {
+        "id": "jpop_kawaii",
+        "name": "J-Pop Kawaii",
+        "url": "https://kathy.torontocast.com:3060/;?type=http",
+        "icon": "fa-solid fa-heart"
+      },
+      {
+        "id": "jpop_power",
+        "name": "J-Pop Power",
+        "url": "https://kathy.torontocast.com:3560/;?type=http",
+        "icon": "fa-solid fa-bolt"
+      },
+      {
+        "id": "jazz_sakura",
+        "name": "Jazz Sakura",
+        "url": "https://kathy.torontocast.com:3330/;?type=http",
+        "icon": "fa-solid fa-leaf"
+      },
+      {
+        "id": "jrock",
+        "name": "J-Rock",
+        "url": "https://kathy.torontocast.com:3340/;?type=http",
+        "icon": "fa-solid fa-guitar"
+      },
+      {
+        "id": "jclub_hiphop",
+        "name": "J-Club / Hip Hop",
+        "url": "https://kathy.torontocast.com:3350/;?type=http",
+        "icon": "fa-solid fa-compact-disc"
+      },
+      {
+        "id": "bandstand_jazz",
+        "name": "Bandstand Jazz",
+        "url": "https://cast1.torontocast.com/bandstand",
+        "icon": "fa-solid fa-music"
+      }
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
+      "stream_url_map": {
+        "japan_hits": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
+        "natsukashii": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=3",
+        "jpop_kawaii": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=2",
+        "jpop_power": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=1",
+        "jazz_sakura": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=1",
+        "jrock": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=4",
+        "jclub_hiphop": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=5",
+        "bandstand_jazz": "https://cast1.torontocast.com:2050/api/v2/history/?limit=1&offset=0&server=1"
+      },
+      "poll_interval_secs": 20,
+      "mapping": {
+        "title": "results.0.title",
+        "artist": "results.0.author",
+        "artwork_url": "results.0.img_large_url"
+      }
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "id": "j1",
+    "name": "J1 Tokyo",
+    "description": "radio_j1_desc",
+    "icon": "fa-solid fa-radio",
+    "streams": [
+      {
+        "id": "J1HITS",
+        "name": "J1 HITS",
+        "url": "https://jenny.torontocast.com:2000/stream/J1HITS",
+        "icon": "fa-solid fa-fire"
+      },
+      {
+        "id": "J1GOLD",
+        "name": "J1 GOLD",
+        "url": "https://jenny.torontocast.com:2000/stream/J1GOLD",
+        "icon": "fa-solid fa-compact-disc"
+      }
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://json.j1fm.tokyo/whatweplay.json",
+      "poll_interval_secs": 20,
+      "entry_selector": {
+        "array_path": "station",
+        "match_field": "name",
+        "match_value_from": "stream_name"
+      },
+      "stream_name_map": {
+        "J1HITS": "J1 HITS",
+        "J1GOLD": "J1 GOLD"
+      },
+      "mapping": {
+        "title": "title",
+        "artist": "artist",
+        "artwork_url": "image_url"
+      }
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "id": "listen_moe",
+    "name": "LISTEN.moe",
+    "description": "radio_listen_moe_desc",
+    "icon": "fa-solid fa-radio",
+    "streams": [
+      {
+        "id": "jpop",
+        "name": "J-Pop",
+        "url": "https://listen.moe/stream",
+        "icon": "fa-solid fa-music"
+      },
+      {
+        "id": "kpop",
+        "name": "K-Pop",
+        "url": "https://listen.moe/kpop/stream",
+        "icon": "fa-solid fa-compact-disc"
+      }
+    ],
+    "metadata": {
+      "type": "websocket",
+      "url": "wss://listen.moe/gateway_v2",
+      "stream_url_map": {
+        "kpop": "wss://listen.moe/kpop/gateway_v2"
+      },
+      "message_filter": {
+        "op_field": "op",
+        "op_value": 1,
+        "type_field": "t",
+        "type_value": "TRACK_UPDATE",
+        "data_field": "d"
+      },
+      "heartbeat": {
+        "message": "{\"op\": 9}",
+        "interval_field": "d.heartbeat",
+        "default_interval_ms": 45000
+      },
+      "mapping": {
+        "title": "song.title",
+        "artist": "song.artists",
+        "artist_array_field": "name",
+        "artist_separator": ", ",
+        "artwork_url": "song.albums.0.image",
+        "artwork_url_template": "https://cdn.listen.moe/covers/{value}"
+      }
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "id": "vocaloid",
+    "name": "Vocaloid Radio",
+    "description": "radio_vocaloid_desc",
+    "icon": "fa-solid fa-radio",
+    "streams": [
+      {
+        "id": "main",
+        "name": "radio_live_stream",
+        "url": "https://vocaloid.radioca.st/stream",
+        "icon": "fa-solid fa-play"
+      }
+    ],
+    "metadata": {
+      "type": "static",
+      "title": "Vocaloid Hits from Japan. We play it all!",
+      "artist": "Vocaloid-Radio",
+      "cover_url": "https://cdn-radiotime-logos.tunein.com/s221579q.png"
+    }
+  }
+]

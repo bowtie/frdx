@@ -7,6 +7,7 @@
 #   dist\version.dll            the proxy DLL (drops next to forzahorizon6.exe)
 #   dist\fh6-radio\ui\          dashboard (mounted at http://localhost:<port>)
 #   dist\fh6-radio\config.toml  seeded from config.example.toml
+#   dist\fh6-radio\stations.json seeded from stations.example.json
 
 $ErrorActionPreference = "Stop"
 $root  = Split-Path -Parent $PSScriptRoot
@@ -64,6 +65,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dist "fh6-radio") | Out-Nu
 Copy-Item (Join-Path $build "Release\version.dll") $dist
 Copy-Item -Recurse (Join-Path $root "ui\dist") (Join-Path $dist "fh6-radio\ui")
 Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "fh6-radio\config.toml")
+Copy-Item (Join-Path $root "stations.example.json") (Join-Path $dist "fh6-radio\stations.json")
 
 $readme = @'
 FH6 Universal Radio

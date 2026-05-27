@@ -34,8 +34,7 @@ add_library(version SHARED
     src/fmod/dsp_control_loop.cpp
     src/fmod/metadata_injector.cpp
     src/http/http_server.cpp
-    src/sources/local_file_source.cpp
-    src/sources/youtube_music_source.cpp
+    src/sources/shoutcast_source.cpp
 )
 
 target_include_directories(version PRIVATE
@@ -43,10 +42,9 @@ target_include_directories(version PRIVATE
     third_party/cpp-httplib
     third_party/nlohmann
     third_party/toml11
-    third_party/miniaudio
 )
 
-target_link_libraries(version PRIVATE ws2_32 bcrypt psapi)
+target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version

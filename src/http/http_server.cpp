@@ -3,8 +3,7 @@
 #include "fh6/config_store.hpp"
 #include "fh6/fmod/dsp_bridge.hpp"
 #include "fh6/log.hpp"
-#include "fh6/sources/local_file_source.hpp"
-#include "fh6/sources/youtube_music_source.hpp"
+#include "fh6/sources/shoutcast_source.hpp"
 
 #define CPPHTTPLIB_NO_EXCEPTIONS
 #include <httplib.h>
@@ -61,7 +60,7 @@ json track_to_json(const TrackInfo& t) {
 }
 json source_to_json(IAudioSource* s) {
     auto c = s->capabilities();
-    json j{
+    return json{
         {"name", std::string{s->name()}},
         {"display_name", std::string{s->display_name()}},
         {"playback_state", state_string(s->playback_state())},
@@ -75,9 +74,6 @@ json source_to_json(IAudioSource* s) {
          }},
         {"details", json::object()},
     };
-    if (auto* lf = dynamic_cast<sources::LocalFileSource*>(s))
-        j["details"]["track_count"] = lf->track_count();
-    return j;
 }
 
 std::string path_s(const std::filesystem::path& p) {
@@ -93,21 +89,12 @@ json config_to_json(const Config& c) {
              {"default_source", c.general.default_source},
              {"fallback_source", c.general.fallback_source},
          }},
-        {"local_files",
+        {"shoutcast",
          json{
-             {"enabled", c.local_files.enabled},
-             {"music_dir", path_s(c.local_files.music_dir)},
-             {"recursive", c.local_files.recursive},
-             {"shuffle", c.local_files.shuffle},
-             {"supported_formats", c.local_files.supported_formats},
-         }},
-        {"youtube_music",
-         json{
-             {"enabled", c.youtube_music.enabled},
-             {"cookies_path", path_s(c.youtube_music.cookies_path)},
-             {"yt_dlp_path", path_s(c.youtube_music.yt_dlp_path)},
-             {"ffmpeg_path", path_s(c.youtube_music.ffmpeg_path)},
-             {"default_playlist", c.youtube_music.default_playlist},
+             {"enabled", c.shoutcast.enabled},
+             {"default_url", c.shoutcast.default_url},
+             {"ffmpeg_path", path_s(c.shoutcast.ffmpeg_path)},
+             {"presets", c.shoutcast.presets},
          }},
         {"audio",
          json{
@@ -138,21 +125,12 @@ void apply_patch(Config& c, const json& j) {
         c.general.default_source  = pull(*it, "default_source", c.general.default_source);
         c.general.fallback_source = pull(*it, "fallback_source", c.general.fallback_source);
     }
-    if (auto it = j.find("local_files"); it != j.end()) {
-        c.local_files.enabled   = pull(*it, "enabled", c.local_files.enabled);
-        c.local_files.music_dir = pull_path(*it, "music_dir", c.local_files.music_dir);
-        c.local_files.recursive = pull(*it, "recursive", c.local_files.recursive);
-        c.local_files.shuffle   = pull(*it, "shuffle", c.local_files.shuffle);
-        if (auto fmts = it->find("supported_formats"); fmts != it->end() && fmts->is_array())
-            c.local_files.supported_formats = fmts->get<std::vector<std::string>>();
-    }
-    if (auto it = j.find("youtube_music"); it != j.end()) {
-        c.youtube_music.enabled      = pull(*it, "enabled", c.youtube_music.enabled);
-        c.youtube_music.cookies_path = pull_path(*it, "cookies_path", c.youtube_music.cookies_path);
-        c.youtube_music.yt_dlp_path  = pull_path(*it, "yt_dlp_path", c.youtube_music.yt_dlp_path);
-        c.youtube_music.ffmpeg_path  = pull_path(*it, "ffmpeg_path", c.youtube_music.ffmpeg_path);
-        c.youtube_music.default_playlist =
-            pull(*it, "default_playlist", c.youtube_music.default_playlist);
+    if (auto it = j.find("shoutcast"); it != j.end()) {
+        c.shoutcast.enabled      = pull(*it, "enabled", c.shoutcast.enabled);
+        c.shoutcast.default_url  = pull(*it, "default_url", c.shoutcast.default_url);
+        c.shoutcast.ffmpeg_path  = pull_path(*it, "ffmpeg_path", c.shoutcast.ffmpeg_path);
+        if (auto p = it->find("presets"); p != it->end() && p->is_array())
+            c.shoutcast.presets = p->get<std::vector<std::string>>();
     }
     if (auto it = j.find("audio"); it != j.end()) {
         c.audio.output_gain = pull(*it, "output_gain", c.audio.output_gain);
@@ -286,8 +264,6 @@ struct HttpServer::Impl {
                          s->play();
                      } else if (act == "pause") {
                          s->pause();
-                         // Track-change actions drain the ring; otherwise FMOD keeps
-                         // consuming up to ~20 s of stale PCM before the new track is heard.
                      } else if (act == "stop") {
                          s->stop();
                          if (is_active) mgr.ring().drain();
@@ -301,67 +277,98 @@ struct HttpServer::Impl {
                      ok(r);
                  });
 
-        // Source-specific runtime actions
-        svr.Post("/api/source/youtube_music/cast",
+        // Shoutcast-specific runtime actions
+        svr.Post("/api/source/shoutcast/cast",
                  [this](const httplib::Request& q, httplib::Response& r) {
                      cors(r);
-                     auto* yt = find_typed<sources::YouTubeMusicSource>("youtube_music");
-                     if (!yt) {
-                         fail(r, 404, "youtube_music not registered");
+                     auto* sc = find_typed<sources::ShoutcastSource>("shoutcast");
+                     if (!sc) {
+                         fail(r, 404, "shoutcast not registered");
                          return;
                      }
                      try {
                          auto url = json::parse(q.body).at("url").get<std::string>();
-                         const bool was_active = (mgr.active() == yt);
-                         yt->set_target(std::move(url));
-                         yt->stop();
+                         const bool was_active = (mgr.active() == sc);
+                         sc->set_target(std::move(url));
+                         sc->stop();
                          if (was_active) mgr.ring().drain();
-                         yt->play();
-                         mgr.switch_to("youtube_music");
+                         sc->play();
+                         mgr.switch_to("shoutcast");
                          ok(r);
                      } catch (...) {
                          fail(r, 400, "bad body");
                      }
                  });
-        svr.Post("/api/source/local_files/rescan", [this](const httplib::Request& q,
-                                                          httplib::Response& r) {
-            cors(r);
-            auto* lf = find_typed<sources::LocalFileSource>("local_files");
-            if (!lf) {
-                fail(r, 404, "local_files not registered");
-                return;
-            }
-            try {
-                auto j = q.body.empty() ? json::object() : json::parse(q.body);
-                std::filesystem::path dir;
-                bool recursive = true;
-                if (j.contains("music_dir")) dir = j.at("music_dir").get<std::string>();
-                if (j.contains("recursive")) recursive = j.at("recursive").get<bool>();
-                if (!dir.empty()) {
-                    lf->set_directory(dir, recursive);
-                    store.patch([&](Config& c) {
-                        c.local_files.music_dir = dir;
-                        c.local_files.recursive = recursive;
-                    });
-                } else {
-                    auto snap = store.snapshot();
-                    lf->set_directory(snap.local_files.music_dir, snap.local_files.recursive);
-                }
-                ok(r, json{{"track_count", lf->playlist_snapshot().size()}});
-            } catch (...) {
-                fail(r, 400, "bad body");
-            }
-        });
-        svr.Get("/api/source/local_files/playlist",
+        svr.Get("/api/source/shoutcast/presets",
                 [this](const httplib::Request&, httplib::Response& r) {
                     cors(r);
-                    auto* lf = find_typed<sources::LocalFileSource>("local_files");
-                    if (!lf) {
-                        fail(r, 404, "local_files not registered");
+                    auto* sc = find_typed<sources::ShoutcastSource>("shoutcast");
+                    if (!sc) {
+                        fail(r, 404, "shoutcast not registered");
                         return;
                     }
-                    ok(r, json{{"tracks", lf->playlist_snapshot()}});
+                    ok(r, json{{"presets", store.snapshot().shoutcast.presets}});
                 });
+
+        // Station preset catalog (stations.json)
+        svr.Get("/api/source/shoutcast/stations",
+                [this](const httplib::Request&, httplib::Response& r) {
+                    cors(r);
+                    auto* sc = find_typed<sources::ShoutcastSource>("shoutcast");
+                    if (!sc) {
+                        fail(r, 404, "shoutcast not registered");
+                        return;
+                    }
+                    auto stations_json = json::array();
+                    for (const auto& sp : sc->stations()) {
+                        auto streams_json = json::array();
+                        for (const auto& ss : sp.streams) {
+                            streams_json.push_back(json{
+                                {"id", ss.id},
+                                {"name", ss.name},
+                                {"url", ss.url},
+                                {"icon", ss.icon},
+                            });
+                        }
+                        auto sp_json = json{
+                            {"id", sp.id},
+                            {"name", sp.name},
+                            {"description", sp.description},
+                            {"icon", sp.icon},
+                            {"streams", std::move(streams_json)},
+                        };
+                        if (sp.metadata.type == "rest") {
+                            sp_json["metadata"] = json{
+                                {"type", "rest"},
+                                {"poll_interval_secs", sp.metadata.poll_interval_secs},
+                            };
+                        }
+                        stations_json.push_back(std::move(sp_json));
+                    }
+                    ok(r, json{{"stations", std::move(stations_json)}});
+                });
+
+        svr.Post("/api/source/shoutcast/station/select",
+                 [this](const httplib::Request& q, httplib::Response& r) {
+                     cors(r);
+                     auto* sc = find_typed<sources::ShoutcastSource>("shoutcast");
+                     if (!sc) {
+                         fail(r, 404, "shoutcast not registered");
+                         return;
+                     }
+                     try {
+                         auto body      = json::parse(q.body);
+                         auto station   = body.at("station_id").get<std::string>();
+                         auto stream_id = body.value("stream_id", "");
+                         const bool was_active = (mgr.active() == sc);
+                         sc->select_station(station, stream_id);
+                         if (was_active) mgr.ring().drain();
+                         mgr.switch_to("shoutcast");
+                         ok(r);
+                     } catch (...) {
+                         fail(r, 400, "bad body");
+                     }
+                 });
 
         // Config editing
         svr.Get("/api/config", [this](const httplib::Request&, httplib::Response& r) {

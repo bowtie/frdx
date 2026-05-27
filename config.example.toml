@@ -3,27 +3,19 @@
 # if you prefer hand edits. Windows paths should use TOML literal strings
 # (single quotes) so backslashes pass through verbatim:
 #
-#   music_dir = 'C:\Users\you\Music'
+#   ffmpeg_path = 'C:\tools\ffmpeg.exe'
 
 [general]
 port              = 8420
 ring_buffer_mb    = 4
-default_source    = "local_files"     # local_files | youtube_music
-fallback_source   = "local_files"
+default_source    = "shoutcast"
+fallback_source   = "shoutcast"
 
-[local_files]
+[shoutcast]
 enabled            = true
-music_dir          = ''                # blank => set from the dashboard
-recursive          = true
-shuffle            = true
-supported_formats  = ["mp3", "flac", "wav", "ogg", "m4a", "opus"]
-
-[youtube_music]
-enabled            = false
-cookies_path       = ''                # optional Netscape cookies.txt
-yt_dlp_path        = ''                # blank = `yt-dlp` on PATH
-ffmpeg_path        = ''                # blank = `ffmpeg`  on PATH
-default_playlist   = ""
+default_url        = ""                          # auto-connect on startup
+ffmpeg_path        = ""                          # blank = `ffmpeg` on PATH
+presets            = []                          # e.g. ["http://server:8000/stream"]
 
 [audio]
 output_gain = 1.0

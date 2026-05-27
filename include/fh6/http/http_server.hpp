@@ -23,15 +23,16 @@ namespace fh6::http {
 //   POST /api/source/switch               body {"source":"name"}
 //   POST /api/source/<name>/{play,pause,stop,next,previous}
 //
-//   POST /api/source/youtube_music/cast   body {"url":"..."}
-//   POST /api/source/local_files/rescan   body {"music_dir":"...","recursive":bool}
-//   GET  /api/source/local_files/playlist
+//   POST /api/source/shoutcast/cast       body {"url":"..."}
+//   GET  /api/source/shoutcast/presets
+//   GET  /api/source/shoutcast/stations   station catalog (stations.json)
+//   POST /api/source/shoutcast/station/select  body {"station_id":"...","stream_id":"..."}
 //
 //   GET  /api/config                      full config.toml as JSON
 //   PUT  /api/config                      deep-patch config; writes file + notifies
 //   POST /api/config/reload               re-read config.toml from disk
 //
-//   POST /api/options                     fast-path knobs: output_gain, dsp_mode
+//   POST /api/options                     fast-path knobs: output_gain
 //
 //   GET  /                                bundled dashboard (vanilla SPA)
 class HttpServer {

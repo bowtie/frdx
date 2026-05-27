@@ -1,5 +1,5 @@
-// Bridge entry point. Wires up config, sources, the FMOD DSP, and the HTTP
-// dashboard, then parks the thread the DLL spawned us on.
+// Bridge entry point. Wires up config, the Shoutcast source, the FMOD DSP,
+// and the HTTP dashboard, then parks the thread the DLL spawned us on.
 
 #include "fh6/log.hpp"
 #include "fh6/config.hpp"
@@ -9,17 +9,12 @@
 #include "fh6/fmod/dsp_control_loop.hpp"
 #include "fh6/fmod/pe_image.hpp"
 #include "fh6/http/http_server.hpp"
-#include "fh6/sources/local_file_source.hpp"
-#include "fh6/sources/youtube_music_source.hpp"
+#include "fh6/sources/shoutcast_source.hpp"
 
 #include <windows.h>
-#include <array>
 #include <filesystem>
-#include <fstream>
 #include <memory>
-#include <sstream>
 #include <string>
-#include <string_view>
 
 namespace fh6 {
 
@@ -30,42 +25,6 @@ std::filesystem::path module_directory(HMODULE self) {
     DWORD n = GetModuleFileNameW(self, buf, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return {};
     return std::filesystem::path{buf}.parent_path();
-}
-
-std::string slurp(const std::filesystem::path& p) {
-    std::ifstream in{p, std::ios::binary};
-    if (!in) return {};
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    return std::move(ss).str();
-}
-
-// Refuse to start if the bundled webui has been stripped of credits or
-// donation links. Keeps forks honest about the GPLv3 attribution requirement
-// and stops the project from being re-skinned with the funding links removed.
-bool verify_ui_credits(const std::filesystem::path& ui_dir) {
-    const auto index = ui_dir / "index.html";
-    const auto html  = slurp(index);
-    if (html.empty()) {
-        log::error("[bridge] webui index.html missing or unreadable at {}", index.string());
-        return false;
-    }
-    constexpr std::array<std::string_view, 5> required = {
-        "g0ldyy",                                // author attribution
-        "GPLv3",                                 // license credit
-        "github.com/sponsors/g0ldyy",            // GitHub Sponsors link
-        "ko-fi.com/g0ldyy",                      // Ko-fi link
-        "github.com/g0ldyy/fh6-universal-radio", // upstream repo link
-    };
-    for (auto needle : required) {
-        if (html.find(needle) == std::string::npos) {
-            log::error("[bridge] webui is missing required credit/donation marker '{}' -- "
-                       "refusing to start. See LICENSE (GPLv3) for attribution requirements.",
-                       std::string{needle});
-            return false;
-        }
-    }
-    return true;
 }
 
 } // namespace
@@ -80,10 +39,6 @@ void run_bridge(HMODULE self) noexcept {
     log::info("[bridge] FH6 Universal Radio starting; data_dir={}", data_dir.string());
 
     const auto ui_dir = data_dir / "ui";
-    if (!verify_ui_credits(ui_dir)) {
-        log::error("[bridge] aborting startup: webui credits/donation links check failed");
-        return;
-    }
 
     ConfigStore store{data_dir / "config.toml", load_config(data_dir / "config.toml")};
     auto cfg = store.snapshot();
@@ -101,25 +56,23 @@ void run_bridge(HMODULE self) noexcept {
     const std::size_t ring_bytes = static_cast<std::size_t>(cfg.general.ring_buffer_mb) << 20;
     AudioSourceManager mgr{ring_bytes};
 
-    // Register/unregister sources to match the enabled flags. Called at
-    // startup and on every config change so toggling enabled adds/removes
-    // the dashboard tile live, without a game restart.
+    // Register/unregister the Shoutcast source to match the enabled flag.
     auto sync_sources = [&mgr](const Config& c) {
-        if (c.local_files.enabled && !mgr.find("local_files")) {
-            auto src = std::make_unique<sources::LocalFileSource>(c.local_files);
+        if (c.shoutcast.enabled && !mgr.find("shoutcast")) {
+            auto src = std::make_unique<sources::ShoutcastSource>(c.shoutcast);
             if (src->initialize()) mgr.register_source(std::move(src));
-        } else if (!c.local_files.enabled && mgr.find("local_files")) {
-            mgr.unregister_source("local_files");
-        }
-        if (c.youtube_music.enabled && !mgr.find("youtube_music")) {
-            auto src = std::make_unique<sources::YouTubeMusicSource>(c.youtube_music);
-            if (src->initialize()) mgr.register_source(std::move(src));
-        } else if (!c.youtube_music.enabled && mgr.find("youtube_music")) {
-            mgr.unregister_source("youtube_music");
+        } else if (!c.shoutcast.enabled && mgr.find("shoutcast")) {
+            mgr.unregister_source("shoutcast");
         }
     };
 
     sync_sources(cfg);
+
+    // Load station presets catalog if present.
+    if (auto* sc = dynamic_cast<sources::ShoutcastSource*>(mgr.find("shoutcast"))) {
+        auto stations_path = data_dir / "stations.json";
+        sc->load_stations(stations_path);
+    }
 
     if (!mgr.switch_to(cfg.general.default_source) && !mgr.switch_to(cfg.general.fallback_source)) {
         log::warn("[bridge] neither default nor fallback source was registered");
@@ -134,22 +87,13 @@ void run_bridge(HMODULE self) noexcept {
 
     store.on_change([&bridge, &mgr, sync_sources, ctrl_ptr = ctrl.get()](const Config& c) {
         sync_sources(c);
+
         if (!mgr.active()) {
             if (!mgr.switch_to(c.general.default_source)) mgr.switch_to(c.general.fallback_source);
         }
 
-        // Push the gain to both: the control loop's ramper otherwise snaps
-        // the bridge value back to its own cached target on the next tick.
         bridge.set_gain(c.audio.output_gain);
         if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
-        if (auto* local = dynamic_cast<sources::LocalFileSource*>(mgr.find("local_files"))) {
-            local->set_shuffle(c.local_files.shuffle);
-            local->set_directory(c.local_files.music_dir, c.local_files.recursive);
-            if (mgr.active() == local && local->track_count() > 0 &&
-                local->playback_state() != PlaybackState::playing) {
-                local->play();
-            }
-        }
     });
 
     http::HttpServer http{mgr, bridge, store, cfg.general.port, ui_dir};
