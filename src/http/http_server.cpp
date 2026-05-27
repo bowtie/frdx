@@ -137,6 +137,7 @@ void apply_patch(Config& c, const json& j) {
     }
 }
 
+
 void cors(httplib::Response& res) {
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");

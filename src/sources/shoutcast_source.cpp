@@ -1,5 +1,6 @@
 #include "fh6/sources/shoutcast_source.hpp"
 #include "fh6/log.hpp"
+#include "fh6/subprocess.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -24,43 +25,12 @@ namespace {
 // PCM contract written by ffmpeg: 48000 Hz * 2 ch * 2 bytes.
 constexpr std::uint64_t kPcmBytesPerSec = 48000ull * 2ull * 2ull;
 
-// CreateProcess hands one string to the child via GetCommandLineW, so any
-// argument with whitespace must be double-quoted.
-std::wstring quote(const std::wstring& s) {
-    if (s.empty()) return L"\"\"";
-    if (s.find_first_of(L" \t\"") == std::wstring::npos) return s;
-    std::wstring out{L"\""};
-    for (auto c : s) {
-        if (c == L'"') out += L'\\';
-        out += c;
-    }
-    out += L'"';
-    return out;
-}
-
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-    std::wstring out(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n);
-    return out;
-}
-
-std::string narrow(std::wstring_view ws) {
-    if (ws.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), nullptr, 0,
-                                nullptr, nullptr);
-    std::string out(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), out.data(), n, nullptr, nullptr);
-    return out;
-}
-
 // Synchronous WinHTTP GET for one-shot metadata polling.  Returns the
 // response body as a string, or empty on any failure (timeout, non-200, etc.).
 // Uses system WinHTTP rather than cpp-httplib to avoid static-linking issues
 // in the game mod DLL context.
 std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
-    std::wstring wurl = widen(url);
+    std::wstring wurl = fh6::subprocess::widen(url);
 
     URL_COMPONENTS uc{};
     uc.dwStructSize = sizeof(uc);
@@ -156,99 +126,6 @@ std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     return body;
-}
-
-// NUL substitute for stdin since we're not piping anything in.
-HANDLE open_nul(DWORD access) {
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE h = CreateFileW(L"NUL", access, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
-                           0, nullptr);
-    return h == INVALID_HANDLE_VALUE ? nullptr : h;
-}
-
-std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from_config) {
-    wchar_t resolved[MAX_PATH] = {};
-    DWORD got = SearchPathW(nullptr, bin.c_str(), L".exe", MAX_PATH, resolved, nullptr);
-    std::string where = got ? narrow({resolved, got})
-                            : (from_config ? "(configured path not found on disk)"
-                                           : "(not found on PATH)");
-
-    std::string sys_msg;
-    LPWSTR raw = nullptr;
-    DWORD len = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                                   FORMAT_MESSAGE_IGNORE_INSERTS,
-                               nullptr, ec, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                               (LPWSTR)&raw, 0, nullptr);
-    if (raw && len) {
-        while (len && (raw[len - 1] == L'\r' || raw[len - 1] == L'\n' || raw[len - 1] == L' '))
-            --len;
-        sys_msg = narrow({raw, len});
-    }
-    if (raw) LocalFree(raw);
-
-    const char* hint = "";
-    switch (ec) {
-        case ERROR_FILE_NOT_FOUND:
-        case ERROR_PATH_NOT_FOUND:
-            hint = from_config
-                       ? " -- the path in [shoutcast].ffmpeg_path does not exist. Fix the path "
-                         "or clear it to fall back to PATH lookup."
-                       : " -- ffmpeg is not on your PATH. Install it or set "
-                         "[shoutcast].ffmpeg_path in config.toml.";
-            break;
-        case ERROR_ACCESS_DENIED:
-            hint = " -- likely blocked or quarantined by antivirus. Whitelist the binary.";
-            break;
-        case ERROR_BAD_EXE_FORMAT:
-            hint = " -- the file isn't a valid Win64 executable.";
-            break;
-        default:
-            break;
-    }
-
-    return std::format("ec={} ({}) tried={} resolved={}{}", ec,
-                       sys_msg.empty() ? "unknown" : sys_msg, narrow(bin), where, hint);
-}
-
-// Job Object with KILL_ON_JOB_CLOSE so closing the last handle kills ffmpeg
-// and any children.
-HANDLE create_kill_on_close_job() {
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (!job) return nullptr;
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
-        CloseHandle(job);
-        return nullptr;
-    }
-    return job;
-}
-
-HANDLE spawn_in_job(HANDLE job, const std::wstring& cmd, HANDLE stdin_h, HANDLE stdout_h,
-                    HANDLE stderr_h) {
-    STARTUPINFOW si{};
-    si.cb         = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdInput  = stdin_h;
-    si.hStdOutput = stdout_h;
-    si.hStdError  = stderr_h;
-
-    PROCESS_INFORMATION pi{};
-    std::wstring mut = cmd;
-    if (!CreateProcessW(nullptr, mut.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi))
-        return nullptr;
-    if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
-        const DWORD assign_ec = GetLastError();
-        TerminateProcess(pi.hProcess, 1);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        SetLastError(assign_ec);
-        return nullptr;
-    }
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-    return pi.hProcess;
 }
 
 // Resolve a dot-notation JSON path (e.g. "data.track_title") to a value in a nlohmann::json tree.
@@ -751,7 +628,7 @@ void ShoutcastSource::start_pipe_locked() {
     if (target_url_.empty()) return;
 
     auto pipe = std::make_unique<Pipe>();
-    pipe->job = create_kill_on_close_job();
+    pipe->job = fh6::subprocess::create_kill_on_close_job();
     if (!pipe->job) {
         log::warn("[shoutcast] CreateJobObject failed ({})", GetLastError());
         return;
@@ -775,20 +652,20 @@ void ShoutcastSource::start_pipe_locked() {
     if (!CreatePipe(&err_r, &err_w, &sa, 1 << 16)) { bail(); return; }
     SetHandleInformation(err_r, 0, HANDLE_FLAG_INHERIT);
 
-    HANDLE nul_in = open_nul(GENERIC_READ);
+    HANDLE nul_in = fh6::subprocess::open_nul(GENERIC_READ);
 
     const auto ff = cfg_.ffmpeg_path.empty() ? L"ffmpeg" : cfg_.ffmpeg_path.wstring();
 
-    std::wstring ff_cmd = quote(ff) +
+    std::wstring ff_cmd = fh6::subprocess::quote(ff) +
                           L" -loglevel error"
                           L" -icy 1"
                           L" -reconnect 1"
                           L" -reconnect_streamed 1"
                           L" -reconnect_delay_max 5"
-                          L" -i " + quote(widen(target_url_)) +
+                          L" -i " + fh6::subprocess::quote(fh6::subprocess::widen(target_url_)) +
                           L" -f s16le -acodec pcm_s16le -ar 48000 -ac 2 pipe:1";
 
-    pipe->proc_ff = spawn_in_job(pipe->job, ff_cmd, nul_in, ff_out_w, err_w);
+    pipe->proc_ff = fh6::subprocess::spawn_in_job(pipe->job, ff_cmd, nul_in, ff_out_w, err_w);
     const DWORD ec_ff = pipe->proc_ff ? 0u : GetLastError();
     CloseHandle(ff_out_w);
     CloseHandle(err_w);
@@ -798,7 +675,7 @@ void ShoutcastSource::start_pipe_locked() {
 
     if (!pipe->proc_ff) {
         log::warn("[shoutcast] failed to launch ffmpeg -- {}",
-                  describe_launch_failure(std::wstring{ff}, ec_ff, !cfg_.ffmpeg_path.empty()));
+                  fh6::subprocess::describe_launch_failure(std::wstring{ff}, ec_ff, !cfg_.ffmpeg_path.empty()));
         if (ff_out_r) CloseHandle(ff_out_r);
         if (err_r)    CloseHandle(err_r);
         return;
@@ -1028,7 +905,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     if (scheme == "wss") ws_url.replace(0, 3, "https");
                     else if (scheme == "ws") ws_url.replace(0, 2, "http");
                 }
-                std::wstring wurl = widen(ws_url);
+                std::wstring wurl = fh6::subprocess::widen(ws_url);
                 bool is_ssl = false;
                 URL_COMPONENTS uc{};
                 uc.dwStructSize = sizeof(uc);
@@ -1353,397 +1230,7 @@ void ShoutcastSource::restart_metadata_for_current() {
     });
 }
 
-#if 0 // Legacy entry point — no-op, kept for reference
-void ShoutcastSource::start_metadata_poller() {
-    // Legacy entry point — for callers that don't know the station type.
-    // Must NOT hold mu_ when calling this (internally calls stop/start pollers).
-    restart_metadata_for_current();
-}
-#endif
 
-#if 0 // Dead code: jthread pollers disabled (see restart_metadata_for_current)
-// ---- REST metadata poller ----
-
-void ShoutcastSource::start_rest_metadata_poller(const StationPreset& st, const StationStream& str,
-                                                  const std::string& metadata_url) {
-    if (metadata_url.empty()) return;
-
-    // Capture by value for thread safety.
-    auto url     = metadata_url;
-    int interval = st.metadata.poll_interval_secs;
-    auto selector = st.metadata.entry_selector;
-    auto mapping  = st.metadata.mapping;
-
-    // Resolve the stream name for entry_selector matching.
-    std::string stream_match_name;
-    if (!selector.match_value_from.empty()) {
-        auto nit = st.metadata.stream_name_map.find(str.id);
-        if (nit != st.metadata.stream_name_map.end())
-            stream_match_name = nit->second;
-    }
-
-    metadata_stop_.store(false, std::memory_order_release);
-
-    // Safety: prevent busy-loop if poll_interval_secs is misconfigured
-    if (interval < 1) interval = 20;
-
-    metadata_thread_ = std::jthread([this, url = std::move(url), interval,
-                                        mapping = std::move(mapping),
-                                        sel = std::move(selector),
-                                        match_name = std::move(stream_match_name)](
-                                        const std::stop_token& stop) {
-        try {
-            // Parse the metadata URL: split into host (scheme://host:port) and path.
-            // E.g. "http://j1fm.tokyo/status-json.xsl" -> host "http://j1fm.tokyo", path "/status-json.xsl"
-            std::string host_url = url;
-            std::string api_path = "/";
-            auto scheme_end = url.find("://");
-            if (scheme_end != std::string::npos) {
-                auto path_start = url.find('/', scheme_end + 3);
-                if (path_start != std::string::npos) {
-                    host_url = url.substr(0, path_start);
-                    api_path = url.substr(path_start);
-                }
-            }
-
-            httplib::Client cli{host_url};
-            cli.set_connection_timeout(5, 0);
-            cli.set_read_timeout(5, 0);
-
-            bool first_poll = true;
-            while (!stop.stop_requested() && !metadata_stop_.load(std::memory_order_acquire)) {
-                // Sleep between polls, but fetch immediately on the first
-                // iteration so the UI updates from "(connecting)" right away.
-                if (!first_poll) {
-                    for (int i = 0; i < interval && !metadata_stop_.load(std::memory_order_acquire); ++i)
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
-                }
-                first_poll = false;
-                if (metadata_stop_.load(std::memory_order_acquire)) break;
-
-                auto res = cli.Get(api_path.c_str());
-            if (!res || res->status != 200) continue;
-
-            json body;
-            try {
-                body = json::parse(res->body);
-            } catch (...) { continue; }
-
-            // If an entry_selector is configured, find the matching entry in the array.
-            const json* root = &body;
-            json matched;
-            if (!sel.array_path.empty() && !match_name.empty()) {
-                auto it = body.find(sel.array_path);
-                if (it != body.end() && it->is_array()) {
-                    bool found = false;
-                    for (const auto& entry : *it) {
-                        auto f = entry.find(sel.match_field);
-                        if (f != entry.end() && f->is_string() && f->get<std::string>() == match_name) {
-                            matched = entry;
-                            root    = &matched;
-                            found   = true;
-                            break;
-                        }
-                    }
-                    if (!found)
-                        log::warn("[shoutcast] metadata: no entry in '{}' matched {}='{}'",
-                                  sel.array_path, sel.match_field, match_name);
-                } else {
-                    log::warn("[shoutcast] metadata: array '{}' not found or not an array", sel.array_path);
-                }
-            }
-
-            std::string title = resolve_mapped_value(*root, mapping.title,
-                                              "", "", "");
-            std::string artist = resolve_mapped_value(*root, mapping.artist,
-                                                       mapping.artist_array_field,
-                                                       mapping.artist_separator, "");
-            std::string artwork_url = resolve_mapped_value(*root, mapping.artwork_url,
-                                                            "", "",
-                                                            mapping.artwork_url_template);
-
-            if (!title.empty() || !artist.empty()) {
-                std::scoped_lock lk{mu_};
-                if (!title.empty())  info_.title       = std::move(title);
-                if (!artist.empty()) info_.artist      = std::move(artist);
-                if (!artwork_url.empty()) info_.artwork_url = std::move(artwork_url);
-            }
-            }  // while loop
-        } catch (const std::exception& e) {
-            log::warn("[shoutcast] REST metadata poller exception: {}", e.what());
-        } catch (...) {
-            log::warn("[shoutcast] REST metadata poller unknown exception");
-        }
-    });
-}
-
-// ---- WebSocket metadata poller (WinHTTP) ----
-
-void ShoutcastSource::start_ws_metadata_poller(const StationPreset& st, const StationStream& /*str*/,
-                                                 const std::string& metadata_url) {
-    if (metadata_url.empty()) return;
-
-    // Capture by value for thread safety.
-    auto ws_url  = metadata_url;
-    auto mapping = st.metadata.mapping;
-    auto filter  = st.metadata.ws_filter;
-    auto hb      = st.metadata.ws_heartbeat;
-
-    metadata_stop_.store(false, std::memory_order_release);
-
-    metadata_thread_ = std::jthread([this, ws_url = std::move(ws_url),
-                                        mapping = std::move(mapping),
-                                        filter = std::move(filter),
-                                        hb = std::move(hb)](
-                                        const std::stop_token& stop) {
-        try {
-        while (!stop.stop_requested() && !metadata_stop_.load(std::memory_order_acquire)) {
-            // ---- Parse the WebSocket URL ----
-            std::wstring wurl = widen(ws_url);
-            bool is_ssl = false;
-            URL_COMPONENTS uc{};
-            uc.dwStructSize = sizeof(uc);
-
-            wchar_t host[256] = {};
-            wchar_t path[1024] = {};
-            uc.lpszHostName  = host;
-            uc.dwHostNameLength = 255;
-            uc.lpszUrlPath   = path;
-            uc.dwUrlPathLength = 1023;
-
-            if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
-                log::warn("[shoutcast] ws: failed to parse URL '{}'", ws_url);
-                break;
-            }
-
-            is_ssl = (uc.nScheme == INTERNET_SCHEME_HTTPS);
-            DWORD port = uc.nPort ? uc.nPort : (is_ssl ? 443 : 80);
-
-            // ---- Open session and connect ----
-            HINTERNET hSession = WinHttpOpen(L"fh6-radio/1.0",
-                                              WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                              WINHTTP_NO_PROXY_NAME,
-                                              WINHTTP_NO_PROXY_BYPASS, 0);
-            if (!hSession) {
-                log::warn("[shoutcast] ws: WinHttpOpen failed ({})", GetLastError());
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            // Receive timeout so heartbeat keep-alives fire even when the
-            // server is silent (WinHttpWebSocketReceive blocks forever by default).
-            // Set on the session so it propagates to all derived handles.
-            DWORD recv_timeout_ms = 5000;
-            WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT,
-                             &recv_timeout_ms, sizeof(recv_timeout_ms));
-
-            HINTERNET hConnect = WinHttpConnect(hSession, host, (INTERNET_PORT)port, 0);
-            if (!hConnect) {
-                log::warn("[shoutcast] ws: WinHttpConnect failed ({})", GetLastError());
-                WinHttpCloseHandle(hSession);
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path,
-                                                     nullptr, WINHTTP_NO_REFERER,
-                                                     WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                     is_ssl ? WINHTTP_FLAG_SECURE : 0);
-            if (!hRequest) {
-                log::warn("[shoutcast] ws: WinHttpOpenRequest failed ({})", GetLastError());
-                WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-            // Request WebSocket upgrade.
-            DWORD upgrade = WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE;
-            if (!WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,
-                                  &upgrade, sizeof(upgrade))) {
-                log::warn("[shoutcast] ws: WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET failed ({})",
-                          GetLastError());
-                WinHttpCloseHandle(hRequest);
-                WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            if (!WinHttpSendRequest(hRequest, nullptr, 0, nullptr, 0, 0, 0)) {
-                log::warn("[shoutcast] ws: WinHttpSendRequest failed ({})", GetLastError());
-                WinHttpCloseHandle(hRequest);
-                WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-                log::warn("[shoutcast] ws: WinHttpReceiveResponse failed ({})", GetLastError());
-                WinHttpCloseHandle(hRequest);
-                WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            HINTERNET hWebSocket = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
-            if (!hWebSocket) {
-                log::warn("[shoutcast] ws: WebSocket upgrade failed ({})", GetLastError());
-                WinHttpCloseHandle(hRequest);
-                WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            // hRequest is no longer valid after upgrade.
-            {
-                std::scoped_lock lk{ws_mu_};
-                ws_handle_ = hWebSocket;
-            }
-            log::info("[shoutcast] ws: connected to {}", ws_url);
-
-            // ---- Heartbeat interval tracking ----
-            int heartbeat_ms = hb.default_interval_ms;
-            auto last_heartbeat = std::chrono::steady_clock::now();
-
-            // Send initial heartbeat if configured.
-            if (!hb.message.empty()) {
-                DWORD err = WinHttpWebSocketSend(hWebSocket,
-                                                  WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                                  (PVOID)hb.message.data(),
-                                                  (DWORD)hb.message.size());
-                if (err != ERROR_SUCCESS) {
-                    log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
-                }
-                last_heartbeat = std::chrono::steady_clock::now();
-            }
-
-            // ---- Receive loop ----
-            while (!stop.stop_requested() && !metadata_stop_.load(std::memory_order_acquire)) {
-                // Send heartbeat on interval.
-                if (!hb.message.empty()) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - last_heartbeat).count();
-                    if (elapsed >= heartbeat_ms) {
-                        DWORD err = WinHttpWebSocketSend(hWebSocket,
-                                                          WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                                          (PVOID)hb.message.data(),
-                                                          (DWORD)hb.message.size());
-                        if (err != ERROR_SUCCESS) {
-                            log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
-                            break; // connection likely lost, reconnect
-                        }
-                        last_heartbeat = now;
-                    }
-                }
-
-                // Check for incoming data with a short timeout.
-                DWORD bytesRead = 0;
-                WINHTTP_WEB_SOCKET_BUFFER_TYPE bufType;
-                char recvBuf[8192];
-
-                DWORD err = WinHttpWebSocketReceive(hWebSocket, recvBuf, sizeof(recvBuf) - 1,
-                                                     &bytesRead, &bufType);
-                if (err != ERROR_SUCCESS) {
-                    if (err == ERROR_WINHTTP_OPERATION_CANCELLED) {
-                        // Expected on stop.
-                        break;
-                    }
-                    if (err == ERROR_WINHTTP_TIMEOUT) {
-                        // Expected during silence — loop to check heartbeat.
-                        continue;
-                    }
-                    log::warn("[shoutcast] ws: receive error ({}), reconnecting...", err);
-                    break;
-                }
-
-                if (bytesRead == 0) continue;
-                recvBuf[bytesRead] = '\0';
-
-                // Parse JSON message.
-                json msg;
-                try {
-                    msg = json::parse(recvBuf, recvBuf + bytesRead);
-                } catch (...) { continue; }
-
-                // Apply message filter.
-                if (!filter.op_field.empty()) {
-                    const json* op_node = resolve_json_node(msg, filter.op_field);
-                    if (!op_node) continue;
-                    int op_val = op_node->is_number_integer() ? (int)op_node->get<int64_t>() : 0;
-                    if (op_val != filter.op_value) continue;
-                }
-                if (!filter.type_field.empty() && !filter.type_value.empty()) {
-                    std::string t = resolve_json_path(msg, filter.type_field);
-                    if (t != filter.type_value) continue;
-                }
-
-                // Extract the data subtree if a data_field is specified.
-                const json* data_root = &msg;
-                if (!filter.data_field.empty()) {
-                    const json* data = resolve_json_node(msg, filter.data_field);
-                    if (!data) continue;
-                    data_root = data;
-                }
-
-                // Update heartbeat interval from server message if applicable.
-                if (!hb.interval_field.empty()) {
-                    std::string ival = resolve_json_path(*data_root, hb.interval_field);
-                    if (!ival.empty()) {
-                        try {
-                            int new_interval = std::stoi(ival);
-                            if (new_interval > 0) heartbeat_ms = new_interval;
-                        } catch (...) {}
-                    }
-                }
-
-                // Apply enhanced mapping.
-                std::string title = resolve_mapped_value(*data_root, mapping.title,
-                                                          "", "", "");
-                std::string artist = resolve_mapped_value(*data_root, mapping.artist,
-                                                           mapping.artist_array_field,
-                                                           mapping.artist_separator, "");
-                std::string artwork_url = resolve_mapped_value(*data_root, mapping.artwork_url,
-                                                                "", "",
-                                                                mapping.artwork_url_template);
-
-                if (!title.empty() || !artist.empty()) {
-                    std::scoped_lock lk{mu_};
-                    if (!title.empty())  info_.title       = std::move(title);
-                    if (!artist.empty()) info_.artist      = std::move(artist);
-                    if (!artwork_url.empty()) info_.artwork_url = std::move(artwork_url);
-                }
-            }
-
-            // Clean up this connection before reconnecting.
-            {
-                std::scoped_lock lk{ws_mu_};
-                if (ws_handle_ == hWebSocket) ws_handle_ = nullptr;
-            }
-            // Only send close frame if we weren't externally stopped (avoids double-close).
-            if (!metadata_stop_.load(std::memory_order_acquire))
-                WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
-            WinHttpCloseHandle(hWebSocket);
-            WinHttpCloseHandle(hConnect);
-            WinHttpCloseHandle(hSession);
-
-            if (stop.stop_requested() || metadata_stop_.load(std::memory_order_acquire)) break;
-
-            // Brief delay before reconnect.
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-        }
-        } catch (const std::exception& e) {
-            log::warn("[shoutcast] WS metadata poller exception: {}", e.what());
-        } catch (...) {
-            log::warn("[shoutcast] WS metadata poller unknown exception");
-        }
-    });
-}
-
-#endif // Dead code
 
 void ShoutcastSource::stop_metadata_poller() {
     metadata_stop_.store(true, std::memory_order_release);
@@ -1901,13 +1388,13 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         if (writable < 4) break;
         std::size_t want = std::min<std::size_t>(writable, avail);
         if (want > 4096) want = 4096;
-        std::byte buf[4096];
+        int16_t buf[1024]; // 4096 bytes as stereo s16 frames — naturally aligned for EQ
         DWORD got = 0;
         if (!ReadFile(p->read_pipe, buf, (DWORD)want, &got, nullptr) || got == 0) {
             on_eof();
             return;
         }
-        ring.write(buf, got);
+        ring.write(reinterpret_cast<std::byte*>(buf), got);
         p->bytes_written += got;
         update_position();
         avail = avail > got ? avail - got : 0;
