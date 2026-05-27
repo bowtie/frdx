@@ -34,6 +34,9 @@ function Backup-AndCopy([string]$src, [string]$dst) {
 }
 
 Backup-AndCopy (Join-Path $dist "version.dll") (Join-Path $GameDir "version.dll") | Out-Host
+if (Test-Path (Join-Path $dist "fh6_overlay.exe")) {
+    Backup-AndCopy (Join-Path $dist "fh6_overlay.exe") (Join-Path $GameDir "fh6_overlay.exe") | Out-Host
+}
 
 $dataDir = Join-Path $GameDir "fh6-radio"
 if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Force -Path $dataDir | Out-Null }
@@ -54,4 +57,5 @@ if (-not $SkipMedia -and (Test-Path $mdir)) {
 }
 
 Write-Host "`nDone. Launch the game, set Audio -> Radio DJ = Off, Streamer Mode = On." -ForegroundColor Green
-Write-Host "Then open http://localhost:8420 in any browser on this LAN."
+Write-Host "An RTSS-style overlay will appear automatically in-game (Ctrl+Shift+O to interact)."
+Write-Host "You can also open http://localhost:8420 in any browser on this LAN."

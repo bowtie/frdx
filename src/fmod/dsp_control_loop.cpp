@@ -171,12 +171,9 @@ void ControlLoop::push_metadata() noexcept {
     std::string title  = !info.title.empty() ? info.title : std::string{a->display_name()};
     std::string artist = info.artist;
     if (artist.empty()) {
-        switch (a->playback_state()) {
-            case PlaybackState::playing:   artist = "Playing"; break;
-            case PlaybackState::buffering: artist = "Buffering"; break;
-            case PlaybackState::paused:    artist = "Paused"; break;
-            case PlaybackState::stopped:   artist = "Stopped"; break;
-        }
+        // No state labels — just show the title/station name.
+        meta_.update(title, "");
+        return;
     }
     meta_.update(title, artist);
 }

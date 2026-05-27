@@ -2,13 +2,13 @@
   {
     "schema_version": "1.0",
     "id": "doujinstyle",
-    "name": "Doujinstyle",
-    "description": "radio_doujinstyle_desc",
+    "name": "DoujinStyle.FM",
+    "description": "We are dedicated to playing nothing but Doujin Music and Japanese Underground Electronic Music. All genres welcome!",
     "icon": "fa-solid fa-radio",
     "streams": [
       {
         "id": "main",
-        "name": "radio_live_stream",
+        "name": "Doujin & Underground Electronic",
         "url": "https://streams.radio.co/s5ff57669c/listen",
         "icon": "fa-solid fa-play"
       }
@@ -16,7 +16,7 @@
     "metadata": {
       "type": "rest",
       "url": "https://public.radio.co/api/v2/s5ff57669c/track/current",
-      "poll_interval_secs": 15,
+      "poll_interval_secs": 5,
       "mapping": {
         "title": "data.track_title",
         "artist": "data.track_artist",
@@ -27,8 +27,8 @@
   {
     "schema_version": "1.0",
     "id": "asiadreamradio",
-    "name": "Asia DREAM Radio",
-    "description": "radio_asiadreamradio_desc",
+    "name": "asia DREAM radio",
+    "description": "A curated network of Japanese music radio stations — J-Pop, J-Rock, J-Jazz, City Pop, and Hip Hop.",
     "icon": "fa-solid fa-radio",
     "streams": [
       {
@@ -39,19 +39,19 @@
       },
       {
         "id": "natsukashii",
-        "name": "Natsukashii",
+        "name": "J-Pop Sakura 懐かしい",
         "url": "https://quincy.torontocast.com:2070/;?type=http",
         "icon": "fa-solid fa-clock-rotate-left"
       },
       {
         "id": "jpop_kawaii",
-        "name": "J-Pop Kawaii",
+        "name": "J-Pop Powerplay Kawaii",
         "url": "https://kathy.torontocast.com:3060/;?type=http",
         "icon": "fa-solid fa-heart"
       },
       {
         "id": "jpop_power",
-        "name": "J-Pop Power",
+        "name": "J-Pop Powerplay",
         "url": "https://kathy.torontocast.com:3560/;?type=http",
         "icon": "fa-solid fa-bolt"
       },
@@ -59,17 +59,21 @@
         "id": "jazz_sakura",
         "name": "Jazz Sakura",
         "url": "https://kathy.torontocast.com:3330/;?type=http",
-        "icon": "fa-solid fa-leaf"
+        "icon": "fa-solid fa-leaf",
+        "mapping": {
+          "title": "results.0.metadata",
+          "split_separator": " - "
+        }
       },
       {
         "id": "jrock",
-        "name": "J-Rock",
+        "name": "J-Rock Powerplay",
         "url": "https://kathy.torontocast.com:3340/;?type=http",
         "icon": "fa-solid fa-guitar"
       },
       {
         "id": "jclub_hiphop",
-        "name": "J-Club / Hip Hop",
+        "name": "J-Club Hip Hop",
         "url": "https://kathy.torontocast.com:3350/;?type=http",
         "icon": "fa-solid fa-compact-disc"
       },
@@ -93,7 +97,7 @@
         "jclub_hiphop": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=5",
         "bandstand_jazz": "https://cast1.torontocast.com:2050/api/v2/history/?limit=1&offset=0&server=1"
       },
-      "poll_interval_secs": 20,
+      "poll_interval_secs": 5,
       "mapping": {
         "title": "results.0.title",
         "artist": "results.0.author",
@@ -104,8 +108,8 @@
   {
     "schema_version": "1.0",
     "id": "j1",
-    "name": "J1 Tokyo",
-    "description": "radio_j1_desc",
+    "name": "J1 Radio",
+    "description": "Japan's hottest hits — J1 Loves Japan, J1 Loves You!",
     "icon": "fa-solid fa-radio",
     "streams": [
       {
@@ -124,7 +128,7 @@
     "metadata": {
       "type": "rest",
       "url": "https://json.j1fm.tokyo/whatweplay.json",
-      "poll_interval_secs": 20,
+      "poll_interval_secs": 5,
       "entry_selector": {
         "array_path": "station",
         "match_field": "name",
@@ -145,7 +149,7 @@
     "schema_version": "1.0",
     "id": "listen_moe",
     "name": "LISTEN.moe",
-    "description": "radio_listen_moe_desc",
+    "description": "A listener-powered radio streaming service dedicated to J-Pop, K-Pop, and anime music.",
     "icon": "fa-solid fa-radio",
     "streams": [
       {
@@ -193,21 +197,24 @@
     "schema_version": "1.0",
     "id": "vocaloid",
     "name": "Vocaloid Radio",
-    "description": "radio_vocaloid_desc",
+    "description": "Dedicated to playing all types of Vocaloid music from all genres.",
     "icon": "fa-solid fa-radio",
     "streams": [
       {
         "id": "main",
-        "name": "radio_live_stream",
+        "name": "All Vocaloid, All Genres",
         "url": "https://vocaloid.radioca.st/stream",
         "icon": "fa-solid fa-play"
       }
     ],
     "metadata": {
-      "type": "static",
-      "title": "Vocaloid Hits from Japan. We play it all!",
-      "artist": "Vocaloid-Radio",
-      "cover_url": "https://cdn-radiotime-logos.tunein.com/s221579q.png"
+      "type": "rest",
+      "url": "https://vocaloid.radioca.st/status-json.xsl",
+      "poll_interval_secs": 5,
+      "mapping": {
+        "title": "icestats.source.0.title",
+        "split_separator": " - "
+      }
     }
   }
 ]

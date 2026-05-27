@@ -2,7 +2,7 @@
 // forwarders, and spawns the bridge on DLL_PROCESS_ATTACH so the loader is
 // never blocked on FMOD discovery or HTTP startup.
 
-#include <windows.h>
+#include <fh6/detail/win32_handle.hpp>
 
 // Forwarding to "version.dll" without a path resolves back to us; the
 // absolute system32 path is what breaks the basename collision.
@@ -43,7 +43,7 @@ DWORD WINAPI bridge_thread(LPVOID self) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        if (HANDLE t = CreateThread(nullptr, 0, bridge_thread, hModule, 0, nullptr)) CloseHandle(t);
+        fh6::detail::unique_handle{CreateThread(nullptr, 0, bridge_thread, hModule, 0, nullptr)};
     }
     return TRUE;
 }

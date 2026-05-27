@@ -17,20 +17,26 @@ namespace fh6::sources {
 
 // ---- Station preset data structures ----
 
-struct StationStream {
-    std::string id;
-    std::string name;
-    std::string url;
-    std::string icon;
-};
-
 struct StationMetadataMapping {
     std::string title;                // JSON dot-path, e.g. "data.track_title"
     std::string artist;               // JSON dot-path, e.g. "data.track_artist"
     std::string artwork_url;          // JSON dot-path, e.g. "data.artwork_urls.large"
     std::string artist_array_field;   // if artist resolves to array of objects, extract this field from each
     std::string artist_separator{", "}; // join array elements with this separator
+    std::string split_separator;      // when set, split a combined "artist - title" value from a single field
     std::string artwork_url_template; // "https://cdn.example.com/covers/{value}" — {value} replaced by resolved artwork_url
+};
+
+struct StationStream {
+    std::string id;
+    std::string name;
+    std::string url;
+    std::string icon;
+    // Per-stream mapping override — when non-empty, takes precedence over
+    // the station-level mapping for metadata resolution. This allows fixing
+    // individual streams whose API returns data in a different format (e.g.
+    // a combined "artist - title" metadata field instead of separate fields).
+    StationMetadataMapping mapping_override;
 };
 
 // For APIs that return all streams in one response (e.g. an array of station
@@ -97,7 +103,14 @@ public:
     ~ShoutcastSource() override;
 
     std::string_view name() const noexcept override { return "shoutcast"; }
-    std::string_view display_name() const noexcept override { return "Shoutcast"; }
+    std::string_view display_name() const noexcept override {
+        // No lock — display_name_ is only written under mu_ (in
+        // start_pipe_locked) from the HTTP server thread, and read from
+        // the audio thread.  A lock with string_view return creates a
+        // TOCTOU window where the pointed-to memory can be freed before
+        // the caller finishes copying.
+        return display_name_;
+    }
 
     bool initialize() override;
     void shutdown() noexcept override;
@@ -136,7 +149,7 @@ private:
 
     void start_pipe_locked();         // mu_ held
     void stop_pipe_locked();          // mu_ held
-    void cycle_preset();              // advance to next preset, mu_ held
+    void cycle_preset(int direction = 1); // cycle through all streams by one step, mu_ held
     void stop_metadata_poller();      // join bg thread (no-op now, kept for API compat)
 
     ShoutcastConfig cfg_;
@@ -149,6 +162,9 @@ private:
     std::atomic<uint64_t> position_ms_{0};
     AuthState auth_ = AuthState::none_required;
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
+
+    // Dynamic display name (includes station name when active).
+    std::string display_name_{"Online Radio"};
 
     // Station presets.
     std::vector<StationPreset> stations_;
@@ -167,6 +183,11 @@ private:
     // void* avoids pulling <windows.h>/<winhttp.h> into this public header.
     mutable std::mutex ws_mu_;
     void* ws_handle_ = nullptr;
+
+    // Timestamp (steady_clock ms) of the last ICY StreamTitle received in
+    // pump(). The REST/WS pollers check this — if ICY is actively delivering
+    // metadata, they skip overwriting title/artist and only update artwork.
+    std::atomic<int64_t> last_icy_ms_{0};
 };
 
 } // namespace fh6::sources

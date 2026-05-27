@@ -2,12 +2,14 @@
 #include "fh6/log.hpp"
 #include "fh6/safe_mem.hpp"
 
-#include <windows.h>
+#include <fh6/detail/win32_handle.hpp>
 #include <cstring>
 
 namespace fh6::fmod_bridge {
 
 namespace {
+
+using fh6::detail::unique_virtual;
 
 constexpr std::ptrdiff_t kTitleOffset  = 0x30;
 constexpr std::ptrdiff_t kArtistOffset = 0x50;
@@ -73,6 +75,8 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
             log::warn("[meta] VirtualAlloc failed for {} bytes", bytes);
             return false;
         }
+        unique_virtual mem{fresh}; // RAII: auto-frees on failure paths
+
         std::memcpy(fresh, src.data(), src.size());
         fresh[src.size()] = std::byte{0};
 
@@ -86,10 +90,11 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
                 std::memcpy(target + 16, &new_size, sizeof(new_size));
                 std::memcpy(target + 24, &alloc_cap, sizeof(alloc_cap));
             })) {
-            VirtualFree(fresh, 0, MEM_RELEASE);
-            return false;
+            return false; // unique_virtual destructor calls VirtualFree
         }
+        mem.release(); // Ownership transferred to swapped-in slot (intentionally leaked)
         return true;
+
     };
 
     const bool is_heap = hdr.cap > kSsoCap;

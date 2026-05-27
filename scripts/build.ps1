@@ -63,6 +63,7 @@ New-Item -ItemType Directory -Force -Path $dist | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "fh6-radio") | Out-Null
 
 Copy-Item (Join-Path $build "Release\version.dll") $dist
+# fh6_overlay.exe was removed — the overlay is now in-process (version.dll)
 Copy-Item -Recurse (Join-Path $root "ui\dist") (Join-Path $dist "fh6-radio\ui")
 Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "fh6-radio\config.toml")
 Copy-Item (Join-Path $root "stations.example.json") (Join-Path $dist "fh6-radio\stations.json")
@@ -140,10 +141,10 @@ Edits save the moment you change them -- no need to bounce the game.
 Pulling it back out
 ~~~~~~~~~~~~~~~~~~~
 
-Two things to remove from the FH6 install folder: version.dll, and the
-fh6-radio/ folder sitting next to it. After that, hit "Verify integrity
-of game files" (Steam) or "Repair" (Xbox app / MS Store) and the patched
-game assets get pulled back to vanilla.
+Two things to remove from the FH6 install folder: version.dll,
+fh6_overlay.exe, and the fh6-radio/ folder sitting next to it. After that,
+hit "Verify integrity of game files" (Steam) or "Repair" (Xbox app /
+MS Store) and the patched game assets get pulled back to vanilla.
 
 
 About the project

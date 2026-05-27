@@ -1,14 +1,17 @@
 #include "fh6/log.hpp"
+#include "fh6/detail/win32_handle.hpp"
 
 #include <chrono>
-#include <cstdio>
 #include <mutex>
 #include <string>
 
 namespace fh6::log {
 
 namespace {
-std::FILE* g_file = nullptr;
+
+using fh6::detail::unique_file;
+
+unique_file g_file;
 std::mutex g_mu;
 
 constexpr std::string_view level_name(Level l) noexcept {
@@ -24,16 +27,14 @@ constexpr std::string_view level_name(Level l) noexcept {
 
 void init(const std::filesystem::path& log_file) noexcept {
     std::scoped_lock lk{g_mu};
-    if (g_file) std::fclose(g_file);
-    g_file = _wfopen(log_file.c_str(), L"a");
+    g_file.reset(_wfopen(log_file.c_str(), L"a")); // closes old file, adopts new
 }
 
 void shutdown() noexcept {
     std::scoped_lock lk{g_mu};
     if (g_file) {
-        std::fflush(g_file);
-        std::fclose(g_file);
-        g_file = nullptr;
+        std::fflush(g_file.get());
+        g_file.reset(); // calls std::fclose
     }
 }
 
@@ -50,9 +51,9 @@ void emit(Level level, std::string_view message) noexcept {
 
     std::scoped_lock lk{g_mu};
     if (g_file) {
-        std::fprintf(g_file, "%s %-5.*s %.*s\n", ts, (int)level_name(level).size(),
+        std::fprintf(g_file.get(), "%s %-5.*s %.*s\n", ts, (int)level_name(level).size(),
                      level_name(level).data(), (int)message.size(), message.data());
-        std::fflush(g_file);
+        std::fflush(g_file.get());
     }
 }
 

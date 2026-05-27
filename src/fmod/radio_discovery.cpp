@@ -2,7 +2,6 @@
 #include "fh6/log.hpp"
 #include "fh6/safe_mem.hpp"
 
-#include <windows.h>
 #include <atomic>
 #include <cstring>
 #include <mutex>

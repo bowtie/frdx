@@ -42,6 +42,7 @@ target_include_directories(version PRIVATE
     third_party/cpp-httplib
     third_party/nlohmann
     third_party/toml11
+    third_party/wil/include
 )
 
 target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp)
