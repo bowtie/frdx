@@ -40,18 +40,6 @@ HANDLE open_nul(DWORD access) {
     return h == INVALID_HANDLE_VALUE ? nullptr : h;
 }
 
-std::filesystem::path stderr_log_path() {
-    return std::filesystem::temp_directory_path() / "fh6-stderr.log";
-}
-
-HANDLE open_stderr_log() {
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE h = CreateFileW(stderr_log_path().wstring().c_str(), FILE_APPEND_DATA | SYNCHRONIZE,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa, OPEN_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, nullptr);
-    return h == INVALID_HANDLE_VALUE ? open_nul(GENERIC_WRITE) : h;
-}
-
 HANDLE create_kill_on_close_job() {
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
     if (!job) return nullptr;
