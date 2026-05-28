@@ -1,12 +1,12 @@
-#include "fh6/config.hpp"
-#include "fh6/log.hpp"
+#include "frdx/config.hpp"
+#include "frdx/log.hpp"
 
 #include <toml.hpp>
 
 #include <fstream>
 #include <system_error>
 
-namespace fh6 {
+namespace frdx {
 
 namespace {
 
@@ -49,13 +49,9 @@ Config load_config(const std::filesystem::path& path) {
         return cfg;
     }
 
-    const auto& g    = section(root, "general");
-    cfg.general.port = static_cast<uint16_t>(pick<int>(g, "port", cfg.general.port));
+    const auto& g = section(root, "general");
     cfg.general.ring_buffer_mb =
         static_cast<uint32_t>(pick<int>(g, "ring_buffer_mb", cfg.general.ring_buffer_mb));
-    cfg.general.default_source = pick<std::string>(g, "default_source", cfg.general.default_source);
-    cfg.general.fallback_source =
-        pick<std::string>(g, "fallback_source", cfg.general.fallback_source);
     cfg.general.enable_overlay = pick<bool>(g, "enable_overlay", cfg.general.enable_overlay);
 
     const auto& sc            = section(root, "shoutcast");
@@ -154,10 +150,7 @@ struct Emitter {
 void save_config(const std::filesystem::path& path, const Config& cfg) {
     Emitter e;
     e.header("general");
-    e.kv("port", static_cast<int64_t>(cfg.general.port));
     e.kv("ring_buffer_mb", static_cast<int64_t>(cfg.general.ring_buffer_mb));
-    e.kv("default_source", cfg.general.default_source);
-    e.kv("fallback_source", cfg.general.fallback_source);
     e.kv("enable_overlay", cfg.general.enable_overlay);
 
     e.header("shoutcast");
@@ -182,4 +175,4 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     if (ec) throw std::system_error{ec};
 }
 
-} // namespace fh6
+} // namespace frdx

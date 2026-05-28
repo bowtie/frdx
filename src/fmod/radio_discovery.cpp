@@ -1,13 +1,13 @@
-#include "fh6/fmod/radio_discovery.hpp"
-#include "fh6/log.hpp"
-#include "fh6/safe_mem.hpp"
+#include "frdx/fmod/radio_discovery.hpp"
+#include "frdx/log.hpp"
+#include "frdx/safe_mem.hpp"
 
 #include <atomic>
 #include <cstring>
 #include <mutex>
 #include <string_view>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 
@@ -335,4 +335,4 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
     return result;
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

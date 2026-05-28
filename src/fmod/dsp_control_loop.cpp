@@ -1,12 +1,12 @@
-#include "fh6/fmod/dsp_control_loop.hpp"
-#include "fh6/fmod/radio_discovery.hpp"
-#include "fh6/audio_source_manager.hpp"
-#include "fh6/log.hpp"
+#include "frdx/fmod/dsp_control_loop.hpp"
+#include "frdx/fmod/radio_discovery.hpp"
+#include "frdx/audio_source_manager.hpp"
+#include "frdx/log.hpp"
 
 #include <chrono>
 #include <cstring>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 using namespace std::chrono_literals;
@@ -159,7 +159,7 @@ void ControlLoop::recover_stale_dsp() noexcept {
 void ControlLoop::push_metadata() noexcept {
     auto* a = bridge_.manager().active();
     if (!a) {
-        meta_.update("FH6 Universal Radio", "Idle");
+        meta_.update("Forza Radio DX", "Idle");
         return;
     }
     TrackInfo info;
@@ -178,4 +178,4 @@ void ControlLoop::push_metadata() noexcept {
     meta_.update(title, artist);
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

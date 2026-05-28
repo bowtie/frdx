@@ -1,6 +1,6 @@
 #pragma once
 
-// Internal header shared across fh6-universal-radio source files.
+// Internal header shared across Forza Radio DX source files.
 // Defines RAII Win32 handle wrappers using Microsoft WIL.
 // Include this instead of duplicating the typedefs in each .cpp.
 
@@ -10,7 +10,7 @@
 
 #include <cstdio> // std::FILE, std::fclose
 
-namespace fh6::detail {
+namespace frdx::detail {
 
 // Generic Win32 HANDLE, auto-closed via CloseHandle.
 // Used for pipes, files, jobs, processes, threads, etc.
@@ -42,4 +42,4 @@ inline void file_close(std::FILE* f) noexcept {
 
 using unique_file = wil::unique_any<std::FILE*, decltype(&file_close), file_close>;
 
-} // namespace fh6::detail
+} // namespace frdx::detail

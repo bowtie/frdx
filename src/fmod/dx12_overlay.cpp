@@ -1,9 +1,10 @@
-#include "fh6/fmod/dx12_overlay.hpp"
-#include "fh6/audio_source_manager.hpp"
-#include "fh6/config_store.hpp"
-#include "fh6/fmod/dsp_bridge.hpp"
-#include "fh6/sources/shoutcast_source.hpp"
-#include "fh6/log.hpp"
+#define NOMINMAX
+#include "frdx/fmod/dx12_overlay.hpp"
+#include "frdx/audio_source_manager.hpp"
+#include "frdx/config_store.hpp"
+#include "frdx/fmod/dsp_bridge.hpp"
+#include "frdx/sources/shoutcast_source.hpp"
+#include "frdx/log.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -20,6 +21,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <utility>
 
 #include <MinHook.h>
 #include <imgui.h>
@@ -30,7 +32,7 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
                                                              LPARAM lParam);
 
-namespace fh6::dx12_overlay {
+namespace frdx::dx12_overlay {
 
 namespace {
 
@@ -61,7 +63,11 @@ ConfigStore* g_store             = nullptr;
 // DirectX 12 render contexts
 ID3D12Device* d3d12_device = nullptr;
 std::mutex swapchain_map_mutex;
-std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> swapchain_queues;
+std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*>& get_swapchain_queues() {
+    static std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> m;
+    return m;
+}
+#define swapchain_queues get_swapchain_queues()
 ID3D12DescriptorHeap* srv_descriptor_heap     = nullptr;
 ID3D12DescriptorHeap* rtv_descriptor_heap     = nullptr;
 ID3D12GraphicsCommandList* imgui_command_list = nullptr;
@@ -73,14 +79,24 @@ std::vector<ID3D12CommandAllocator*> command_allocators;
 std::vector<UINT64> command_allocator_fence_values;
 std::vector<ID3D12Resource*> backbuffers;
 std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> backbuffer_rtvs;
-ImVector<ImWchar> font_glyph_ranges;
+// font_glyph_ranges is a function-local static in load_overlay_font()
+// to avoid bugprone-throwing-static-initialization.
 
 std::mutex action_mutex;
 std::condition_variable action_cv;
-std::deque<std::function<void()>> pending_actions;
+std::deque<std::function<void()>>& get_pending_actions() {
+    static std::deque<std::function<void()>> a;
+    return a;
+}
+#define pending_actions get_pending_actions()
 std::thread action_thread;
 bool action_thread_stop = false;
 std::atomic<bool> action_busy{false};
+
+// Theme state
+static const char* g_theme_names[] = {"Bess Dark", "Tokyo Night"};
+static int g_theme_idx             = 0;
+static bool show_settings          = false;
 
 void wait_for_all_overlay_work();
 void enqueue_action(std::function<void()> action);
@@ -162,13 +178,143 @@ void post_resize(IDXGISwapChain* swapChain) {
     log::info("[overlay] recovered DX12 backbuffer RTV resources after resize");
 }
 
-// Custom ImGui HUD controller render routine
-void draw_imgui_ui() {
-    ImGui::SetNextWindowSize(ImVec2(520, 520), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
+// ── Theme applying functions ──────────────────────────────────────────────
 
+static void ApplyBessDark() {
+    ImGui::GetStyle() = ImGuiStyle();
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style                = ImGui::GetStyle();
+    ImVec4* c                        = style.Colors;
+    c[ImGuiCol_Text]                 = ImVec4(0.90f, 0.90f, 0.95f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.50f, 0.50f, 0.55f, 1.00f);
+    c[ImGuiCol_WindowBg]             = ImVec4(0.07f, 0.07f, 0.09f, 1.00f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.09f, 0.09f, 0.11f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.30f, 0.30f, 0.40f, 1.00f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.25f, 0.25f, 0.35f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.20f, 0.22f, 0.27f, 1.00f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.30f, 0.32f, 0.40f, 1.00f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.35f, 0.38f, 0.50f, 1.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.15f, 0.15f, 0.18f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.22f, 0.22f, 0.27f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.35f, 0.35f, 0.50f, 1.00f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.25f, 0.25f, 0.38f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.13f, 0.13f, 0.17f, 1.00f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.15f, 0.15f, 0.20f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
+    c[ImGuiCol_Border]               = ImVec4(0.20f, 0.20f, 0.25f, 0.50f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.50f, 0.70f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.50f, 0.70f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.60f, 0.80f, 1.00f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.50f, 0.70f, 1.00f, 0.50f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.60f, 0.80f, 1.00f, 0.75f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.70f, 0.90f, 1.00f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.30f, 0.30f, 0.35f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.40f, 0.40f, 0.50f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.45f, 0.45f, 0.55f, 1.00f);
+    style.WindowRounding             = 5.0f;
+    style.FrameRounding              = 5.0f;
+    style.GrabRounding               = 5.0f;
+    style.TabRounding                = 5.0f;
+    style.PopupRounding              = 5.0f;
+    style.ScrollbarRounding          = 5.0f;
+    style.WindowPadding              = ImVec2(10.0f, 10.0f);
+    style.FramePadding               = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing                = ImVec2(8.0f, 6.0f);
+    style.PopupBorderSize            = 0.0f;
+}
+
+static void ApplyTokyoNight() {
+    ImGui::GetStyle() = ImGuiStyle();
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* c         = style.Colors;
+    // Tokyo Night (Night variant) palette
+    c[ImGuiCol_Text]                  = ImVec4(0.75f, 0.79f, 0.96f, 1.00f);
+    c[ImGuiCol_TextDisabled]          = ImVec4(0.34f, 0.37f, 0.54f, 1.00f);
+    c[ImGuiCol_WindowBg]              = ImVec4(0.10f, 0.11f, 0.15f, 1.00f);
+    c[ImGuiCol_ChildBg]               = ImVec4(0.12f, 0.14f, 0.21f, 1.00f);
+    c[ImGuiCol_PopupBg]               = ImVec4(0.12f, 0.14f, 0.21f, 0.96f);
+    c[ImGuiCol_Border]                = ImVec4(0.23f, 0.26f, 0.38f, 1.00f);
+    c[ImGuiCol_BorderShadow]          = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]               = ImVec4(0.16f, 0.18f, 0.26f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]        = ImVec4(0.23f, 0.26f, 0.38f, 1.00f);
+    c[ImGuiCol_FrameBgActive]         = ImVec4(0.26f, 0.28f, 0.41f, 1.00f);
+    c[ImGuiCol_TitleBg]               = ImVec4(0.12f, 0.14f, 0.21f, 1.00f);
+    c[ImGuiCol_TitleBgActive]         = ImVec4(0.14f, 0.16f, 0.23f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.12f, 0.14f, 0.21f, 1.00f);
+    c[ImGuiCol_MenuBarBg]             = ImVec4(0.12f, 0.14f, 0.21f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.12f, 0.14f, 0.21f, 1.00f);
+    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.26f, 0.28f, 0.41f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.34f, 0.37f, 0.54f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]   = ImVec4(0.24f, 0.35f, 0.63f, 1.00f);
+    c[ImGuiCol_CheckMark]             = ImVec4(0.62f, 0.81f, 0.42f, 1.00f);
+    c[ImGuiCol_SliderGrab]            = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]      = ImVec4(0.60f, 0.73f, 0.98f, 1.00f);
+    c[ImGuiCol_Button]                = ImVec4(0.24f, 0.35f, 0.63f, 1.00f);
+    c[ImGuiCol_ButtonHovered]         = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_ButtonActive]          = ImVec4(0.24f, 0.35f, 0.63f, 1.00f);
+    c[ImGuiCol_Header]                = ImVec4(0.24f, 0.35f, 0.63f, 1.00f);
+    c[ImGuiCol_HeaderHovered]         = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_HeaderActive]          = ImVec4(0.24f, 0.35f, 0.63f, 1.00f);
+    c[ImGuiCol_Separator]             = ImVec4(0.23f, 0.26f, 0.38f, 1.00f);
+    c[ImGuiCol_SeparatorHovered]      = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_SeparatorActive]       = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_ResizeGrip]            = ImVec4(0.48f, 0.64f, 0.97f, 0.50f);
+    c[ImGuiCol_ResizeGripHovered]     = ImVec4(0.48f, 0.64f, 0.97f, 0.75f);
+    c[ImGuiCol_ResizeGripActive]      = ImVec4(0.60f, 0.73f, 0.98f, 1.00f);
+    c[ImGuiCol_Tab]                   = ImVec4(0.16f, 0.18f, 0.26f, 1.00f);
+    c[ImGuiCol_TabHovered]            = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_TabActive]             = ImVec4(0.24f, 0.35f, 0.63f, 1.00f);
+    c[ImGuiCol_TabUnfocused]          = ImVec4(0.12f, 0.13f, 0.18f, 1.00f);
+    c[ImGuiCol_TabUnfocusedActive]    = ImVec4(0.16f, 0.18f, 0.26f, 1.00f);
+    c[ImGuiCol_PlotLines]             = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_PlotLinesHovered]      = ImVec4(0.97f, 0.46f, 0.56f, 1.00f);
+    c[ImGuiCol_PlotHistogram]         = ImVec4(0.62f, 0.81f, 0.42f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered]  = ImVec4(0.88f, 0.69f, 0.41f, 1.00f);
+    c[ImGuiCol_TextSelectedBg]        = ImVec4(0.48f, 0.64f, 0.97f, 0.35f);
+    c[ImGuiCol_DragDropTarget]        = ImVec4(0.48f, 0.64f, 0.97f, 0.90f);
+    c[ImGuiCol_NavHighlight]          = ImVec4(0.48f, 0.64f, 0.97f, 1.00f);
+    c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
+    c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
+    style.WindowRounding              = 6.0f;
+    style.FrameRounding               = 4.0f;
+    style.ScrollbarRounding           = 4.0f;
+    style.GrabRounding                = 3.0f;
+    style.ChildRounding               = 4.0f;
+    style.PopupRounding               = 4.0f;
+    style.TabRounding                 = 4.0f;
+    style.WindowPadding               = ImVec2(8.0f, 8.0f);
+    style.FramePadding                = ImVec2(5.0f, 4.0f);
+    style.ItemSpacing                 = ImVec2(6.0f, 6.0f);
+    style.ItemInnerSpacing            = ImVec2(6.0f, 6.0f);
+    style.IndentSpacing               = 22.0f;
+    style.ScrollbarSize               = 14.0f;
+    style.GrabMinSize                 = 10.0f;
+}
+
+static void ApplyTheme(int idx) {
+    switch (idx) {
+        case 0: ApplyBessDark(); break;
+        case 1: ApplyTokyoNight(); break;
+        default: ApplyBessDark(); break;
+    }
+}
+
+// ── Compact media player bar with separate settings window ───────────────
+
+void draw_imgui_ui() {
     if (!show_menu) {
-        // Draw Now Playing HUD Widget on top left corner when closed
+        // Minimal HUD when collapsed
         ImGui::SetNextWindowBgAlpha(0.4f);
         ImGuiWindowFlags hudFlags =
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -179,7 +325,7 @@ void draw_imgui_ui() {
         auto* active = g_mgr->active();
         if (active) {
             TrackInfo track = active->current_track();
-            ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "FH6 Universal Radio");
+            ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "Forza Radio DX");
             ImGui::Separator();
             ImGui::Text("%s", track.title.empty() ? std::string{active->display_name()}.c_str()
                                                   : track.title.c_str());
@@ -194,220 +340,178 @@ void draw_imgui_ui() {
         return;
     }
 
-    // Main HUD Control Dashboard Window
-    ImGui::SetNextWindowBgAlpha(0.88f);
-    ImGui::Begin("FH6 Universal Radio Controller", nullptr, ImGuiWindowFlags_NoCollapse);
+    // ── Media player bar ──────────────────────────────────────────────
+    ImGui::SetNextWindowSize(ImVec2(720, 75), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowBgAlpha(0.94f);
 
-    auto* active    = g_mgr->active();
-    TrackInfo track = active ? active->current_track() : TrackInfo{};
+    ImGuiWindowFlags barFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
+                                ImGuiWindowFlags_NoScrollWithMouse;
 
-    // NOW PLAYING DISPLAY
-    ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "NOW PLAYING");
-    ImGui::Separator();
-    if (active) {
-        ImGui::Text("Title:  %s", track.title.empty() ? std::string{active->display_name()}.c_str()
-                                                      : track.title.c_str());
-        if (!track.artist.empty()) {
-            ImGui::Text("Artist: %s", track.artist.c_str());
-        }
+    ImGui::Begin("Forza Radio DX", nullptr, barFlags);
 
-        // Format: mm:ss
-        auto format_time = [](uint64_t ms) -> std::string {
-            if (ms == 0) return "0:00";
-            uint64_t s = ms / 1000;
-            char buf[32];
-            std::snprintf(buf, sizeof(buf), "%llu:%02llu", static_cast<unsigned long long>(s / 60),
-                          static_cast<unsigned long long>(s % 60));
-            return buf;
-        };
-        ImGui::Text("Progress: %s / %s", format_time(track.position_ms).c_str(),
-                    format_time(track.duration_ms).c_str());
-
-        float progress = 0.0f;
-        if (track.duration_ms > 0) {
-            progress =
-                static_cast<float>(track.position_ms) / static_cast<float>(track.duration_ms);
-        }
-        ImGui::ProgressBar(progress, ImVec2(-1.0f, 6.0f), "");
-    } else {
-        ImGui::Text("No active stream configured.");
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-    // VOLUME SLIDER
-    ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "VOLUME CONTROL");
-    ImGui::Separator();
-    float gain = g_bridge->gain();
-    if (ImGui::SliderFloat("Output Volume", &gain, 0.0f, 1.0f, "%.2f")) {
-        g_bridge->set_gain(gain);
-        g_store->patch([&](Config& c) { c.audio.output_gain = gain; });
-    }
-
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-    // TRANSPORT ACTION CONTROLS
-    ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "TRANSPORT CONTROLS");
-    ImGui::Separator();
-    if (action_busy.load(std::memory_order_acquire)) {
-        ImGui::TextDisabled("Applying radio change...");
-    }
+    auto* active          = g_mgr->active();
+    TrackInfo track       = active ? active->current_track() : TrackInfo{};
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
-    if (ImGui::Button(is_playing ? "Pause" : "Play", ImVec2(96, 28))) {
-        if (active) {
-            enqueue_action([active, is_playing] {
-                if (is_playing) {
-                    active->pause();
-                } else {
-                    active->play();
-                }
-            });
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float win_w       = ImGui::GetWindowWidth();
+    const float btn_w       = 30.0f;
+    const float btn_h       = 24.0f;
+    const float volume_w    = 90.0f;
+    const float transport_w = btn_w * 3 + 6.0f;        // 3 buttons + 2 gaps
+    const float vol_gear_w  = volume_w + 4.0f + btn_w; // slider + gap + gear
+
+    // ── Row 1: Info (left) | Transport (centered) | Volume+Gear (right) ─
+
+    // Track info (left)
+    ImGui::SetCursorPosX(style.WindowPadding.x);
+    ImGui::BeginGroup();
+    if (active) {
+        std::string label = track.title.empty() ? std::string{active->display_name()} : track.title;
+        if (label.size() > 45) label = label.substr(0, 43) + "...";
+        ImGui::TextUnformatted(label.c_str());
+        if (!track.artist.empty() && track.artist != "Select a station") {
+            ImGui::TextColored(ImVec4(0.50f, 0.53f, 0.60f, 1.0f), "%s", track.artist.c_str());
         }
+    } else {
+        ImGui::TextUnformatted("No source active");
     }
+    ImGui::EndGroup();
+
     ImGui::SameLine();
-    if (ImGui::Button("Stop", ImVec2(80, 28))) {
-        if (active) {
-            enqueue_action([active] {
-                active->stop();
-                g_mgr->ring().drain();
-            });
+
+    // Transport buttons (centered)
+    ImGui::SetCursorPosX(style.WindowPadding.x +
+                         (win_w - style.WindowPadding.x * 2 - transport_w) * 0.5f);
+
+    if (action_busy.load(std::memory_order_acquire)) {
+        ImGui::TextDisabled("...");
+    } else {
+        if (ImGui::Button("|<", ImVec2(btn_w, btn_h))) {
+            if (active) {
+                enqueue_action([active] {
+                    active->previous();
+                    g_mgr->ring().drain();
+                });
+            }
         }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Back", ImVec2(80, 28))) {
-        if (active) {
-            enqueue_action([active] {
-                active->previous();
-                g_mgr->ring().drain();
-            });
+        ImGui::SameLine(0, 3);
+        if (ImGui::Button(is_playing ? "||" : ">", ImVec2(btn_w, btn_h))) {
+            if (active) {
+                enqueue_action([active, is_playing] {
+                    if (is_playing) {
+                        active->pause();
+                    } else {
+                        active->play();
+                    }
+                });
+            }
         }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Next", ImVec2(80, 28))) {
-        if (active) {
-            enqueue_action([active] {
-                active->next();
-                g_mgr->ring().drain();
-            });
+        ImGui::SameLine(0, 3);
+        if (ImGui::Button(">|", ImVec2(btn_w, btn_h))) {
+            if (active) {
+                enqueue_action([active] {
+                    active->next();
+                    g_mgr->ring().drain();
+                });
+            }
         }
     }
 
-    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+    ImGui::SameLine();
 
-    // PRESET PICKER
-    ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "STATION PRESETS");
-    ImGui::Separator();
+    // Volume slider + Settings gear (right-aligned)
+    ImGui::SetCursorPosX(win_w - style.WindowPadding.x - vol_gear_w);
 
-    auto* sc = dynamic_cast<sources::ShoutcastSource*>(g_mgr->find("shoutcast"));
+    float gain_pct = g_bridge->gain() * 100.0f;
+    ImGui::SetNextItemWidth(volume_w);
+    if (ImGui::SliderFloat("##vol", &gain_pct, 0.0f, 100.0f, "%.0f%%")) {
+        g_bridge->set_gain(gain_pct / 100.0f);
+        g_store->patch([&](Config& c) { c.audio.output_gain = gain_pct / 100.0f; });
+    }
+
+    ImGui::SameLine(0, 3);
+    if (ImGui::Button(show_settings ? "[x]" : "[o]", ImVec2(btn_w, btn_h))) {
+        show_settings = !show_settings;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
+
+    // ── Row 2: Station/Stream combined combo ──────────────────────────
+    auto* sc = dynamic_cast<sources::ShoutcastSource*>(g_mgr->active());
     if (sc) {
         auto stations = sc->stations();
-        if (stations.empty()) {
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Presets stations catalog empty.");
-        } else {
-            static std::size_t selected_station = 0;
-            static std::size_t selected_stream  = 0;
+        if (!stations.empty()) {
+            static std::vector<std::string> entry_names;
+            static std::vector<std::string> entry_sids;
+            static std::vector<std::string> entry_strids;
+            static int sel_entry = 0;
 
-            const auto [active_station, active_stream] = sc->active_station_stream();
-            if (!active_station.empty()) {
-                for (std::size_t i = 0; i < stations.size(); ++i) {
-                    if (stations[i].id == active_station) {
-                        selected_station = i;
-                        for (std::size_t j = 0; j < stations[i].streams.size(); ++j) {
-                            if (stations[i].streams[j].id == active_stream) selected_stream = j;
-                        }
-                        break;
-                    }
+            const auto [active_st, active_str] = sc->active_station_stream();
+
+            // Rebuild flat entry list
+            entry_names.clear();
+            entry_sids.clear();
+            entry_strids.clear();
+            int idx        = 0;
+            int active_idx = -1;
+            for (const auto& st : stations) {
+                for (const auto& str : st.streams) {
+                    entry_names.push_back(st.name + "  -  " + str.name);
+                    entry_sids.push_back(st.id);
+                    entry_strids.push_back(str.id);
+                    if (st.id == active_st && str.id == active_str) active_idx = idx;
+                    idx++;
                 }
             }
 
-            selected_station    = std::clamp(selected_station, static_cast<std::size_t>(0),
-                                             stations.empty() ? 0 : stations.size() - 1);
-            const auto& station = stations[selected_station];
-            selected_stream =
-                station.streams.empty()
-                    ? 0
-                    : std::clamp(selected_stream, static_cast<std::size_t>(0),
-                                 station.streams.empty() ? 0 : station.streams.size() - 1);
+            if (active_idx >= 0) sel_entry = active_idx;
+            if (!entry_names.empty()) {
+                sel_entry = std::clamp(sel_entry, 0, static_cast<int>(entry_names.size()) - 1);
+            } else {
+                sel_entry = 0;
+            }
 
-            const char* station_preview = station.name.c_str();
-            if (ImGui::BeginCombo("Station", station_preview)) {
-                for (std::size_t i = 0; i < stations.size(); ++i) {
-                    const bool selected = (selected_station == i);
-                    if (ImGui::Selectable(stations[i].name.c_str(), selected)) {
-                        selected_station = i;
-                        selected_stream  = 0;
+            const char* preview = entry_names.empty() ? "" : entry_names[sel_entry].c_str();
+            ImGui::SetNextItemWidth(420.0f);
+            if (ImGui::BeginCombo("##station", preview)) {
+                for (size_t i = 0; i < entry_names.size(); i++) {
+                    const bool is_sel = std::cmp_equal(i, sel_entry);
+                    if (ImGui::Selectable(entry_names[i].c_str(), is_sel) &&
+                        !action_busy.load(std::memory_order_acquire)) {
+                        sel_entry = i;
+                        enqueue_action([sid = entry_sids[i], strid = entry_strids[i]] {
+                            if (auto* s =
+                                    dynamic_cast<sources::ShoutcastSource*>(g_mgr->active())) {
+                                s->select_station(sid, strid);
+                                g_mgr->ring().drain();
+                                s->play();
+                            }
+                        });
                     }
-                    if (selected) ImGui::SetItemDefaultFocus();
+                    if (is_sel) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
             }
-
-            const auto& picked_station = stations[selected_station];
-            if (picked_station.streams.empty()) {
-                ImGui::TextDisabled("Selected station has no streams.");
-            } else {
-                selected_stream = std::clamp(
-                    selected_stream, static_cast<std::size_t>(0),
-                    picked_station.streams.empty() ? 0 : picked_station.streams.size() - 1);
-                const auto& picked_stream = picked_station.streams[selected_stream];
-                if (ImGui::BeginCombo("Stream", picked_stream.name.c_str())) {
-                    for (std::size_t i = 0; i < picked_station.streams.size(); ++i) {
-                        const auto& stream  = picked_station.streams[i];
-                        const bool selected = (selected_stream == i);
-                        const bool active_stream_match =
-                            picked_station.id == active_station && stream.id == active_stream;
-                        std::string label = stream.name;
-                        if (active_stream_match) label += "  [active]";
-                        if (ImGui::Selectable(label.c_str(), selected)) selected_stream = i;
-                        if (selected) ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-
-                if (!picked_station.description.empty()) {
-                    ImGui::TextWrapped("%s", picked_station.description.c_str());
-                }
-
-                if (ImGui::Button("Tune Selected Stream", ImVec2(-1.0f, 30.0f))) {
-                    std::string station_id = picked_station.id;
-                    std::string stream_id  = picked_stream.id;
-                    enqueue_action([station_id = std::move(station_id),
-                                    stream_id  = std::move(stream_id)] {
-                        if (auto* source =
-                                dynamic_cast<sources::ShoutcastSource*>(g_mgr->find("shoutcast"))) {
-                            source->select_station(station_id, stream_id);
-                            g_mgr->ring().drain();
-                            g_mgr->switch_to("shoutcast");
-                        }
-                    });
-                }
-
-                ImGui::BeginChild("StationStreams", ImVec2(-1.0f, 120.0f), true);
-                for (const auto& stream : picked_station.streams) {
-                    const bool active_stream_match =
-                        picked_station.id == active_station && stream.id == active_stream;
-                    if (ImGui::Selectable(stream.name.c_str(), active_stream_match)) {
-                        std::string station_id = picked_station.id;
-                        std::string stream_id  = stream.id;
-                        enqueue_action(
-                            [station_id = std::move(station_id), stream_id = std::move(stream_id)] {
-                                if (auto* source = dynamic_cast<sources::ShoutcastSource*>(
-                                        g_mgr->find("shoutcast"))) {
-                                    source->select_station(station_id, stream_id);
-                                    g_mgr->ring().drain();
-                                    g_mgr->switch_to("shoutcast");
-                                }
-                            });
-                    }
-                }
-                ImGui::EndChild();
-            }
+        } else {
+            ImGui::TextDisabled("No stations loaded");
         }
     } else {
-        ImGui::Text("Shoutcast source not registered.");
+        ImGui::TextDisabled("Shoutcast source unavailable");
     }
 
     ImGui::End();
+
+    // ── Settings window ────────────────────────────────────────────────
+    if (show_settings) {
+        ImGui::SetNextWindowSize(ImVec2(260, 80), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowBgAlpha(0.94f);
+        ImGui::Begin("Settings", &show_settings);
+        if (ImGui::Combo("Theme", &g_theme_idx, g_theme_names, IM_ARRAYSIZE(g_theme_names))) {
+            ApplyTheme(g_theme_idx);
+        }
+        ImGui::End();
+    }
 }
 
 bool wait_for_fence(UINT64 fence_value) {
@@ -435,7 +539,7 @@ std::filesystem::path module_directory() {
 
 void load_overlay_font() {
     auto& io             = ImGui::GetIO();
-    const auto font_path = module_directory() / "fh6-radio" / "fonts" / "FusionPixel12-ja.ttf";
+    const auto font_path = module_directory() / "mods" / "frdx" / "fonts" / "FusionPixel12-ja.ttf";
     if (!std::filesystem::exists(font_path)) {
         log::warn("[overlay] Fusion Pixel font not found at {}; using ImGui default font",
                   font_path.string());
@@ -446,14 +550,15 @@ void load_overlay_font() {
     ImFontGlyphRangesBuilder builder;
     builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
     builder.AddRanges(io.Fonts->GetGlyphRangesJapanese());
-    builder.BuildRanges(&font_glyph_ranges);
+    static ImVector<ImWchar> glyph_ranges;
+    builder.BuildRanges(&glyph_ranges);
 
     ImFontConfig cfg{};
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH  = true;
-    auto* font      = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg,
-                                                   font_glyph_ranges.Data);
+    auto* font =
+        io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg, glyph_ranges.Data);
     if (font) {
         io.FontDefault = font;
         log::info("[overlay] loaded Fusion Pixel 12px ImGui font at 16px from {}",
@@ -808,10 +913,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
                 return original_Present(pSwapChain, SyncInterval, Flags);
             }
 
-            ImGui::StyleColorsDark();
-            ImGui::GetStyle().WindowRounding = 10.0f;
-            ImGui::GetStyle().FrameRounding  = 6.0f;
-            ImGui::GetStyle().PopupRounding  = 6.0f;
+            ApplyTheme(g_theme_idx);
 
             initialized                    = true;
             ImGui::GetIO().MouseDrawCursor = show_menu;
@@ -1080,8 +1182,13 @@ void shutdown() noexcept {
         }
         {
             std::scoped_lock lk{swapchain_map_mutex};
-            for (auto& pair : swapchain_queues) {
-                if (pair.second) pair.second->Release();
+            // Copy keys to avoid nondeterministic pointer iteration
+            std::vector<IDXGISwapChain*> chains;
+            chains.reserve(swapchain_queues.size());
+            for (auto& pair : swapchain_queues) chains.push_back(pair.first);
+            for (auto* chain : chains) {
+                auto it = swapchain_queues.find(chain);
+                if (it != swapchain_queues.end() && it->second) it->second->Release();
             }
             swapchain_queues.clear();
         }
@@ -1095,4 +1202,4 @@ void shutdown() noexcept {
     }
 }
 
-} // namespace fh6::dx12_overlay
+} // namespace frdx::dx12_overlay

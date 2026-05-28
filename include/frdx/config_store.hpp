@@ -1,13 +1,13 @@
 #pragma once
 
-#include "fh6/config.hpp"
+#include "frdx/config.hpp"
 
 #include <filesystem>
 #include <functional>
 #include <mutex>
 #include <vector>
 
-namespace fh6 {
+namespace frdx {
 
 // Owns the live in-memory Config and the on-disk file. patch() merges a
 // partial update, atomically rewrites the file, then notifies observers.
@@ -29,4 +29,4 @@ private:
     std::vector<Observer> observers_;
 };
 
-} // namespace fh6
+} // namespace frdx

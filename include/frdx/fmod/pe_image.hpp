@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 struct PESection {
     std::array<char, 9> name{}; // null-terminated
@@ -33,4 +33,4 @@ struct PEImage {
 
 PEImage parse(std::byte* base);
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

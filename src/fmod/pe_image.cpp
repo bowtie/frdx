@@ -1,11 +1,11 @@
 #define NOMINMAX
-#include "fh6/fmod/pe_image.hpp"
+#include "frdx/fmod/pe_image.hpp"
 
 #include <windows.h>
 #include <algorithm>
 #include <cstring>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 bool PESection::readable() const noexcept {
     return (characteristics & 0x40000000u /* IMAGE_SCN_MEM_READ */) != 0;
@@ -74,4 +74,4 @@ PEImage parse(std::byte* base) {
     return img;
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

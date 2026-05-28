@@ -1,7 +1,7 @@
-#include "fh6/config_store.hpp"
-#include "fh6/log.hpp"
+#include "frdx/config_store.hpp"
+#include "frdx/log.hpp"
 
-namespace fh6 {
+namespace frdx {
 
 ConfigStore::ConfigStore(std::filesystem::path file, Config initial)
     : path_{std::move(file)}, cfg_{std::move(initial)} {}
@@ -54,4 +54,4 @@ void ConfigStore::on_change(Observer obs) {
     observers_.push_back(std::move(obs));
 }
 
-} // namespace fh6
+} // namespace frdx

@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-namespace fh6::subprocess {
+namespace frdx::subprocess {
 
 std::wstring widen(std::string_view s);
 std::string narrow(std::wstring_view ws);
@@ -31,4 +31,4 @@ HANDLE spawn_in_job(HANDLE job, const std::wstring& cmd, HANDLE stdin_h, HANDLE 
 // common failure modes (missing on PATH, AV quarantine, wrong arch).
 std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from_config);
 
-} // namespace fh6::subprocess
+} // namespace frdx::subprocess

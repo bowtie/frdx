@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fh6_universal_radio LANGUAGES C CXX)
+project(forza_radio_dx LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,7 +35,6 @@ add_library(version SHARED
     src/fmod/dsp_control_loop.cpp
     src/fmod/metadata_injector.cpp
     src/fmod/dx12_overlay.cpp
-    src/http/http_server.cpp
     src/sources/shoutcast_source.cpp
 
     # Dear ImGui
@@ -56,7 +55,6 @@ add_library(version SHARED
 
 target_include_directories(version PRIVATE
     include
-    third_party/cpp-httplib
     third_party/nlohmann
     third_party/toml11
     third_party/wil/include

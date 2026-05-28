@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <memory>
 
-namespace fh6 {
+namespace frdx {
 
 class RingBuffer {
 public:
@@ -44,4 +44,4 @@ private:
     alignas(64) std::atomic<bool> hold_{false};
 };
 
-} // namespace fh6
+} // namespace frdx

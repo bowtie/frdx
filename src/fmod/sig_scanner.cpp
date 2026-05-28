@@ -1,5 +1,5 @@
-#include "fh6/fmod/sig_scanner.hpp"
-#include "fh6/log.hpp"
+#include "frdx/fmod/sig_scanner.hpp"
+#include "frdx/log.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,7 +7,7 @@
 #include <cstring>
 #include <vector>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 
@@ -216,4 +216,4 @@ std::byte* find_by_pattern(const PEImage& img, std::string_view pattern) noexcep
     return match;
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

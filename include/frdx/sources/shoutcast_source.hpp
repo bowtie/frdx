@@ -1,7 +1,7 @@
 #pragma once
 
-#include "fh6/audio_source.hpp"
-#include "fh6/config.hpp"
+#include "frdx/audio_source.hpp"
+#include "frdx/config.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -13,21 +13,18 @@
 #include <unordered_map>
 #include <vector>
 
-namespace fh6::sources {
+namespace frdx::sources {
 
 // ---- Station preset data structures ----
 
 struct StationMetadataMapping {
-    std::string title;       // JSON dot-path, e.g. "data.track_title"
-    std::string artist;      // JSON dot-path, e.g. "data.track_artist"
-    std::string artwork_url; // JSON dot-path, e.g. "data.artwork_urls.large"
+    std::string title;  // JSON dot-path, e.g. "data.track_title"
+    std::string artist; // JSON dot-path, e.g. "data.track_artist"
     std::string
         artist_array_field; // if artist resolves to array of objects, extract this field from each
     std::string artist_separator{", "}; // join array elements with this separator
     std::string
         split_separator; // when set, split a combined "artist - title" value from a single field
-    std::string artwork_url_template; // "https://cdn.example.com/covers/{value}" — {value} replaced
-                                      // by resolved artwork_url
 };
 
 struct StationStream {
@@ -81,7 +78,6 @@ struct StationMetadata {
     // Static metadata (type == "static").
     std::string static_title;
     std::string static_artist;
-    std::string static_cover_url;
 
     // WebSocket metadata (type == "websocket").
     StationMetadataWebSocketFilter ws_filter;
@@ -122,7 +118,6 @@ public:
 
     void play() override;
     void pause() override;
-    void stop() override;
     void next() override;
     void previous() override;
     void pump(RingBuffer& ring) override;
@@ -149,9 +144,6 @@ public:
     PlaybackState playback_state() const noexcept override {
         return state_.load(std::memory_order_acquire);
     }
-    AuthState auth_state() const noexcept override { return auth_; }
-    std::string auth_instructions() const override;
-    SourceCapabilities capabilities() const noexcept override { return {false, true, true}; }
 
 private:
     struct Pipe;
@@ -174,7 +166,6 @@ private:
     std::size_t preset_idx_ = 0;
     TrackInfo info_{};
     std::atomic<uint64_t> position_ms_{0};
-    AuthState auth_ = AuthState::none_required;
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
 
     // Dynamic display name (includes station name when active).
@@ -206,8 +197,8 @@ private:
 
     // Timestamp (steady_clock ms) of the last ICY StreamTitle received in
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
-    // metadata, they skip overwriting title/artist and only update artwork.
+    // metadata, they skip overwriting title/artist.
     std::atomic<int64_t> last_icy_ms_{0};
 };
 
-} // namespace fh6::sources
+} // namespace frdx::sources

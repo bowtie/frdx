@@ -1,12 +1,12 @@
 #pragma once
 
-#include "fh6/fmod/pe_image.hpp"
+#include "frdx/fmod/pe_image.hpp"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 struct RadioInstance {
     std::byte* refcount_obj;      // _Ref_count_obj2<RadioStreamFmod> on the heap
@@ -35,4 +35,4 @@ void* resolve_fmod_system(const PEImage& img, std::byte* radio_stream) noexcept;
 // Empty result means the radio system isn't ready yet; retry later.
 DiscoveryResult discover_radio_instances(const PEImage& img) noexcept;
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

@@ -1,8 +1,8 @@
-#include "fh6/subprocess.hpp"
+#include "frdx/subprocess.hpp"
 
 #include <format>
 
-namespace fh6::subprocess {
+namespace frdx::subprocess {
 
 std::wstring widen(std::string_view s) {
     if (s.empty()) return {};
@@ -106,10 +106,10 @@ std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from
         case ERROR_FILE_NOT_FOUND:
         case ERROR_PATH_NOT_FOUND:
             hint = from_config
-                     ? " -- the path in [shoutcast].ffmpeg_path does not exist. Fix the path "
-                       "or clear it to fall back to PATH lookup."
-                     : " -- ffmpeg is not on your PATH. Install it or set "
-                       "[shoutcast].ffmpeg_path in config.toml.";
+                     ? " -- the file could not be launched. Verify it is a valid "
+                       "Win64 ffmpeg build and not blocked by antivirus."
+                     : " -- ffmpeg is not on your PATH. Place ffmpeg.exe in the "
+                       "mods/frdx/ffmpeg/ folder, or set [shoutcast].ffmpeg_path in config.toml.";
             break;
         case ERROR_ACCESS_DENIED:
             hint = " -- likely blocked or quarantined by antivirus. Whitelist the binary.";
@@ -122,4 +122,4 @@ std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from
                        sys_msg.empty() ? "unknown" : sys_msg, narrow(bin), where, hint);
 }
 
-} // namespace fh6::subprocess
+} // namespace frdx::subprocess

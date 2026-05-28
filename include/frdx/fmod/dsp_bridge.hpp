@@ -1,17 +1,17 @@
 #pragma once
 
-#include "fh6/fmod/pe_image.hpp"
-#include "fh6/fmod/radio_discovery.hpp"
-#include "fh6/ring_buffer.hpp"
+#include "frdx/fmod/pe_image.hpp"
+#include "frdx/fmod/radio_discovery.hpp"
+#include "frdx/ring_buffer.hpp"
 
 #include <atomic>
 #include <cstdint>
 
-namespace fh6 {
+namespace frdx {
 class AudioSourceManager;
-} // namespace fh6
+} // namespace frdx
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 enum class DSPMode : uint32_t { off = 0, passthrough = 1, silence = 2, pcm = 3 };
 
@@ -135,4 +135,4 @@ private:
     std::atomic<uint32_t> last_out_ch_{0};
 };
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

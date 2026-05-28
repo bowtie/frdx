@@ -1,15 +1,15 @@
-#include "fh6/log.hpp"
-#include "fh6/detail/win32_handle.hpp"
+#include "frdx/log.hpp"
+#include "frdx/detail/win32_handle.hpp"
 
 #include <chrono>
 #include <mutex>
 #include <string>
 
-namespace fh6::log {
+namespace frdx::log {
 
 namespace {
 
-using fh6::detail::unique_file;
+using frdx::detail::unique_file;
 
 unique_file g_file;
 std::mutex g_mu;
@@ -59,4 +59,4 @@ void emit(Level level, std::string_view message) noexcept {
     }
 }
 
-} // namespace fh6::log
+} // namespace frdx::log

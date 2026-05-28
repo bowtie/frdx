@@ -9,7 +9,7 @@
 #include <optional>
 #include <string>
 
-namespace fh6 {
+namespace frdx {
 
 // True iff [addr, addr+size) lies in committed pages with read access and
 // no PAGE_GUARD. One VirtualQuery, cheap enough for the hot path.
@@ -98,4 +98,4 @@ template <class Fn> bool seh_call(Fn&& fn) noexcept {
     }
 }
 
-} // namespace fh6
+} // namespace frdx

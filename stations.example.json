@@ -19,8 +19,7 @@
       "poll_interval_secs": 5,
       "mapping": {
         "title": "data.track_title",
-        "artist": "data.track_artist",
-        "artwork_url": "data.artwork_urls.large"
+        "artist": "data.track_artist"
       }
     }
   },
@@ -100,8 +99,7 @@
       "poll_interval_secs": 5,
       "mapping": {
         "title": "results.0.title",
-        "artist": "results.0.author",
-        "artwork_url": "results.0.img_large_url"
+        "artist": "results.0.author"
       }
     }
   },
@@ -140,8 +138,7 @@
       },
       "mapping": {
         "title": "title",
-        "artist": "artist",
-        "artwork_url": "image_url"
+        "artist": "artist"
       }
     }
   },
@@ -187,9 +184,7 @@
         "title": "song.title",
         "artist": "song.artists",
         "artist_array_field": "name",
-        "artist_separator": ", ",
-        "artwork_url": "song.albums.0.image",
-        "artwork_url_template": "https://cdn.listen.moe/covers/{value}"
+        "artist_separator": ", "
       }
     }
   },

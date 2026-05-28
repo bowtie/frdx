@@ -1,14 +1,14 @@
 #define NOMINMAX
-#include "fh6/fmod/dsp_bridge.hpp"
-#include "fh6/fmod/sig_scanner.hpp"
-#include "fh6/audio_source_manager.hpp"
-#include "fh6/log.hpp"
-#include "fh6/safe_mem.hpp"
+#include "frdx/fmod/dsp_bridge.hpp"
+#include "frdx/fmod/sig_scanner.hpp"
+#include "frdx/audio_source_manager.hpp"
+#include "frdx/log.hpp"
+#include "frdx/safe_mem.hpp"
 
 #include <algorithm>
 #include <cstring>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 
@@ -207,7 +207,7 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     constexpr uint32_t kVersions[] = {0x00011000u, 0x00011003u, 0x00010000u};
 
     FMOD_DSP_DESCRIPTION desc{};
-    std::memcpy(desc.name, "FH6 Universal Radio", 19);
+    std::memcpy(desc.name, "Forza Radio DX", 14);
     desc.version          = 1;
     desc.numinputbuffers  = 1;
     desc.numoutputbuffers = 1;
@@ -393,4 +393,4 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     return 0;
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

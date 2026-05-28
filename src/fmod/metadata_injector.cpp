@@ -1,15 +1,15 @@
-#include "fh6/fmod/metadata_injector.hpp"
-#include "fh6/log.hpp"
-#include "fh6/safe_mem.hpp"
+#include "frdx/fmod/metadata_injector.hpp"
+#include "frdx/log.hpp"
+#include "frdx/safe_mem.hpp"
 
-#include <fh6/detail/win32_handle.hpp>
+#include <frdx/detail/win32_handle.hpp>
 #include <cstring>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 
-using fh6::detail::unique_virtual;
+using frdx::detail::unique_virtual;
 
 constexpr std::ptrdiff_t kTitleOffset  = 0x30;
 constexpr std::ptrdiff_t kArtistOffset = 0x50;
@@ -142,4 +142,4 @@ bool MetadataInjector::update(std::string_view title, std::string_view artist) n
     return ok;
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

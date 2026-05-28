@@ -1,6 +1,6 @@
 #pragma once
 
-namespace fh6 {
+namespace frdx {
 class AudioSourceManager;
 class ConfigStore;
 namespace fmod_bridge {
@@ -18,4 +18,4 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
 void shutdown() noexcept;
 
 } // namespace dx12_overlay
-} // namespace fh6
+} // namespace frdx
