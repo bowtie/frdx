@@ -184,6 +184,12 @@ private:
     mutable std::mutex ws_mu_;
     void* ws_handle_ = nullptr;
 
+    // Persistent WinHTTP session handle shared across REST and WebSocket polling.
+    void* winhttp_session_ = nullptr;
+
+    // Retry counter to preserve active station during brief network dropouts.
+    int reconnect_attempts_ = 0;
+
     // Timestamp (steady_clock ms) of the last ICY StreamTitle received in
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
     // metadata, they skip overwriting title/artist and only update artwork.

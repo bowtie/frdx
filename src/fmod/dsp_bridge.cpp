@@ -363,10 +363,12 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
             if (out_ch == 1) {
                 o[0] = (L + R) * 0.5f;
             } else {
-                o[0]           = L;
-                o[1]           = R;
-                const float dn = (L + R) * 0.5f;
-                for (int32_t c = 2; c < out_ch; ++c) o[c] = dn;
+                o[0] = L;
+                o[1] = R;
+                if (out_ch > 2) {
+                    const float dn = (L + R) * 0.5f;
+                    for (int32_t c = 2; c < out_ch; ++c) o[c] = dn;
+                }
             }
         }
 

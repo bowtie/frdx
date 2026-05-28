@@ -147,7 +147,6 @@ std::vector<std::byte*> scan_heap(const PEImage& img, const std::byte* vtable) n
 // DisplayName/Artist slots.
 std::string read_sound_name(std::byte* radio_stream, int* step,
                             std::byte** out_body) noexcept {
-    std::string out;
     *step        = 0;
     if (out_body) *out_body = nullptr;
     std::byte* a = nullptr;
@@ -157,11 +156,14 @@ std::string read_sound_name(std::byte* radio_stream, int* step,
     if (!safe_read(a + 0x18, b) || !b) return {};
     *step = 2;
     if (out_body) *out_body = b;
+
+    char name_buf[512];
+    name_buf[0] = '\0';
+    bool ok = false;
     seh_call([&] {
-        auto s = safe_read_msvc_string(b + 0x10);
-        if (s) out = std::move(*s);
+        ok = safe_read_msvc_string_buf(b + 0x10, name_buf, sizeof(name_buf));
     });
-    return out;
+    return ok ? std::string{name_buf} : std::string{};
 }
 
 // Cache typedesc/COL/vtable + the heap-candidate list once located; retries

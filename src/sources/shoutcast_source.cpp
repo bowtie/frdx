@@ -29,7 +29,7 @@ constexpr std::uint64_t kPcmBytesPerSec = 48000ull * 2ull * 2ull;
 // response body as a string, or empty on any failure (timeout, non-200, etc.).
 // Uses system WinHTTP rather than cpp-httplib to avoid static-linking issues
 // in the game mod DLL context.
-std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
+std::string winhttp_get(void* session_handle, const std::string& url, int timeout_secs = 3) {
     std::wstring wurl = fh6::subprocess::widen(url);
 
     URL_COMPONENTS uc{};
@@ -48,20 +48,27 @@ std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
     bool is_ssl       = (uc.nScheme == INTERNET_SCHEME_HTTPS);
     INTERNET_PORT port = uc.nPort ? uc.nPort : (is_ssl ? 443 : 80);
 
-    HINTERNET hSession = WinHttpOpen(L"fh6-radio/1.0",
-                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                      WINHTTP_NO_PROXY_NAME,
-                                      WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return {};
+    HINTERNET hSession = session_handle ? static_cast<HINTERNET>(session_handle) : nullptr;
+    bool local_session = false;
+    if (!hSession) {
+        hSession = WinHttpOpen(L"fh6-radio/1.0",
+                               WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                               WINHTTP_NO_PROXY_NAME,
+                               WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) return {};
+        local_session = true;
+    }
 
-    DWORD to = static_cast<DWORD>(timeout_secs) * 1000;
-    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
-    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &to, sizeof(to));
-    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
+    if (local_session) {
+        DWORD to = static_cast<DWORD>(timeout_secs) * 1000;
+        WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
+        WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &to, sizeof(to));
+        WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
+    }
 
     HINTERNET hConnect = WinHttpConnect(hSession, host, port, 0);
     if (!hConnect) {
-        WinHttpCloseHandle(hSession);
+        if (local_session) WinHttpCloseHandle(hSession);
         return {};
     }
 
@@ -71,7 +78,7 @@ std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
                                              is_ssl ? WINHTTP_FLAG_SECURE : 0);
     if (!hRequest) {
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+        if (local_session) WinHttpCloseHandle(hSession);
         return {};
     }
 
@@ -85,14 +92,14 @@ std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
                              WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+        if (local_session) WinHttpCloseHandle(hSession);
         return {};
     }
 
     if (!WinHttpReceiveResponse(hRequest, nullptr)) {
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+        if (local_session) WinHttpCloseHandle(hSession);
         return {};
     }
 
@@ -103,13 +110,13 @@ std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
                               nullptr, &status, &status_sz, nullptr)) {
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+        if (local_session) WinHttpCloseHandle(hSession);
         return {};
     }
     if (status != 200) {
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+        if (local_session) WinHttpCloseHandle(hSession);
         return {};
     }
 
@@ -124,7 +131,7 @@ std::string winhttp_get(const std::string& url, int timeout_secs = 3) {
 
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
+    if (local_session) WinHttpCloseHandle(hSession);
     return body;
 }
 
@@ -444,6 +451,10 @@ ShoutcastSource::ShoutcastSource(ShoutcastConfig cfg) : cfg_{std::move(cfg)} {
 ShoutcastSource::~ShoutcastSource() {
     stop_metadata_poller();
     stop_pipe_locked();
+    if (winhttp_session_) {
+        WinHttpCloseHandle(static_cast<HINTERNET>(winhttp_session_));
+        winhttp_session_ = nullptr;
+    }
 }
 
 bool ShoutcastSource::initialize() {
@@ -453,6 +464,21 @@ bool ShoutcastSource::initialize() {
         target_url_ = cfg_.default_url;
     }
     auth_ = AuthState::none_required;
+
+    // Create a persistent shared WinHTTP session with default timeouts.
+    winhttp_session_ = WinHttpOpen(L"fh6-radio/1.0",
+                                   WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                   WINHTTP_NO_PROXY_NAME,
+                                   WINHTTP_NO_PROXY_BYPASS, 0);
+    if (winhttp_session_) {
+        DWORD to = 3000; // 3 seconds timeout
+        WinHttpSetOption(static_cast<HINTERNET>(winhttp_session_), WINHTTP_OPTION_CONNECT_TIMEOUT, &to, sizeof(to));
+        WinHttpSetOption(static_cast<HINTERNET>(winhttp_session_), WINHTTP_OPTION_SEND_TIMEOUT, &to, sizeof(to));
+        WinHttpSetOption(static_cast<HINTERNET>(winhttp_session_), WINHTTP_OPTION_RECEIVE_TIMEOUT, &to, sizeof(to));
+    } else {
+        log::warn("[shoutcast] failed to initialize shared WinHTTP session; falling back to local sessions");
+    }
+
     return true;
 }
 
@@ -460,6 +486,10 @@ void ShoutcastSource::shutdown() noexcept {
     stop_metadata_poller();
     std::scoped_lock lk{mu_};
     stop_pipe_locked();
+    if (winhttp_session_) {
+        WinHttpCloseHandle(static_cast<HINTERNET>(winhttp_session_));
+        winhttp_session_ = nullptr;
+    }
 }
 
 void ShoutcastSource::set_target(std::string url) {
@@ -925,24 +955,31 @@ void ShoutcastSource::restart_metadata_for_current() {
                 is_ssl = (uc.nScheme == INTERNET_SCHEME_HTTPS);
                 DWORD port = uc.nPort ? uc.nPort : (is_ssl ? 443 : 80);
 
-                HINTERNET hSession = WinHttpOpen(L"fh6-radio/1.0",
-                                                  WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                                  WINHTTP_NO_PROXY_NAME,
-                                                  WINHTTP_NO_PROXY_BYPASS, 0);
+                HINTERNET hSession = winhttp_session_ ? static_cast<HINTERNET>(winhttp_session_) : nullptr;
+                bool local_session = false;
                 if (!hSession) {
-                    log::warn("[shoutcast] ws: WinHttpOpen failed ({})", GetLastError());
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    continue;
+                    hSession = WinHttpOpen(L"fh6-radio/1.0",
+                                           WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                           WINHTTP_NO_PROXY_NAME,
+                                           WINHTTP_NO_PROXY_BYPASS, 0);
+                    if (!hSession) {
+                        log::warn("[shoutcast] ws: WinHttpOpen failed ({})", GetLastError());
+                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                        continue;
+                    }
+                    local_session = true;
                 }
 
-                DWORD recv_timeout_ms = 5000;
-                WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT,
-                                 &recv_timeout_ms, sizeof(recv_timeout_ms));
+                if (local_session) {
+                    DWORD recv_timeout_ms = 5000;
+                    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT,
+                                     &recv_timeout_ms, sizeof(recv_timeout_ms));
+                }
 
                 HINTERNET hConnect = WinHttpConnect(hSession, host, (INTERNET_PORT)port, 0);
                 if (!hConnect) {
                     log::warn("[shoutcast] ws: WinHttpConnect failed ({})", GetLastError());
-                    WinHttpCloseHandle(hSession);
+                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
@@ -953,8 +990,8 @@ void ShoutcastSource::restart_metadata_for_current() {
                                                          is_ssl ? WINHTTP_FLAG_SECURE : 0);
                 if (!hRequest) {
                     log::warn("[shoutcast] ws: WinHttpOpenRequest failed ({})", GetLastError());
-                    WinHttpCloseHandle(hConnect);
-                    WinHttpCloseHandle(hSession);
+                    CloseHandle(hConnect);
+                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
@@ -973,7 +1010,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     log::warn("[shoutcast] ws: upgrade failed ({})", GetLastError());
                     WinHttpCloseHandle(hRequest);
                     WinHttpCloseHandle(hConnect);
-                    WinHttpCloseHandle(hSession);
+                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
@@ -982,7 +1019,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     log::warn("[shoutcast] ws: SendRequest failed ({})", GetLastError());
                     WinHttpCloseHandle(hRequest);
                     WinHttpCloseHandle(hConnect);
-                    WinHttpCloseHandle(hSession);
+                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
@@ -991,7 +1028,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     log::warn("[shoutcast] ws: ReceiveResponse failed ({})", GetLastError());
                     WinHttpCloseHandle(hRequest);
                     WinHttpCloseHandle(hConnect);
-                    WinHttpCloseHandle(hSession);
+                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
@@ -1001,7 +1038,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     log::warn("[shoutcast] ws: upgrade complete failed ({})", GetLastError());
                     WinHttpCloseHandle(hRequest);
                     WinHttpCloseHandle(hConnect);
-                    WinHttpCloseHandle(hSession);
+                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
@@ -1145,7 +1182,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
                 WinHttpCloseHandle(hWebSocket);
                 WinHttpCloseHandle(hConnect);
-                WinHttpCloseHandle(hSession);
+                if (local_session) WinHttpCloseHandle(hSession);
 
                 if (stop.stop_requested() || metadata_stop_.load(std::memory_order_acquire)) break;
                 std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -1172,7 +1209,7 @@ void ShoutcastSource::restart_metadata_for_current() {
         }
 
         while (!stop.stop_requested() && !metadata_stop_.load(std::memory_order_acquire)) {
-            std::string raw = winhttp_get(url, 3);
+            std::string raw = winhttp_get(winhttp_session_, url, 3);
             if (raw.empty()) {
                 // If the request failed, still sleep before retrying.
                 for (int i = 0; i < interval; ++i) {
@@ -1346,7 +1383,17 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     if (p->ended) {
         update_position();
         if (ring.readable() == 0) {
-            if (!cfg_.presets.empty() || !stations_.empty()) cycle_preset();
+            if (reconnect_attempts_ < 3) {
+                reconnect_attempts_++;
+                log::info("[shoutcast] stream disconnected; attempting reconnect {}/3", reconnect_attempts_);
+            } else {
+                reconnect_attempts_ = 0;
+                log::warn("[shoutcast] max reconnect attempts reached; cycling presets");
+                if (!cfg_.presets.empty() || !stations_.empty()) cycle_preset();
+            }
+            // Caution: p (captured via pipe_.get()) becomes dangling here
+            // because start_pipe_locked() calls stop_pipe_locked() → pipe_.reset().
+            // p is intentionally not dereferenced after this point.
             start_pipe_locked();
             bool has_pipe = (pipe_ != nullptr);
             lk.unlock();
@@ -1388,11 +1435,14 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         if (writable < 4) break;
         std::size_t want = std::min<std::size_t>(writable, avail);
         if (want > 4096) want = 4096;
-        int16_t buf[1024]; // 4096 bytes as stereo s16 frames — naturally aligned for EQ
+        int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
         DWORD got = 0;
         if (!ReadFile(p->read_pipe, buf, (DWORD)want, &got, nullptr) || got == 0) {
             on_eof();
             return;
+        }
+        if (got > 0 && reconnect_attempts_ > 0) {
+            reconnect_attempts_ = 0;
         }
         ring.write(reinterpret_cast<std::byte*>(buf), got);
         p->bytes_written += got;

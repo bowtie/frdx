@@ -82,6 +82,7 @@ HANDLE spawn_in_job(HANDLE job, const std::wstring& cmd, HANDLE stdin_h, HANDLE 
 std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from_config) {
     wchar_t resolved[MAX_PATH] = {};
     DWORD got = SearchPathW(nullptr, bin.c_str(), L".exe", MAX_PATH, resolved, nullptr);
+    if (got > MAX_PATH) got = MAX_PATH; // cap — SearchPathW returns required size on overflow
     std::string where = got ? narrow({resolved, got})
                             : (from_config ? "(configured path not found on disk)"
                                            : "(not found on PATH)");
