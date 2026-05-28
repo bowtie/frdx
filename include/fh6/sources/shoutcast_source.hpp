@@ -161,6 +161,11 @@ private:
     void cycle_preset(int direction = 1); // cycle through all streams by one step, mu_ held
     void stop_metadata_poller();          // join bg thread (no-op now, kept for API compat)
 
+    // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
+    // Returns nullptr on any failure (CreateJob, CreatePipe, CreateProcess).
+    static std::unique_ptr<Pipe> launch_ffmpeg_pipe(const std::string& url,
+                                                    const std::filesystem::path& ffmpeg_path);
+
     ShoutcastConfig cfg_;
     std::unique_ptr<Pipe> pipe_;
 

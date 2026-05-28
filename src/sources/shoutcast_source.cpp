@@ -511,15 +511,94 @@ void ShoutcastSource::load_stations(const std::filesystem::path& path) {
     log::info("[shoutcast] {} station(s) available", stations_.size());
 }
 
+// ---- ffmpeg subprocess launcher (no mu_ held) ----
+
+std::unique_ptr<ShoutcastSource::Pipe>
+ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
+                                    const std::filesystem::path& ffmpeg_path) {
+    auto pipe = std::make_unique<Pipe>();
+    pipe->job = fh6::subprocess::create_kill_on_close_job();
+    if (!pipe->job) {
+        log::warn("[shoutcast] CreateJobObject failed ({})", GetLastError());
+        return nullptr;
+    }
+
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE ff_out_r = nullptr, ff_out_w = nullptr;
+    HANDLE err_r = nullptr, err_w = nullptr;
+
+    auto bail = [&] {
+        if (ff_out_r) CloseHandle(ff_out_r);
+        if (ff_out_w) CloseHandle(ff_out_w);
+        if (err_r) CloseHandle(err_r);
+        if (err_w) CloseHandle(err_w);
+    };
+
+    if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 1 << 20)) {
+        bail();
+        return nullptr;
+    }
+    SetHandleInformation(ff_out_r, 0, HANDLE_FLAG_INHERIT);
+
+    // Stderr pipe for ICY metadata. ffmpeg prints [icy] StreamTitle='...' lines here.
+    if (!CreatePipe(&err_r, &err_w, &sa, 1 << 16)) {
+        bail();
+        return nullptr;
+    }
+    SetHandleInformation(err_r, 0, HANDLE_FLAG_INHERIT);
+
+    HANDLE nul_in = fh6::subprocess::open_nul(GENERIC_READ);
+
+    const auto ff = ffmpeg_path.empty() ? L"ffmpeg" : ffmpeg_path.wstring();
+
+    std::wstring ff_cmd = fh6::subprocess::quote(ff) +
+                          L" -loglevel error"
+                          L" -icy 1"
+                          L" -reconnect 1"
+                          L" -reconnect_streamed 1"
+                          L" -reconnect_delay_max 5"
+                          L" -i " +
+                          fh6::subprocess::quote(fh6::subprocess::widen(url)) +
+                          L" -f s16le -acodec pcm_s16le -ar 48000 -ac 2 pipe:1";
+
+    pipe->proc_ff     = fh6::subprocess::spawn_in_job(pipe->job, ff_cmd, nul_in, ff_out_w, err_w);
+    const DWORD ec_ff = pipe->proc_ff ? 0u : GetLastError();
+    CloseHandle(ff_out_w);
+    CloseHandle(err_w);
+    ff_out_w = nullptr;
+    err_w    = nullptr;
+    if (nul_in) CloseHandle(nul_in);
+
+    if (!pipe->proc_ff) {
+        log::warn("[shoutcast] failed to launch ffmpeg -- {}",
+                  fh6::subprocess::describe_launch_failure(std::wstring{ff}, ec_ff,
+                                                           !ffmpeg_path.empty()));
+        if (ff_out_r) CloseHandle(ff_out_r);
+        if (err_r) CloseHandle(err_r);
+        return nullptr;
+    }
+
+    pipe->read_pipe   = ff_out_r;
+    pipe->stderr_pipe = err_r;
+    return pipe;
+}
+
+// ---- select_station ----
+
 void ShoutcastSource::select_station(const std::string& station_id, const std::string& stream_id) {
-    const StationPreset* station = nullptr;
-    const StationStream* stream  = nullptr;
-    bool has_pipe                = false;
-    std::string md_type_saved; // captured under lock for use after release
+    // Phase 1: configure under lock — fast path, no ffmpeg launch.
+    std::string launch_url;
+    std::string md_type;
+    std::string station_name;
+    std::string stream_name;
+    std::string md_url;
+    TrackInfo static_info;
+    bool has_static = false;
     {
         std::scoped_lock lk{mu_};
 
-        // Find the station.
+        const StationPreset* station = nullptr;
+        const StationStream* stream  = nullptr;
         for (const auto& s : stations_) {
             if (s.id == station_id) {
                 station = &s;
@@ -531,7 +610,6 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
             return;
         }
 
-        // Find the stream within the station.
         for (const auto& s : station->streams) {
             if (s.id == stream_id) {
                 stream = &s;
@@ -546,33 +624,28 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         target_url_        = stream->url;
         active_station_id_ = station_id;
         active_stream_id_  = stream_id;
+        launch_url         = target_url_;
+        station_name       = station->name;
+        stream_name        = stream->name;
 
         // Resolve the metadata URL / type for this stream.
         metadata_url_.clear();
-        md_type_saved = station->metadata.type;
-        if (md_type_saved == "rest") {
-            auto mit = station->metadata.stream_url_map.find(stream_id);
-            if (mit != station->metadata.stream_url_map.end()) {
-                metadata_url_ = mit->second;
-            } else {
-                metadata_url_ = station->metadata.url;
-            }
-        } else if (md_type_saved == "websocket") {
-            auto mit = station->metadata.stream_url_map.find(stream_id);
-            if (mit != station->metadata.stream_url_map.end()) {
-                metadata_url_ = mit->second;
-            } else {
-                metadata_url_ = station->metadata.url;
-            }
+        md_type = station->metadata.type;
+        if (md_type == "rest" || md_type == "websocket") {
+            auto mit      = station->metadata.stream_url_map.find(stream_id);
+            md_url        = (mit != station->metadata.stream_url_map.end()) ? mit->second
+                                                                            : station->metadata.url;
+            metadata_url_ = md_url;
         }
 
         // Handle static metadata: set info_ directly, no poller needed.
-        if (md_type_saved == "static") {
-            info_.title       = sanitize_brackets(station->metadata.static_title.empty()
-                                                      ? station->name
-                                                      : station->metadata.static_title);
-            info_.artist      = sanitize_brackets(station->metadata.static_artist);
-            info_.artwork_url = station->metadata.static_cover_url;
+        if (md_type == "static") {
+            has_static              = true;
+            static_info.title       = sanitize_brackets(station->metadata.static_title.empty()
+                                                            ? station->name
+                                                            : station->metadata.static_title);
+            static_info.artist      = sanitize_brackets(station->metadata.static_artist);
+            static_info.artwork_url = station->metadata.static_cover_url;
         }
 
         // Signal the old metadata thread to stop before restarting the
@@ -580,11 +653,37 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         // info_ it sees the flag and skips the write.
         metadata_stop_.store(true, std::memory_order_release);
 
-        // Restart pipe (under lock).
+        // Stop old pipe (fast — no ffmpeg launch here).
         stop_pipe_locked();
-        start_pipe_locked();
-        has_pipe = (pipe_ != nullptr);
-    } // mu_ released before poller stop/start to avoid deadlock
+    } // mu_ released — ffmpeg launch happens outside the lock
+
+    // Phase 2: launch ffmpeg OUTSIDE the lock (expensive subprocess creation).
+    auto new_pipe = launch_url.empty() ? nullptr : launch_ffmpeg_pipe(launch_url, cfg_.ffmpeg_path);
+
+    // Phase 3: install pipe and set metadata under lock.
+    bool has_pipe = false;
+    {
+        std::scoped_lock lk{mu_};
+        // Only install if we're still on the same station (not changed during launch).
+        if (active_station_id_ == station_id && active_stream_id_ == stream_id) {
+            if (new_pipe) {
+                pipe_    = std::move(new_pipe);
+                has_pipe = true;
+            }
+
+            if (has_static) {
+                info_ = static_info;
+            } else {
+                info_        = TrackInfo{};
+                info_.title  = station_name;
+                info_.artist = stream_name;
+            }
+            display_name_     = station_name;
+            info_.duration_ms = 0;
+            position_ms_.store(0, std::memory_order_release);
+            state_.store(PlaybackState::buffering, std::memory_order_release);
+        }
+    }
 
     // Stop old poller and start the appropriate new one.
     stop_metadata_poller();
@@ -593,8 +692,8 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     if (has_pipe) state_.store(PlaybackState::playing, std::memory_order_release);
 
     log::info("[shoutcast] selected station '{}' stream '{}' ({}) metadata={} type={}", station_id,
-              stream_id, target_url_, metadata_url_.empty() ? "none" : metadata_url_,
-              md_type_saved.empty() ? "icy" : md_type_saved);
+              stream_id, launch_url, md_url.empty() ? "none" : md_url,
+              md_type.empty() ? "icy" : md_type);
 }
 
 void ShoutcastSource::cycle_preset(int direction) {

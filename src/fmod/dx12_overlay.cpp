@@ -59,7 +59,7 @@ fmod_bridge::DSPBridge* g_bridge = nullptr;
 ConfigStore* g_store             = nullptr;
 
 // DirectX 12 render contexts
-ID3D12Device* d3d12_device                    = nullptr;
+ID3D12Device* d3d12_device = nullptr;
 std::mutex swapchain_map_mutex;
 std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> swapchain_queues;
 ID3D12DescriptorHeap* srv_descriptor_heap     = nullptr;
@@ -216,11 +216,10 @@ void draw_imgui_ui() {
             if (ms == 0) return "0:00";
             uint64_t s = ms / 1000;
             char buf[32];
-        std::snprintf(buf, sizeof(buf), "%llu:%02llu",
-                      static_cast<unsigned long long>(s / 60),
-                      static_cast<unsigned long long>(s % 60));
-        return buf;
-    };
+            std::snprintf(buf, sizeof(buf), "%llu:%02llu", static_cast<unsigned long long>(s / 60),
+                          static_cast<unsigned long long>(s % 60));
+            return buf;
+        };
         ImGui::Text("Progress: %s / %s", format_time(track.position_ms).c_str(),
                     format_time(track.duration_ms).c_str());
 
@@ -342,8 +341,7 @@ void draw_imgui_ui() {
                 ImGui::EndCombo();
             }
 
-            const auto& picked_station =
-                stations[static_cast<std::size_t>(selected_station)];
+            const auto& picked_station = stations[static_cast<std::size_t>(selected_station)];
             if (picked_station.streams.empty()) {
                 ImGui::TextDisabled("Selected station has no streams.");
             } else {
@@ -353,7 +351,7 @@ void draw_imgui_ui() {
                     picked_station.streams[static_cast<std::size_t>(selected_stream)];
                 if (ImGui::BeginCombo("Stream", picked_stream.name.c_str())) {
                     for (int i = 0; i < static_cast<int>(picked_station.streams.size()); ++i) {
-                        const auto& stream = picked_station.streams[static_cast<std::size_t>(i)];
+                        const auto& stream  = picked_station.streams[static_cast<std::size_t>(i)];
                         const bool selected = (selected_stream == i);
                         const bool active_stream_match =
                             picked_station.id == active_station && stream.id == active_stream;
@@ -373,7 +371,7 @@ void draw_imgui_ui() {
                     std::string station_id = picked_station.id;
                     std::string stream_id  = picked_stream.id;
                     enqueue_action([station_id = std::move(station_id),
-                                    stream_id = std::move(stream_id)] {
+                                    stream_id  = std::move(stream_id)] {
                         if (auto* source =
                                 dynamic_cast<sources::ShoutcastSource*>(g_mgr->find("shoutcast"))) {
                             source->select_station(station_id, stream_id);
@@ -390,15 +388,15 @@ void draw_imgui_ui() {
                     if (ImGui::Selectable(stream.name.c_str(), active_stream_match)) {
                         std::string station_id = picked_station.id;
                         std::string stream_id  = stream.id;
-                        enqueue_action([station_id = std::move(station_id),
-                                        stream_id = std::move(stream_id)] {
-                            if (auto* source = dynamic_cast<sources::ShoutcastSource*>(
-                                    g_mgr->find("shoutcast"))) {
-                                source->select_station(station_id, stream_id);
-                                g_mgr->ring().drain();
-                                g_mgr->switch_to("shoutcast");
-                            }
-                        });
+                        enqueue_action(
+                            [station_id = std::move(station_id), stream_id = std::move(stream_id)] {
+                                if (auto* source = dynamic_cast<sources::ShoutcastSource*>(
+                                        g_mgr->find("shoutcast"))) {
+                                    source->select_station(station_id, stream_id);
+                                    g_mgr->ring().drain();
+                                    g_mgr->switch_to("shoutcast");
+                                }
+                            });
                     }
                 }
                 ImGui::EndChild();
@@ -435,7 +433,7 @@ std::filesystem::path module_directory() {
 }
 
 void load_overlay_font() {
-    auto& io = ImGui::GetIO();
+    auto& io             = ImGui::GetIO();
     const auto font_path = module_directory() / "fh6-radio" / "fonts" / "FusionPixel12-ja.ttf";
     if (!std::filesystem::exists(font_path)) {
         log::warn("[overlay] Fusion Pixel font not found at {}; using ImGui default font",
@@ -453,9 +451,8 @@ void load_overlay_font() {
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH  = true;
-    auto* font =
-        io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg,
-                                     font_glyph_ranges.Data);
+    auto* font      = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg,
+                                                   font_glyph_ranges.Data);
     if (font) {
         io.FontDefault = font;
         log::info("[overlay] loaded Fusion Pixel 12px ImGui font at 16px from {}",
@@ -540,7 +537,8 @@ hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWn
                 if (it->second) it->second->Release();
             }
             swapchain_queues[*ppSwapChain] = queue;
-            log::info("[overlay] intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to command queue 0x{:X}",
+            log::info("[overlay] intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to "
+                      "command queue 0x{:X}",
                       reinterpret_cast<uintptr_t>(*ppSwapChain),
                       reinterpret_cast<uintptr_t>(queue));
         }
@@ -766,10 +764,10 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             load_overlay_font();
             ImGui_ImplWin32_Init(desc.OutputWindow);
             ImGui_ImplDX12_InitInfo init_info;
-            init_info.Device = d3d12_device;
-            init_info.CommandQueue = active_queue;
+            init_info.Device            = d3d12_device;
+            init_info.CommandQueue      = active_queue;
             init_info.NumFramesInFlight = desc.BufferCount;
-            init_info.RTVFormat = desc.BufferDesc.Format;
+            init_info.RTVFormat         = desc.BufferDesc.Format;
             init_info.SrvDescriptorHeap = srv_descriptor_heap;
             init_info.LegacySingleSrvCpuDescriptor =
                 srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
@@ -813,7 +811,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             ImGui::GetStyle().FrameRounding  = 6.0f;
             ImGui::GetStyle().PopupRounding  = 6.0f;
 
-            initialized = true;
+            initialized                    = true;
             ImGui::GetIO().MouseDrawCursor = show_menu;
             log::info("[overlay] Direct3D 12 Dear ImGui Overlay context initialized successfully!");
         }
