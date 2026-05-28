@@ -304,15 +304,15 @@ void draw_imgui_ui() {
         if (stations.empty()) {
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Presets stations catalog empty.");
         } else {
-            static int selected_station = 0;
-            static int selected_stream  = 0;
+            static std::size_t selected_station = 0;
+            static std::size_t selected_stream  = 0;
 
             const auto [active_station, active_stream] = sc->active_station_stream();
             if (!active_station.empty()) {
-                for (int i = 0; i < static_cast<int>(stations.size()); ++i) {
+                for (std::size_t i = 0; i < stations.size(); ++i) {
                     if (stations[i].id == active_station) {
                         selected_station = i;
-                        for (int j = 0; j < static_cast<int>(stations[i].streams.size()); ++j) {
+                        for (std::size_t j = 0; j < stations[i].streams.size(); ++j) {
                             if (stations[i].streams[j].id == active_stream) selected_stream = j;
                         }
                         break;
@@ -320,17 +320,18 @@ void draw_imgui_ui() {
                 }
             }
 
-            selected_station =
-                std::clamp(selected_station, 0, static_cast<int>(stations.size()) - 1);
-            const auto& station = stations[static_cast<std::size_t>(selected_station)];
+            selected_station    = std::clamp(selected_station, static_cast<std::size_t>(0),
+                                             stations.empty() ? 0 : stations.size() - 1);
+            const auto& station = stations[selected_station];
             selected_stream =
                 station.streams.empty()
                     ? 0
-                    : std::clamp(selected_stream, 0, static_cast<int>(station.streams.size()) - 1);
+                    : std::clamp(selected_stream, static_cast<std::size_t>(0),
+                                 station.streams.empty() ? 0 : station.streams.size() - 1);
 
             const char* station_preview = station.name.c_str();
             if (ImGui::BeginCombo("Station", station_preview)) {
-                for (int i = 0; i < static_cast<int>(stations.size()); ++i) {
+                for (std::size_t i = 0; i < stations.size(); ++i) {
                     const bool selected = (selected_station == i);
                     if (ImGui::Selectable(stations[i].name.c_str(), selected)) {
                         selected_station = i;
@@ -341,17 +342,17 @@ void draw_imgui_ui() {
                 ImGui::EndCombo();
             }
 
-            const auto& picked_station = stations[static_cast<std::size_t>(selected_station)];
+            const auto& picked_station = stations[selected_station];
             if (picked_station.streams.empty()) {
                 ImGui::TextDisabled("Selected station has no streams.");
             } else {
-                selected_stream = std::clamp(selected_stream, 0,
-                                             static_cast<int>(picked_station.streams.size()) - 1);
-                const auto& picked_stream =
-                    picked_station.streams[static_cast<std::size_t>(selected_stream)];
+                selected_stream = std::clamp(
+                    selected_stream, static_cast<std::size_t>(0),
+                    picked_station.streams.empty() ? 0 : picked_station.streams.size() - 1);
+                const auto& picked_stream = picked_station.streams[selected_stream];
                 if (ImGui::BeginCombo("Stream", picked_stream.name.c_str())) {
-                    for (int i = 0; i < static_cast<int>(picked_station.streams.size()); ++i) {
-                        const auto& stream  = picked_station.streams[static_cast<std::size_t>(i)];
+                    for (std::size_t i = 0; i < picked_station.streams.size(); ++i) {
+                        const auto& stream  = picked_station.streams[i];
                         const bool selected = (selected_stream == i);
                         const bool active_stream_match =
                             picked_station.id == active_station && stream.id == active_stream;
@@ -536,6 +537,7 @@ hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWn
             if (it != swapchain_queues.end()) {
                 if (it->second) it->second->Release();
             }
+            // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
             swapchain_queues[*ppSwapChain] = queue;
             log::info("[overlay] intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to "
                       "command queue 0x{:X}",
@@ -983,8 +985,10 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
     }
 
     // Retrieve function vtable pointers from the active dummy swapchain and factory
+    // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
     void** swapChainVtable = *reinterpret_cast<void***>(swapChain);
-    void** factoryVtable   = *reinterpret_cast<void***>(factory);
+    // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
+    void** factoryVtable = *reinterpret_cast<void***>(factory);
 
     void* target_Present                = swapChainVtable[8];
     void* target_ResizeBuffers          = swapChainVtable[13];

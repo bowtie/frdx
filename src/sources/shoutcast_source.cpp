@@ -208,8 +208,7 @@ std::string resolve_mapped_value(const json& root, const std::string& path,
         const json* node = resolve_json_node(root, path);
         if (node && node->is_array()) {
             std::string result;
-            for (std::size_t i = 0; i < node->size(); ++i) {
-                const json& elem = (*node)[i];
+            for (const auto& elem : *node) {
                 std::string val;
                 if (elem.is_object()) {
                     auto it = elem.find(array_field);
@@ -411,7 +410,7 @@ std::string sanitize_brackets(std::string s) {
         {"\xE3\x80\x90", '['}, // 【
         {"\xE3\x80\x91", ']'}, // 】
     };
-    for (auto& rep : kReplace) {
+    for (const auto& rep : kReplace) {
         for (auto pos = s.find(rep.bytes); pos != std::string::npos;
              pos      = s.find(rep.bytes, pos + 1))
             s.replace(pos, 3, 1, rep.replace);
@@ -689,7 +688,9 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     stop_metadata_poller();
     restart_metadata_for_current();
 
-    if (has_pipe) state_.store(PlaybackState::playing, std::memory_order_release);
+    if (has_pipe) {
+        state_.store(PlaybackState::playing, std::memory_order_release);
+    }
 
     log::info("[shoutcast] selected station '{}' stream '{}' ({}) metadata={} type={}", station_id,
               stream_id, launch_url, md_url.empty() ? "none" : md_url,
@@ -697,10 +698,11 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
 }
 
 void ShoutcastSource::cycle_preset(int direction) {
-    if (direction >= 0)
+    if (direction >= 0) {
         direction = 1;
-    else
+    } else {
         direction = -1;
+    }
 
     if (!stations_.empty()) {
         // Build a flat list of (station_idx, stream_idx) pairs for all streams
@@ -920,7 +922,9 @@ void ShoutcastSource::next() {
         has_pipe = (pipe_ != nullptr);
     } // mu_ released before poller stop/start
     restart_metadata_for_current();
-    if (has_pipe) state_.store(PlaybackState::playing, std::memory_order_release);
+    if (has_pipe) {
+        state_.store(PlaybackState::playing, std::memory_order_release);
+    }
 }
 
 void ShoutcastSource::previous() {
@@ -944,7 +948,9 @@ void ShoutcastSource::previous() {
         has_pipe = (pipe_ != nullptr);
     } // mu_ released before poller stop/start
     restart_metadata_for_current();
-    if (has_pipe) state_.store(PlaybackState::playing, std::memory_order_release);
+    if (has_pipe) {
+        state_.store(PlaybackState::playing, std::memory_order_release);
+    }
 }
 
 TrackInfo ShoutcastSource::current_track() const {
@@ -1052,10 +1058,11 @@ void ShoutcastSource::restart_metadata_for_current() {
                 auto ws_pos        = ws_url.find("://");
                 if (ws_pos != std::string::npos) {
                     std::string scheme = ws_url.substr(0, ws_pos);
-                    if (scheme == "wss")
+                    if (scheme == "wss") {
                         ws_url.replace(0, 3, "https");
-                    else if (scheme == "ws")
+                    } else if (scheme == "ws") {
                         ws_url.replace(0, 2, "http");
+                    }
                 }
                 std::wstring wurl = fh6::subprocess::widen(ws_url);
                 bool is_ssl       = false;
@@ -1300,9 +1307,10 @@ void ShoutcastSource::restart_metadata_for_current() {
                     std::scoped_lock lk{ws_mu_};
                     if (ws_handle_ == hWebSocket) ws_handle_ = nullptr;
                 }
-                if (!metadata_stop_.load(std::memory_order_acquire))
+                if (!metadata_stop_.load(std::memory_order_acquire)) {
                     WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
                                           nullptr, 0);
+                }
                 WinHttpCloseHandle(hWebSocket);
                 WinHttpCloseHandle(hConnect);
                 if (local_session) WinHttpCloseHandle(hSession);
@@ -1515,7 +1523,9 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             // that does a blocking HTTP GET which would stall the audio thread.
             // The sync poll already ran during select_station()/next()/previous().
             // ICY metadata from ffmpeg will fill in track info as the stream plays.
-            if (has_pipe) state_.store(PlaybackState::playing, std::memory_order_release);
+            if (has_pipe) {
+                state_.store(PlaybackState::playing, std::memory_order_release);
+            }
         }
         return;
     }

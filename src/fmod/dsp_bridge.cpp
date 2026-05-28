@@ -222,7 +222,9 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
             dsp = nullptr;
             continue;
         }
-        if (rc == 0 && dsp) break;
+        if (rc == 0 && dsp) {
+            break;
+        }
         dsp = nullptr;
     }
     if (!dsp) {
@@ -322,10 +324,11 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         return 0;
     }
     if (m == DSPMode::passthrough) {
-        if (in_buf)
+        if (in_buf) {
             std::memcpy(out_buf, in_buf, total * sizeof(float));
-        else
+        } else {
             std::memset(out_buf, 0, total * sizeof(float));
+        }
         stats();
         return 0;
     }
@@ -355,7 +358,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     for (uint32_t produced = 0; produced < length;) {
         const uint32_t want_frames = std::min(length - produced, kChunkFrames);
         const std::size_t got      = ring.read(scratch, want_frames * 4);
-        const uint32_t got_frames  = static_cast<uint32_t>(got / 4);
+        const auto got_frames      = static_cast<uint32_t>(got / 4);
 
         for (uint32_t f = 0; f < got_frames; ++f) {
             const float fl = scratch[f * 2 + 0] * scale;
@@ -371,7 +374,9 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
                 o[1] = R;
                 if (out_ch > 2) {
                     const float dn = (L + R) * 0.5f;
-                    for (int32_t c = 2; c < out_ch; ++c) o[c] = dn;
+                    for (int32_t c = 2; c < out_ch; ++c) {
+                        o[c] = dn;
+                    }
                 }
             }
         }

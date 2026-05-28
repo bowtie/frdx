@@ -131,7 +131,7 @@ void ControlLoop::run(const std::stop_token& tok) {
 const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc,
                                                   bool require_live) const noexcept {
     const RadioInstance* fallback = nullptr;
-    for (auto& i : disc.instances) {
+    for (const auto& i : disc.instances) {
         if (require_live && !bridge_.channel_handle_alive(i.radio_stream)) continue;
         if (i.sound_name == kTargetSoundName) return &i;
         if (!fallback) fallback = &i;
