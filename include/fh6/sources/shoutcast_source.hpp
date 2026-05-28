@@ -18,13 +18,16 @@ namespace fh6::sources {
 // ---- Station preset data structures ----
 
 struct StationMetadataMapping {
-    std::string title;                // JSON dot-path, e.g. "data.track_title"
-    std::string artist;               // JSON dot-path, e.g. "data.track_artist"
-    std::string artwork_url;          // JSON dot-path, e.g. "data.artwork_urls.large"
-    std::string artist_array_field;   // if artist resolves to array of objects, extract this field from each
+    std::string title;       // JSON dot-path, e.g. "data.track_title"
+    std::string artist;      // JSON dot-path, e.g. "data.track_artist"
+    std::string artwork_url; // JSON dot-path, e.g. "data.artwork_urls.large"
+    std::string
+        artist_array_field; // if artist resolves to array of objects, extract this field from each
     std::string artist_separator{", "}; // join array elements with this separator
-    std::string split_separator;      // when set, split a combined "artist - title" value from a single field
-    std::string artwork_url_template; // "https://cdn.example.com/covers/{value}" — {value} replaced by resolved artwork_url
+    std::string
+        split_separator; // when set, split a combined "artist - title" value from a single field
+    std::string artwork_url_template; // "https://cdn.example.com/covers/{value}" — {value} replaced
+                                      // by resolved artwork_url
 };
 
 struct StationStream {
@@ -59,16 +62,18 @@ struct StationMetadataWebSocketFilter {
 
 // WebSocket heartbeat / keep-alive configuration.
 struct StationMetadataWebSocketHeartbeat {
-    std::string message;            // JSON message to send, e.g. "{\"op\":9}"
-    std::string interval_field;     // dot-path in server response that gives interval, e.g. "d.heartbeat"
+    std::string message; // JSON message to send, e.g. "{\"op\":9}"
+    std::string
+        interval_field; // dot-path in server response that gives interval, e.g. "d.heartbeat"
     int default_interval_ms = 45000; // fallback if server doesn't provide interval
 };
 
 struct StationMetadata {
     std::string type; // "rest", "static", "websocket", or empty
     std::string url;
-    std::unordered_map<std::string, std::string> stream_url_map;   // stream_id -> metadata URL
-    std::unordered_map<std::string, std::string> stream_name_map;  // stream_id -> display name for entry_selector matching
+    std::unordered_map<std::string, std::string> stream_url_map; // stream_id -> metadata URL
+    std::unordered_map<std::string, std::string>
+        stream_name_map; // stream_id -> display name for entry_selector matching
     int poll_interval_secs = 20;
     StationMetadataMapping mapping;
     StationMetadataEntrySelector entry_selector;
@@ -147,10 +152,10 @@ public:
 private:
     struct Pipe;
 
-    void start_pipe_locked();         // mu_ held
-    void stop_pipe_locked();          // mu_ held
+    void start_pipe_locked();             // mu_ held
+    void stop_pipe_locked();              // mu_ held
     void cycle_preset(int direction = 1); // cycle through all streams by one step, mu_ held
-    void stop_metadata_poller();      // join bg thread (no-op now, kept for API compat)
+    void stop_metadata_poller();          // join bg thread (no-op now, kept for API compat)
 
     ShoutcastConfig cfg_;
     std::unique_ptr<Pipe> pipe_;

@@ -10,6 +10,7 @@
 #include "fh6/fmod/pe_image.hpp"
 #include "fh6/http/http_server.hpp"
 #include "fh6/sources/shoutcast_source.hpp"
+#include "fh6/fmod/dx12_overlay.hpp"
 
 #include <windows.h>
 #include <filesystem>
@@ -98,6 +99,9 @@ void run_bridge(HMODULE self) noexcept {
 
     http::HttpServer http{mgr, bridge, store, cfg.general.port, ui_dir};
     log::info("[bridge] running on port {}", cfg.general.port);
+
+    // Start the Direct3D 12 ImGui overlay detours
+    dx12_overlay::initialize(mgr, bridge, store);
 
     for (;;) Sleep(60'000);
 }

@@ -140,9 +140,9 @@ const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc,
 }
 
 void ControlLoop::recover_stale_dsp() noexcept {
-    if (bridge_.current_handle_alive()) return;  // false alarm; channel still live
+    if (bridge_.current_handle_alive()) return; // false alarm; channel still live
 
-    auto disc = discover_radio_instances(img_);
+    auto disc                   = discover_radio_instances(img_);
     const RadioInstance* chosen = select_instance(disc, /*require_live=*/true);
     if (!chosen) return;
 

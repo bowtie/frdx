@@ -126,9 +126,9 @@ void apply_patch(Config& c, const json& j) {
         c.general.fallback_source = pull(*it, "fallback_source", c.general.fallback_source);
     }
     if (auto it = j.find("shoutcast"); it != j.end()) {
-        c.shoutcast.enabled      = pull(*it, "enabled", c.shoutcast.enabled);
-        c.shoutcast.default_url  = pull(*it, "default_url", c.shoutcast.default_url);
-        c.shoutcast.ffmpeg_path  = pull_path(*it, "ffmpeg_path", c.shoutcast.ffmpeg_path);
+        c.shoutcast.enabled     = pull(*it, "enabled", c.shoutcast.enabled);
+        c.shoutcast.default_url = pull(*it, "default_url", c.shoutcast.default_url);
+        c.shoutcast.ffmpeg_path = pull_path(*it, "ffmpeg_path", c.shoutcast.ffmpeg_path);
         if (auto p = it->find("presets"); p != it->end() && p->is_array())
             c.shoutcast.presets = p->get<std::vector<std::string>>();
     }
@@ -136,7 +136,6 @@ void apply_patch(Config& c, const json& j) {
         c.audio.output_gain = pull(*it, "output_gain", c.audio.output_gain);
     }
 }
-
 
 void cors(httplib::Response& res) {
     res.set_header("Access-Control-Allow-Origin", "*");
@@ -288,7 +287,7 @@ struct HttpServer::Impl {
                          return;
                      }
                      try {
-                         auto url = json::parse(q.body).at("url").get<std::string>();
+                         auto url              = json::parse(q.body).at("url").get<std::string>();
                          const bool was_active = (mgr.active() == sc);
                          sc->set_target(std::move(url));
                          sc->stop();
@@ -358,9 +357,9 @@ struct HttpServer::Impl {
                          return;
                      }
                      try {
-                         auto body      = json::parse(q.body);
-                         auto station   = body.at("station_id").get<std::string>();
-                         auto stream_id = body.value("stream_id", "");
+                         auto body             = json::parse(q.body);
+                         auto station          = body.at("station_id").get<std::string>();
+                         auto stream_id        = body.value("stream_id", "");
                          const bool was_active = (mgr.active() == sc);
                          sc->select_station(station, stream_id);
                          if (was_active) mgr.ring().drain();

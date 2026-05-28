@@ -20,15 +20,29 @@ $root  = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $root "build"
 
 function Find-LlvmTool([string]$exe) {
+    # Check PATH first (winget/choco add it there after a restart or refresh)
     $cmd = Get-Command $exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+
+    $candidates = @()
+
+    # Visual Studio bundled LLVM toolchain
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path $vswhere) {
-        $vs = & $vswhere -latest -property installationPath
-        foreach ($arch in @("x64", "ARM64", "")) {
-            $p = Join-Path $vs ("VC\Tools\Llvm\{0}\bin\{1}.exe" -f $arch, $exe)
-            if (Test-Path $p) { return $p }
+        $vs = & $vswhere -latest -property installationPath 2>$null
+        if ($vs) {
+            foreach ($arch in @("x64", "ARM64", "")) {
+                $candidates += Join-Path $vs "VC\Tools\Llvm\$arch\bin\$exe.exe"
+            }
         }
+    }
+
+    # Standalone LLVM installs (winget: C:\Program Files\LLVM, choco: same or $env:ChocolateyInstall/lib)
+    $candidates += "$env:ProgramFiles\LLVM\bin\$exe.exe"
+    $candidates += "${env:ProgramFiles(x86)}\LLVM\bin\$exe.exe"
+
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { return $p }
     }
     return $null
 }

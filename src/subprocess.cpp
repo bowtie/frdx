@@ -14,8 +14,8 @@ std::wstring widen(std::string_view s) {
 
 std::string narrow(std::wstring_view ws) {
     if (ws.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), nullptr, 0,
-                                nullptr, nullptr);
+    int n =
+        WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), nullptr, 0, nullptr, nullptr);
     std::string out(n, '\0');
     WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), out.data(), n, nullptr, nullptr);
     return out;
@@ -83,16 +83,15 @@ std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from
     wchar_t resolved[MAX_PATH] = {};
     DWORD got = SearchPathW(nullptr, bin.c_str(), L".exe", MAX_PATH, resolved, nullptr);
     if (got > MAX_PATH) got = MAX_PATH; // cap — SearchPathW returns required size on overflow
-    std::string where = got ? narrow({resolved, got})
-                            : (from_config ? "(configured path not found on disk)"
-                                           : "(not found on PATH)");
+    std::string where =
+        got ? narrow({resolved, got})
+            : (from_config ? "(configured path not found on disk)" : "(not found on PATH)");
 
     std::string sys_msg;
     LPWSTR raw = nullptr;
-    DWORD len = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                                   FORMAT_MESSAGE_IGNORE_INSERTS,
-                               nullptr, ec, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                               (LPWSTR)&raw, 0, nullptr);
+    DWORD len  = FormatMessageW(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, ec, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&raw, 0, nullptr);
     if (raw && len) {
         while (len && (raw[len - 1] == L'\r' || raw[len - 1] == L'\n' || raw[len - 1] == L' '))
             --len;
@@ -105,19 +104,16 @@ std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from
         case ERROR_FILE_NOT_FOUND:
         case ERROR_PATH_NOT_FOUND:
             hint = from_config
-                       ? " -- the path in [shoutcast].ffmpeg_path does not exist. Fix the path "
-                         "or clear it to fall back to PATH lookup."
-                       : " -- ffmpeg is not on your PATH. Install it or set "
-                         "[shoutcast].ffmpeg_path in config.toml.";
+                     ? " -- the path in [shoutcast].ffmpeg_path does not exist. Fix the path "
+                       "or clear it to fall back to PATH lookup."
+                     : " -- ffmpeg is not on your PATH. Install it or set "
+                       "[shoutcast].ffmpeg_path in config.toml.";
             break;
         case ERROR_ACCESS_DENIED:
             hint = " -- likely blocked or quarantined by antivirus. Whitelist the binary.";
             break;
-        case ERROR_BAD_EXE_FORMAT:
-            hint = " -- the file isn't a valid Win64 executable.";
-            break;
-        default:
-            break;
+        case ERROR_BAD_EXE_FORMAT: hint = " -- the file isn't a valid Win64 executable."; break;
+        default: break;
     }
 
     return std::format("ec={} ({}) tried={} resolved={}{}", ec,

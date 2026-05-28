@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fh6_universal_radio LANGUAGES CXX)
+project(fh6_universal_radio LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,8 +34,24 @@ add_library(version SHARED
     src/fmod/dsp_bridge.cpp
     src/fmod/dsp_control_loop.cpp
     src/fmod/metadata_injector.cpp
+    src/fmod/dx12_overlay.cpp
     src/http/http_server.cpp
     src/sources/shoutcast_source.cpp
+
+    # Dear ImGui
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_demo.cpp
+    third_party/imgui/imgui_impl_win32.cpp
+    third_party/imgui/imgui_impl_dx12.cpp
+
+    # MinHook
+    third_party/minhook/buffer.c
+    third_party/minhook/hook.c
+    third_party/minhook/trampoline.c
+    third_party/minhook/hde/hde64.c
 )
 
 target_include_directories(version PRIVATE
@@ -44,9 +60,11 @@ target_include_directories(version PRIVATE
     third_party/nlohmann
     third_party/toml11
     third_party/wil/include
+    third_party/imgui
+    third_party/minhook
 )
 
-target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp)
+target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version

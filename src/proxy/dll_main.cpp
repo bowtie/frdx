@@ -35,6 +35,9 @@ void run_bridge(HMODULE self) noexcept;
 
 namespace {
 DWORD WINAPI bridge_thread(LPVOID self) {
+    // Defer execution by 2 seconds to ensure loader lock is released and the game completes early
+    // startup
+    Sleep(2000);
     fh6::run_bridge(static_cast<HMODULE>(self));
     return 0;
 }

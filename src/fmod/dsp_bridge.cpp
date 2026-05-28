@@ -191,8 +191,7 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     if (!fns_.system_create_dsp && fns_.host_base) {
         fns_.system_create_dsp = resolve_create_dsp(parse(fns_.host_base));
         if (fns_.system_create_dsp) {
-            log::info("[dsp] resolved System::createDSP late at {}",
-                      (void*)fns_.system_create_dsp);
+            log::info("[dsp] resolved System::createDSP late at {}", (void*)fns_.system_create_dsp);
         } else {
             log::warn("[dsp] System::createDSP still unresolved -- install aborted");
             return;
@@ -320,8 +319,10 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         return 0;
     }
     if (m == DSPMode::passthrough) {
-        if (in_buf) std::memcpy(out_buf, in_buf, total * sizeof(float));
-        else        std::memset(out_buf, 0, total * sizeof(float));
+        if (in_buf)
+            std::memcpy(out_buf, in_buf, total * sizeof(float));
+        else
+            std::memset(out_buf, 0, total * sizeof(float));
         stats();
         return 0;
     }

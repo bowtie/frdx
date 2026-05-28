@@ -68,9 +68,8 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
         // game a little headroom for in-place follow-up writes.
         const std::uint64_t alloc_cap = (new_size + 32) & ~static_cast<std::uint64_t>(15);
         const SIZE_T bytes            = static_cast<SIZE_T>(alloc_cap + 1);
-        auto* fresh =
-            static_cast<std::byte*>(VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE,
-                                                 PAGE_READWRITE));
+        auto* fresh                   = static_cast<std::byte*>(
+            VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         if (!fresh) {
             log::warn("[meta] VirtualAlloc failed for {} bytes", bytes);
             return false;
@@ -94,7 +93,6 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
         }
         mem.release(); // Ownership transferred to swapped-in slot (intentionally leaked)
         return true;
-
     };
 
     const bool is_heap = hdr.cap > kSsoCap;
