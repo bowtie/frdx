@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include "fh6/fmod/dsp_bridge.hpp"
 #include "fh6/fmod/sig_scanner.hpp"
 #include "fh6/audio_source_manager.hpp"

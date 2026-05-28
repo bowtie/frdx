@@ -1,9 +1,10 @@
 #   PS> .\scripts\lint.ps1                # format + check (write changes)
 #   PS> .\scripts\lint.ps1 -CheckOnly     # no changes, exit non-zero on issues
+#   PS> .\scripts\lint.ps1 -Jobs 16       # run clang-tidy with 16 parallel files
 #
 # Runs:
 #   * clang-format on src/**.cpp + include/**.hpp
-#   * run-clang-tidy -j8 -p build on src/  (requires compile_commands.json)
+#   * run-clang-tidy -jN -p build on src/  (requires compile_commands.json)
 #   * prettier on ui/dist/**.{js,css,html}
 #   * eslint on ui/dist/**.js
 #   * stylelint on ui/dist/**.css
@@ -12,7 +13,8 @@ param(
     [switch]$CheckOnly,
     [switch]$SkipCpp,
     [switch]$SkipWeb,
-    [switch]$SkipTidy
+    [switch]$SkipTidy,
+    [int]$Jobs = 8
 )
 
 $ErrorActionPreference = "Stop"
@@ -102,7 +104,7 @@ if (-not $SkipCpp) {
                 # run-clang-tidy is a Python script on some installs — use
                 # python.exe to invoke it so it works inside a pipeline.
                 $tidyExe = $runClangTidy
-                $tidyArgs = @("-j8", "-p", $build)
+                $tidyArgs = @("-j$(if ($Jobs -lt 1) { 8 } else { $Jobs })", "-p", $build)
                 if ((Get-Item $runClangTidy).Extension -eq '' -and
                     (Get-Command python -ErrorAction SilentlyContinue)) {
                     $tidyExe = (Get-Command python).Source

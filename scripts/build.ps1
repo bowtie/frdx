@@ -77,6 +77,22 @@ function Find-Ccache {
     return $null
 }
 
+# If clang-cl isn't on PATH, prepend the LLVM bin directory so
+# cmake's auto-detection can find the full toolchain (clang-cl +
+# lld-link + rc.exe from the MSVC environment).  Passing
+# -DCMAKE_C_COMPILER explicitly would bypass that detection.
+$clangCl = (Get-Command clang-cl -ErrorAction SilentlyContinue)
+if (-not $clangCl) {
+    $llvmBin = "${env:ProgramFiles}\LLVM\bin"
+    if (Test-Path (Join-Path $llvmBin "clang-cl.exe")) {
+        $env:PATH = "$llvmBin;$env:PATH"
+        $clangCl = Get-Command clang-cl -ErrorAction SilentlyContinue
+    }
+}
+if ($clangCl) {
+    Write-Host "Using clang-cl: $($clangCl.Source)" -ForegroundColor DarkGray
+}
+
 $cmake = Find-CMake
 Write-Host "Using cmake: $cmake" -ForegroundColor DarkGray
 
@@ -118,6 +134,9 @@ if (-not (Test-Path (Join-Path $build "CMakeCache.txt"))) {
             "-DCMAKE_C_COMPILER_LAUNCHER=$($ccache.Name)",
             "-DCMAKE_CXX_COMPILER_LAUNCHER=$($ccache.Name)"
         )
+    }
+    if (-not $clangCl) {
+        Write-Host "clang-cl not on PATH; cmake may auto-detect MSVC instead." -ForegroundColor DarkGray
     }
 } elseif ($NoCache) {
     # Explicitly clear stale launcher vars from a previous cached build.
