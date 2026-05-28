@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include "fh6/sources/shoutcast_source.hpp"
 #include "fh6/log.hpp"
 #include "fh6/subprocess.hpp"
