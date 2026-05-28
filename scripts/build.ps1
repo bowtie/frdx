@@ -1,7 +1,8 @@
-# One-shot build script. Configures CMake (Release, x64), compiles, then
+# One-shot build script. Configures CMake (Release, Ninja), compiles, then
 # stages everything that needs to ship in dist\.
 #
-#   PS> .\scripts\build.ps1
+#   PS> .\scripts\build.ps1                # incremental
+#   PS> .\scripts\build.ps1 -Clean         # wipe build/ and start fresh
 #
 # Output:
 #   dist\version.dll            the proxy DLL (drops next to forzahorizon6.exe)
@@ -9,10 +10,14 @@
 #   dist\fh6-radio\config.toml  seeded from config.example.toml
 #   dist\fh6-radio\stations.json seeded from stations.example.json
 
+param([switch]$Clean)
+
 $ErrorActionPreference = "Stop"
 $root  = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $root "build"
 $dist  = Join-Path $root "dist"
+
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Locate cmake.exe. Prefer the one on PATH; otherwise look inside any VS
 # install (which always ships CMake when the C++ workload is selected),
@@ -42,27 +47,63 @@ cmake.exe not found. Either:
 "@
 }
 
+function Find-Ninja {
+    $cmd = Get-Command ninja -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    # winget installs a shim; also check common standalone paths
+    foreach ($p in @(
+        "${env:ProgramFiles}\Ninja\ninja.exe",
+        "${env:LOCALAPPDATA}\Microsoft\WinGet\Links\ninja.exe"
+    )) { if (Test-Path $p) { return $p } }
+    return $null
+}
+
 $cmake = Find-CMake
 Write-Host "Using cmake: $cmake" -ForegroundColor DarkGray
+
+$ninja = Find-Ninja
+if ($ninja) {
+    Write-Host "Using ninja:  $ninja" -ForegroundColor DarkGray
+} else {
+    Write-Host "Ninja not found -- falling back to MSBuild (slower)." -ForegroundColor Yellow
+    Write-Host "Install it:  winget install Ninja-build.Ninja" -ForegroundColor Yellow
+}
 
 if (-not (Test-Path (Join-Path $root "third_party\cpp-httplib\httplib.h"))) {
     Write-Host "third_party/ is empty -- running get-deps.ps1 first." -ForegroundColor Yellow
     & (Join-Path $PSScriptRoot "get-deps.ps1")
 }
 
+if ($Clean -and (Test-Path $build)) {
+    Write-Host "-> clean build/" -ForegroundColor Cyan
+    Remove-Item -Recurse -Force $build
+}
+
 Write-Host "-> cmake configure" -ForegroundColor Cyan
-& $cmake -S $root -B $build -A x64 | Out-Host
+$cmakeArgs = @("-S", $root, "-B", $build)
+if (-not (Test-Path (Join-Path $build "CMakeCache.txt"))) {
+    if ($ninja) {
+        $cmakeArgs += @("-G", "Ninja")
+    } else {
+        $cmakeArgs += @("-A", "x64")
+    }
+}
+& $cmake @cmakeArgs | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 
 Write-Host "-> cmake build (Release)" -ForegroundColor Cyan
-& $cmake --build $build --config Release | Out-Host
+$buildArgs = @("--build", $build)
+if (-not $ninja) { $buildArgs += @("--config", "Release") }
+& $cmake @buildArgs | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
 
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "fh6-radio") | Out-Null
 
-Copy-Item (Join-Path $build "Release\version.dll") $dist
+# Ninja outputs to build/ directly; MSBuild puts artifacts under build/Release/
+$dllSrc = if ($ninja) { Join-Path $build "version.dll" } else { Join-Path $build "Release\version.dll" }
+Copy-Item $dllSrc $dist
 # fh6_overlay.exe was removed — the overlay is now in-process (version.dll)
 Copy-Item -Recurse (Join-Path $root "ui\dist") (Join-Path $dist "fh6-radio\ui")
 if (Test-Path (Join-Path $root "assets\fonts")) {
@@ -166,7 +207,8 @@ as-is, no warranty, use at your own risk.
 '@
 Set-Content -Path (Join-Path $dist "README.txt") -Value $readme -Encoding utf8
 
-Write-Host "`nBuilt + staged in $dist" -ForegroundColor Green
+$sw.Stop()
+Write-Host ("`nBuilt + staged in $dist  ({0:f1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green
 Get-ChildItem -Recurse -File $dist | ForEach-Object {
     "  $($_.FullName.Substring($dist.Length + 1))"
 }

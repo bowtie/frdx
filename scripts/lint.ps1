@@ -82,8 +82,23 @@ if (-not $SkipCpp) {
             Write-Host "-> clang-tidy" -ForegroundColor Cyan
             $compileDb = Join-Path $build "compile_commands.json"
             if (-not (Test-Path $compileDb)) {
-                Write-Host "compile_commands.json not found in build/; skipping." -ForegroundColor Yellow
-            } else {
+                Write-Host "compile_commands.json missing -- running cmake configure first." -ForegroundColor Yellow
+                $cmake = Get-Command cmake -ErrorAction SilentlyContinue
+                $ninja = Get-Command ninja -ErrorAction SilentlyContinue
+                if ($cmake) {
+                    $cfgArgs = @("-S", $root, "-B", $build)
+                    if (-not (Test-Path (Join-Path $build "CMakeCache.txt"))) {
+                        if ($ninja) { $cfgArgs += @("-G", "Ninja") } else { $cfgArgs += @("-A", "x64") }
+                    }
+                    & $cmake @cfgArgs 2>&1 | Out-Host
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "cmake configure failed; skipping clang-tidy." -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "cmake not found; skipping clang-tidy." -ForegroundColor Red
+                }
+            }
+            if (Test-Path $compileDb) {
                 # run-clang-tidy is a Python script on some installs — use
                 # python.exe to invoke it so it works inside a pipeline.
                 $tidyExe = $runClangTidy
