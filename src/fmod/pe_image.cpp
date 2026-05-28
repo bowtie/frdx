@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include "fh6/fmod/pe_image.hpp"
 
 #include <windows.h>
