@@ -139,6 +139,10 @@ public:
         std::scoped_lock lk{mu_};
         return stations_;
     }
+    std::pair<std::string, std::string> active_station_stream() const {
+        std::scoped_lock lk{mu_};
+        return {active_station_id_, active_stream_id_};
+    }
     void select_station(const std::string& station_id, const std::string& stream_id);
 
     TrackInfo current_track() const override;

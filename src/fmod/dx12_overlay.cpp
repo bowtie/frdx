@@ -13,6 +13,13 @@
 #include <mutex>
 #include <unordered_map>
 #include <cmath>
+#include <filesystem>
+#include <algorithm>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <thread>
+#include <atomic>
 
 #include <MinHook.h>
 #include <imgui.h>
@@ -44,7 +51,7 @@ CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
 WNDPROC original_wnd_proc = nullptr;
 
 // Overlay State
-bool show_menu   = false;
+bool show_menu   = true;
 bool initialized = false;
 
 AudioSourceManager* g_mgr        = nullptr;
@@ -66,6 +73,17 @@ std::vector<ID3D12CommandAllocator*> command_allocators;
 std::vector<UINT64> command_allocator_fence_values;
 std::vector<ID3D12Resource*> backbuffers;
 std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> backbuffer_rtvs;
+ImVector<ImWchar> font_glyph_ranges;
+
+std::mutex action_mutex;
+std::condition_variable action_cv;
+std::deque<std::function<void()>> pending_actions;
+std::thread action_thread;
+bool action_thread_stop = false;
+std::atomic<bool> action_busy{false};
+
+void wait_for_all_overlay_work();
+void enqueue_action(std::function<void()> action);
 
 // WndProc hook to hijack inputs
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -78,13 +96,13 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
             return true;
         }
         if (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP || uMsg == WM_CHAR) {
-            if (wParam != VK_F10) { // Let F10 toggle back out
+            if (wParam != VK_F10 && wParam != VK_INSERT) {
                 return true;
             }
         }
     }
 
-    if (uMsg == WM_KEYDOWN && wParam == VK_F10) {
+    if (uMsg == WM_KEYDOWN && (wParam == VK_F10 || wParam == VK_INSERT)) {
         show_menu = !show_menu;
         if (initialized) {
             ImGui::GetIO().MouseDrawCursor = show_menu;
@@ -146,7 +164,7 @@ void post_resize(IDXGISwapChain* swapChain) {
 
 // Custom ImGui HUD controller render routine
 void draw_imgui_ui() {
-    ImGui::SetNextWindowSize(ImVec2(410, 360), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(520, 520), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
 
     if (!show_menu) {
@@ -161,7 +179,7 @@ void draw_imgui_ui() {
         auto* active = g_mgr->active();
         if (active) {
             TrackInfo track = active->current_track();
-            ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "📻 FH6 Universal Radio");
+            ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "FH6 Universal Radio");
             ImGui::Separator();
             ImGui::Text("%s", track.title.empty() ? std::string{active->display_name()}.c_str()
                                                   : track.title.c_str());
@@ -171,13 +189,14 @@ void draw_imgui_ui() {
         } else {
             ImGui::Text("Radio Station Idle");
         }
+        ImGui::TextDisabled("F10 / Insert");
         ImGui::End();
         return;
     }
 
     // Main HUD Control Dashboard Window
     ImGui::SetNextWindowBgAlpha(0.88f);
-    ImGui::Begin("📻 FH6 Universal Radio Controller", nullptr, ImGuiWindowFlags_NoCollapse);
+    ImGui::Begin("FH6 Universal Radio Controller", nullptr, ImGuiWindowFlags_NoCollapse);
 
     auto* active    = g_mgr->active();
     TrackInfo track = active ? active->current_track() : TrackInfo{};
@@ -197,9 +216,11 @@ void draw_imgui_ui() {
             if (ms == 0) return "0:00";
             uint64_t s = ms / 1000;
             char buf[32];
-            std::snprintf(buf, sizeof(buf), "%llu:%02llu", s / 60, s % 60);
-            return buf;
-        };
+        std::snprintf(buf, sizeof(buf), "%llu:%02llu",
+                      static_cast<unsigned long long>(s / 60),
+                      static_cast<unsigned long long>(s % 60));
+        return buf;
+    };
         ImGui::Text("Progress: %s / %s", format_time(track.position_ms).c_str(),
                     format_time(track.duration_ms).c_str());
 
@@ -229,32 +250,53 @@ void draw_imgui_ui() {
     // TRANSPORT ACTION CONTROLS
     ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "TRANSPORT CONTROLS");
     ImGui::Separator();
-    if (ImGui::Button("Play", ImVec2(80, 26))) {
-        if (active) active->play();
+    if (action_busy.load(std::memory_order_acquire)) {
+        ImGui::TextDisabled("Applying radio change...");
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Pause", ImVec2(80, 26))) {
-        if (active) active->pause();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Stop", ImVec2(80, 26))) {
+    const bool is_playing = active && active->playback_state() == PlaybackState::playing;
+    if (ImGui::Button(is_playing ? "Pause" : "Play", ImVec2(96, 28))) {
         if (active) {
-            active->stop();
-            g_mgr->ring().drain();
+            enqueue_action([active, is_playing] {
+                if (is_playing) {
+                    active->pause();
+                } else {
+                    active->play();
+                }
+            });
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Next", ImVec2(80, 26))) {
+    if (ImGui::Button("Stop", ImVec2(80, 28))) {
         if (active) {
-            active->next();
-            g_mgr->ring().drain();
+            enqueue_action([active] {
+                active->stop();
+                g_mgr->ring().drain();
+            });
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Back", ImVec2(80, 28))) {
+        if (active) {
+            enqueue_action([active] {
+                active->previous();
+                g_mgr->ring().drain();
+            });
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Next", ImVec2(80, 28))) {
+        if (active) {
+            enqueue_action([active] {
+                active->next();
+                g_mgr->ring().drain();
+            });
         }
     }
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
-    // PRESENTS PICK LIST SELECTOR
-    ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "TUNE STATION PRESETS");
+    // PRESET PICKER
+    ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "STATION PRESETS");
     ImGui::Separator();
 
     auto* sc = dynamic_cast<sources::ShoutcastSource*>(g_mgr->find("shoutcast"));
@@ -263,20 +305,104 @@ void draw_imgui_ui() {
         if (stations.empty()) {
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Presets stations catalog empty.");
         } else {
-            ImGui::BeginChild("PresetsChild", ImVec2(-1.0f, 110.0f), true);
-            for (const auto& sp : stations) {
-                if (ImGui::TreeNode(sp.name.c_str())) {
-                    for (const auto& ss : sp.streams) {
-                        if (ImGui::Selectable(ss.name.c_str())) {
-                            sc->select_station(sp.id, ss.id);
+            static int selected_station = 0;
+            static int selected_stream  = 0;
+
+            const auto [active_station, active_stream] = sc->active_station_stream();
+            if (!active_station.empty()) {
+                for (int i = 0; i < static_cast<int>(stations.size()); ++i) {
+                    if (stations[i].id == active_station) {
+                        selected_station = i;
+                        for (int j = 0; j < static_cast<int>(stations[i].streams.size()); ++j) {
+                            if (stations[i].streams[j].id == active_stream) selected_stream = j;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            selected_station =
+                std::clamp(selected_station, 0, static_cast<int>(stations.size()) - 1);
+            const auto& station = stations[static_cast<std::size_t>(selected_station)];
+            selected_stream =
+                station.streams.empty()
+                    ? 0
+                    : std::clamp(selected_stream, 0, static_cast<int>(station.streams.size()) - 1);
+
+            const char* station_preview = station.name.c_str();
+            if (ImGui::BeginCombo("Station", station_preview)) {
+                for (int i = 0; i < static_cast<int>(stations.size()); ++i) {
+                    const bool selected = (selected_station == i);
+                    if (ImGui::Selectable(stations[i].name.c_str(), selected)) {
+                        selected_station = i;
+                        selected_stream  = 0;
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
+            const auto& picked_station =
+                stations[static_cast<std::size_t>(selected_station)];
+            if (picked_station.streams.empty()) {
+                ImGui::TextDisabled("Selected station has no streams.");
+            } else {
+                selected_stream = std::clamp(selected_stream, 0,
+                                             static_cast<int>(picked_station.streams.size()) - 1);
+                const auto& picked_stream =
+                    picked_station.streams[static_cast<std::size_t>(selected_stream)];
+                if (ImGui::BeginCombo("Stream", picked_stream.name.c_str())) {
+                    for (int i = 0; i < static_cast<int>(picked_station.streams.size()); ++i) {
+                        const auto& stream = picked_station.streams[static_cast<std::size_t>(i)];
+                        const bool selected = (selected_stream == i);
+                        const bool active_stream_match =
+                            picked_station.id == active_station && stream.id == active_stream;
+                        std::string label = stream.name;
+                        if (active_stream_match) label += "  [active]";
+                        if (ImGui::Selectable(label.c_str(), selected)) selected_stream = i;
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+
+                if (!picked_station.description.empty()) {
+                    ImGui::TextWrapped("%s", picked_station.description.c_str());
+                }
+
+                if (ImGui::Button("Tune Selected Stream", ImVec2(-1.0f, 30.0f))) {
+                    std::string station_id = picked_station.id;
+                    std::string stream_id  = picked_stream.id;
+                    enqueue_action([station_id = std::move(station_id),
+                                    stream_id = std::move(stream_id)] {
+                        if (auto* source =
+                                dynamic_cast<sources::ShoutcastSource*>(g_mgr->find("shoutcast"))) {
+                            source->select_station(station_id, stream_id);
                             g_mgr->ring().drain();
                             g_mgr->switch_to("shoutcast");
                         }
-                    }
-                    ImGui::TreePop();
+                    });
                 }
+
+                ImGui::BeginChild("StationStreams", ImVec2(-1.0f, 120.0f), true);
+                for (const auto& stream : picked_station.streams) {
+                    const bool active_stream_match =
+                        picked_station.id == active_station && stream.id == active_stream;
+                    if (ImGui::Selectable(stream.name.c_str(), active_stream_match)) {
+                        std::string station_id = picked_station.id;
+                        std::string stream_id  = stream.id;
+                        enqueue_action([station_id = std::move(station_id),
+                                        stream_id = std::move(stream_id)] {
+                            if (auto* source = dynamic_cast<sources::ShoutcastSource*>(
+                                    g_mgr->find("shoutcast"))) {
+                                source->select_station(station_id, stream_id);
+                                g_mgr->ring().drain();
+                                g_mgr->switch_to("shoutcast");
+                            }
+                        });
+                    }
+                }
+                ImGui::EndChild();
             }
-            ImGui::EndChild();
         }
     } else {
         ImGui::Text("Shoutcast source not registered.");
@@ -299,6 +425,100 @@ void wait_for_all_overlay_work() {
             log::warn("[overlay] timed out waiting for GPU overlay work to finish");
         }
     }
+}
+
+std::filesystem::path module_directory() {
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+    return std::filesystem::path{buf}.parent_path();
+}
+
+void load_overlay_font() {
+    auto& io = ImGui::GetIO();
+    const auto font_path = module_directory() / "fh6-radio" / "fonts" / "FusionPixel12-ja.ttf";
+    if (!std::filesystem::exists(font_path)) {
+        log::warn("[overlay] Fusion Pixel font not found at {}; using ImGui default font",
+                  font_path.string());
+        io.Fonts->AddFontDefault();
+        return;
+    }
+
+    ImFontGlyphRangesBuilder builder;
+    builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+    builder.AddRanges(io.Fonts->GetGlyphRangesJapanese());
+    builder.BuildRanges(&font_glyph_ranges);
+
+    ImFontConfig cfg{};
+    cfg.OversampleH = 1;
+    cfg.OversampleV = 1;
+    cfg.PixelSnapH  = true;
+    auto* font =
+        io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg,
+                                     font_glyph_ranges.Data);
+    if (font) {
+        io.FontDefault = font;
+        log::info("[overlay] loaded Fusion Pixel 12px ImGui font at 16px from {}",
+                  font_path.string());
+    } else {
+        log::warn("[overlay] failed to load {}; using ImGui default font", font_path.string());
+        io.Fonts->AddFontDefault();
+    }
+}
+
+void enqueue_action(std::function<void()> action) {
+    bool expected = false;
+    if (!action_busy.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        log::info("[overlay] ignored action while another overlay action is still running");
+        return;
+    }
+    {
+        std::scoped_lock lk{action_mutex};
+        pending_actions.push_back(std::move(action));
+    }
+    action_cv.notify_one();
+}
+
+void start_action_worker() {
+    action_thread_stop = false;
+    action_thread      = std::thread([] {
+        for (;;) {
+            std::function<void()> action;
+            {
+                std::unique_lock lk{action_mutex};
+                action_cv.wait(lk, [] { return action_thread_stop || !pending_actions.empty(); });
+                if (action_thread_stop && pending_actions.empty()) break;
+                action = std::move(pending_actions.front());
+                pending_actions.pop_front();
+            }
+
+            try {
+                log::info("[overlay] running queued radio action");
+                action();
+                log::info("[overlay] queued radio action finished");
+            } catch (...) {
+                log::warn("[overlay] queued action threw an exception");
+            }
+            action_busy.store(false, std::memory_order_release);
+        }
+    });
+}
+
+void stop_action_worker() {
+    {
+        std::scoped_lock lk{action_mutex};
+        action_thread_stop = true;
+        pending_actions.clear();
+        action_busy.store(false, std::memory_order_release);
+    }
+    action_cv.notify_all();
+    if (action_thread.joinable()) action_thread.join();
+}
+
+ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
+    std::scoped_lock lk{swapchain_map_mutex};
+    auto it = swapchain_queues.find(swapChain);
+    return it != swapchain_queues.end() ? it->second : nullptr;
 }
 
 // Hooked DXGI CreateSwapChainForHwnd callback
@@ -330,7 +550,13 @@ hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWn
 
 // Hooked DXGI Swap Chain Present callback
 HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
+    ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
+
     if (!initialized) {
+        if (!active_queue) {
+            return original_Present(pSwapChain, SyncInterval, Flags);
+        }
+
         if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), (void**)&d3d12_device)) &&
             d3d12_device) {
             DXGI_SWAP_CHAIN_DESC desc;
@@ -428,6 +654,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
                     if (alloc) alloc->Release();
                 }
                 command_allocators.clear();
+                command_allocator_fence_values.clear();
                 srv_descriptor_heap->Release();
                 srv_descriptor_heap = nullptr;
                 rtv_descriptor_heap->Release();
@@ -437,6 +664,49 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
                 return original_Present(pSwapChain, SyncInterval, Flags);
             }
             imgui_command_list->Close();
+
+            if (FAILED(d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                 IID_PPV_ARGS(&imgui_fence))) ||
+                !imgui_fence) {
+                log::error(
+                    "[overlay] failed to create ImGui GPU fence! Aborting ImGui initialization.");
+                imgui_command_list->Release();
+                imgui_command_list = nullptr;
+                for (auto* alloc : command_allocators) {
+                    if (alloc) alloc->Release();
+                }
+                command_allocators.clear();
+                command_allocator_fence_values.clear();
+                srv_descriptor_heap->Release();
+                srv_descriptor_heap = nullptr;
+                rtv_descriptor_heap->Release();
+                rtv_descriptor_heap = nullptr;
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
+            }
+
+            imgui_fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (!imgui_fence_event) {
+                log::error("[overlay] failed to create ImGui GPU fence event! Aborting ImGui "
+                           "initialization.");
+                imgui_fence->Release();
+                imgui_fence = nullptr;
+                imgui_command_list->Release();
+                imgui_command_list = nullptr;
+                for (auto* alloc : command_allocators) {
+                    if (alloc) alloc->Release();
+                }
+                command_allocators.clear();
+                command_allocator_fence_values.clear();
+                srv_descriptor_heap->Release();
+                srv_descriptor_heap = nullptr;
+                rtv_descriptor_heap->Release();
+                rtv_descriptor_heap = nullptr;
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
+            }
 
             // Populate backbuffers list and create RTVs
             SIZE_T rtvDescriptorSize =
@@ -469,10 +739,19 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
                 backbuffer_rtvs.clear();
                 imgui_command_list->Release();
                 imgui_command_list = nullptr;
+                if (imgui_fence_event) {
+                    CloseHandle(imgui_fence_event);
+                    imgui_fence_event = nullptr;
+                }
+                if (imgui_fence) {
+                    imgui_fence->Release();
+                    imgui_fence = nullptr;
+                }
                 for (auto* alloc : command_allocators) {
                     if (alloc) alloc->Release();
                 }
                 command_allocators.clear();
+                command_allocator_fence_values.clear();
                 srv_descriptor_heap->Release();
                 srv_descriptor_heap = nullptr;
                 rtv_descriptor_heap->Release();
@@ -484,11 +763,50 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
 
             // Init Dear ImGui Win32 & DX12 contexts
             ImGui::CreateContext();
+            load_overlay_font();
             ImGui_ImplWin32_Init(desc.OutputWindow);
-            ImGui_ImplDX12_Init(d3d12_device, desc.BufferCount, desc.BufferDesc.Format,
-                                srv_descriptor_heap,
-                                srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart(),
-                                srv_descriptor_heap->GetGPUDescriptorHandleForHeapStart());
+            ImGui_ImplDX12_InitInfo init_info;
+            init_info.Device = d3d12_device;
+            init_info.CommandQueue = active_queue;
+            init_info.NumFramesInFlight = desc.BufferCount;
+            init_info.RTVFormat = desc.BufferDesc.Format;
+            init_info.SrvDescriptorHeap = srv_descriptor_heap;
+            init_info.LegacySingleSrvCpuDescriptor =
+                srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+            init_info.LegacySingleSrvGpuDescriptor =
+                srv_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+            if (!ImGui_ImplDX12_Init(&init_info)) {
+                log::error("[overlay] ImGui DX12 backend initialization failed");
+                ImGui_ImplWin32_Shutdown();
+                ImGui::DestroyContext();
+                for (auto* buf : backbuffers) {
+                    if (buf) buf->Release();
+                }
+                backbuffers.clear();
+                backbuffer_rtvs.clear();
+                if (imgui_fence_event) {
+                    CloseHandle(imgui_fence_event);
+                    imgui_fence_event = nullptr;
+                }
+                if (imgui_fence) {
+                    imgui_fence->Release();
+                    imgui_fence = nullptr;
+                }
+                imgui_command_list->Release();
+                imgui_command_list = nullptr;
+                for (auto* alloc : command_allocators) {
+                    if (alloc) alloc->Release();
+                }
+                command_allocators.clear();
+                command_allocator_fence_values.clear();
+                srv_descriptor_heap->Release();
+                srv_descriptor_heap = nullptr;
+                rtv_descriptor_heap->Release();
+                rtv_descriptor_heap = nullptr;
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
+            }
 
             ImGui::StyleColorsDark();
             ImGui::GetStyle().WindowRounding = 10.0f;
@@ -496,19 +814,11 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             ImGui::GetStyle().PopupRounding  = 6.0f;
 
             initialized = true;
+            ImGui::GetIO().MouseDrawCursor = show_menu;
             log::info("[overlay] Direct3D 12 Dear ImGui Overlay context initialized successfully!");
         }
     }
 
-    ID3D12CommandQueue* active_queue = nullptr;
-    {
-        std::scoped_lock lk{swapchain_map_mutex};
-        auto it = swapchain_queues.find(pSwapChain);
-        if (it != swapchain_queues.end()) {
-            active_queue = it->second;
-        }
-    }
- 
     if (initialized && active_queue) {
         UINT backBufferIdx          = 0;
         IDXGISwapChain3* swapChain3 = nullptr;
@@ -525,6 +835,12 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
         ID3D12CommandAllocator* allocator = command_allocators[backBufferIdx];
+
+        if (!wait_for_fence(command_allocator_fence_values[backBufferIdx])) {
+            log::warn("[overlay] skipped frame because GPU did not release command allocator {}",
+                      backBufferIdx);
+            return original_Present(pSwapChain, SyncInterval, Flags);
+        }
 
         allocator->Reset();
         imgui_command_list->Reset(allocator, nullptr);
@@ -562,6 +878,13 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
 
         active_queue->ExecuteCommandLists(
             1, reinterpret_cast<ID3D12CommandList**>(&imgui_command_list));
+
+        const UINT64 fence_value = ++imgui_fence_value;
+        if (SUCCEEDED(active_queue->Signal(imgui_fence, fence_value))) {
+            command_allocator_fence_values[backBufferIdx] = fence_value;
+        } else {
+            log::warn("[overlay] failed to signal ImGui GPU fence");
+        }
     }
 
     return original_Present(pSwapChain, SyncInterval, Flags);
@@ -584,6 +907,7 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
     g_mgr    = &mgr;
     g_bridge = &bridge;
     g_store  = &store;
+    start_action_worker();
 
     log::info("[overlay] starting dummy Direct3D 12 device context resolver...");
 
@@ -709,10 +1033,13 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
 
 void shutdown() noexcept {
     log::info("[overlay] disabling MinHook overlay detours...");
+    stop_action_worker();
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
 
     if (initialized) {
+        wait_for_all_overlay_work();
+
         ImGui_ImplDX12_Shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
@@ -726,11 +1053,21 @@ void shutdown() noexcept {
             if (alloc) alloc->Release();
         }
         command_allocators.clear();
+        command_allocator_fence_values.clear();
 
         if (imgui_command_list) {
             imgui_command_list->Release();
             imgui_command_list = nullptr;
         }
+        if (imgui_fence_event) {
+            CloseHandle(imgui_fence_event);
+            imgui_fence_event = nullptr;
+        }
+        if (imgui_fence) {
+            imgui_fence->Release();
+            imgui_fence = nullptr;
+        }
+        imgui_fence_value = 0;
         if (srv_descriptor_heap) {
             srv_descriptor_heap->Release();
             srv_descriptor_heap = nullptr;

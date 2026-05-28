@@ -65,6 +65,9 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dist "fh6-radio") | Out-Nu
 Copy-Item (Join-Path $build "Release\version.dll") $dist
 # fh6_overlay.exe was removed — the overlay is now in-process (version.dll)
 Copy-Item -Recurse (Join-Path $root "ui\dist") (Join-Path $dist "fh6-radio\ui")
+if (Test-Path (Join-Path $root "assets\fonts")) {
+    Copy-Item -Recurse (Join-Path $root "assets\fonts") (Join-Path $dist "fh6-radio\fonts")
+}
 Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "fh6-radio\config.toml")
 Copy-Item (Join-Path $root "stations.example.json") (Join-Path $dist "fh6-radio\stations.json")
 

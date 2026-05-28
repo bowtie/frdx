@@ -57,5 +57,5 @@ if (-not $SkipMedia -and (Test-Path $mdir)) {
 }
 
 Write-Host "`nDone. Launch the game, set Audio -> Radio DJ = Off, Streamer Mode = On." -ForegroundColor Green
-Write-Host "An RTSS-style overlay will appear automatically in-game (Ctrl+Shift+O to interact)."
+Write-Host "The in-game overlay opens automatically; press F10 or Insert to show/hide it."
 Write-Host "You can also open http://localhost:8420 in any browser on this LAN."
