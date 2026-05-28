@@ -1,12 +1,12 @@
-#include "fh6/fmod/dsp_control_loop.hpp"
-#include "fh6/fmod/radio_discovery.hpp"
-#include "fh6/audio_source_manager.hpp"
-#include "fh6/log.hpp"
+#include "frdx/fmod/dsp_control_loop.hpp"
+#include "frdx/fmod/radio_discovery.hpp"
+#include "frdx/audio_source_manager.hpp"
+#include "frdx/log.hpp"
 
 #include <chrono>
 #include <cstring>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 using namespace std::chrono_literals;
@@ -131,7 +131,7 @@ void ControlLoop::run(const std::stop_token& tok) {
 const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc,
                                                   bool require_live) const noexcept {
     const RadioInstance* fallback = nullptr;
-    for (auto& i : disc.instances) {
+    for (const auto& i : disc.instances) {
         if (require_live && !bridge_.channel_handle_alive(i.radio_stream)) continue;
         if (i.sound_name == kTargetSoundName) return &i;
         if (!fallback) fallback = &i;
@@ -140,9 +140,9 @@ const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc,
 }
 
 void ControlLoop::recover_stale_dsp() noexcept {
-    if (bridge_.current_handle_alive()) return;  // false alarm; channel still live
+    if (bridge_.current_handle_alive()) return; // false alarm; channel still live
 
-    auto disc = discover_radio_instances(img_);
+    auto disc                   = discover_radio_instances(img_);
     const RadioInstance* chosen = select_instance(disc, /*require_live=*/true);
     if (!chosen) return;
 
@@ -159,7 +159,7 @@ void ControlLoop::recover_stale_dsp() noexcept {
 void ControlLoop::push_metadata() noexcept {
     auto* a = bridge_.manager().active();
     if (!a) {
-        meta_.update("FH6 Universal Radio", "Idle");
+        meta_.update("Forza Radio DX", "Idle");
         return;
     }
     TrackInfo info;
@@ -178,4 +178,4 @@ void ControlLoop::push_metadata() noexcept {
     meta_.update(title, artist);
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

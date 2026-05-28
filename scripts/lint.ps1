@@ -1,133 +1,208 @@
-#   PS> .\scripts\lint.ps1                # format + check (write changes)
-#   PS> .\scripts\lint.ps1 -CheckOnly     # no changes, exit non-zero on issues
+# Lints the C++ codebase with clang-format (style) and clang-tidy (analysis).
 #
-# Runs:
-#   * clang-format on src/**.cpp + include/**.hpp
-#   * clang-tidy on src/**.cpp
-#   * prettier on ui/dist/**.{js,css,html}
-#   * eslint on ui/dist/**.js
-#   * stylelint on ui/dist/**.css
+#   PS> .\scripts\lint.ps1                   # check formatting + run tidy (parallel)
+#   PS> .\scripts\lint.ps1 -Fix              # auto-format, then tidy (parallel)
+#   PS> .\scripts\lint.ps1 -SkipTidy         # formatting only
+#   PS> .\scripts\lint.ps1 -SkipFormat       # tidy only (parallel)
+#   PS> .\scripts\lint.ps1 -Jobs 8           # override parallel jobs (default = all cores)
+#   PS> .\scripts\lint.ps1 -Incremental      # only lint files changed since HEAD
+#
 
 param(
-    [switch]$CheckOnly,
-    [switch]$SkipCpp,
-    [switch]$SkipWeb,
-    [switch]$SkipTidy
+    [switch] $Fix,
+    [switch] $SkipTidy,
+    [switch] $SkipFormat,
+    [switch] $Incremental,
+    [int]    $Jobs = 0
 )
 
 $ErrorActionPreference = "Stop"
-$root  = Split-Path -Parent $PSScriptRoot
-$build = Join-Path $root "build"
+$root = Split-Path -Parent $PSScriptRoot
 
-function Find-LlvmTool([string]$exe) {
-    $cmd = Get-Command $exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path $vswhere) {
-        $vs = & $vswhere -latest -property installationPath
-        foreach ($arch in @("x64", "ARM64", "")) {
-            $p = Join-Path $vs ("VC\Tools\Llvm\{0}\bin\{1}.exe" -f $arch, $exe)
-            if (Test-Path $p) { return $p }
-        }
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Number of logical processors for parallel tidy
+if ($Jobs -le 0) {
+    $Jobs = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+}
+
+# ── Locate tools ──────────────────────────────────────────────────────────
+
+function Find-Tool([string]$name) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) { return @{ Path = $cmd.Source; Interpreter = $null } }
+
+    $llvmBin = "${env:ProgramFiles}\LLVM\bin"
+    $exePath = Join-Path $llvmBin "$name.exe"
+    if (Test-Path $exePath) { return @{ Path = $exePath; Interpreter = $null } }
+
+    # script without .exe (e.g. run-clang-tidy) -- found it
+    $scriptPath = Join-Path $llvmBin $name
+    if (Test-Path $scriptPath) {
+        return @{ Path = $scriptPath }
     }
+
     return $null
 }
 
-$fails = @()
+$clangFormat = Find-Tool "clang-format"
+$clangTidy   = Find-Tool "clang-tidy"
 
-if (-not $SkipCpp) {
-    $clangFormat = Find-LlvmTool "clang-format"
-    if (-not $clangFormat) {
-        Write-Host "clang-format not found (install VS C++ workload or LLVM); skipping C++ format." -ForegroundColor Yellow
-    } else {
-        Write-Host "-> clang-format ($([IO.Path]::GetFileName($clangFormat)))" -ForegroundColor Cyan
-        $cppFiles = @()
-        $cppFiles += Get-ChildItem -Path (Join-Path $root "src")     -Recurse -Include *.cpp, *.hpp -File
-        $cppFiles += Get-ChildItem -Path (Join-Path $root "include") -Recurse -Include *.hpp        -File
-        $cppPaths = $cppFiles | ForEach-Object { $_.FullName }
-        if ($CheckOnly) {
-            & $clangFormat --dry-run --Werror @cppPaths
-            if ($LASTEXITCODE -ne 0) { $fails += "clang-format" }
-        } else {
-            & $clangFormat -i @cppPaths
-            if ($LASTEXITCODE -ne 0) { $fails += "clang-format" }
-        }
-    }
-
-    if (-not $SkipTidy) {
-        $clangTidy = Find-LlvmTool "clang-tidy"
-        if (-not $clangTidy) {
-            Write-Host "clang-tidy not found; skipping." -ForegroundColor Yellow
-        } else {
-            Write-Host "-> clang-tidy" -ForegroundColor Cyan
-            # Inline include flags -- mirrors target_include_directories() in
-            # CMakeLists.txt. Saves having to feed clang-tidy compile_commands.json
-            # (which MSVC's CMake generator doesn't produce anyway).
-            $cxxArgs = @(
-                "-std=c++20", "-x", "c++",
-                "-D_WIN32_WINNT=0x0A00", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX",
-                "-D_CRT_SECURE_NO_WARNINGS", "-DUNICODE", "-D_UNICODE",
-                "-DCPPHTTPLIB_NO_EXCEPTIONS",
-                "-I$(Join-Path $root 'include')",
-                "-I$(Join-Path $root 'third_party\cpp-httplib')",
-                "-I$(Join-Path $root 'third_party\nlohmann')",
-                "-I$(Join-Path $root 'third_party\toml11')",
-                "-I$(Join-Path $root 'third_party\miniaudio')"
-            )
-            $tidyFiles = Get-ChildItem -Path (Join-Path $root "src") -Recurse -Include *.cpp -File
-            # PS 5.1 turns clang-tidy's "N warnings generated." stderr line
-            # into a terminating error under $ErrorActionPreference="Stop"
-            # even with 2>&1 capture, so relax for this block only.
-            $prevEAP = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            foreach ($f in $tidyFiles) {
-                $out = & $clangTidy --quiet $f.FullName -- @cxxArgs 2>&1 | Out-String
-                $diag = ($out -split "`n") | Where-Object { $_ -match ":\d+:\d+: (warning|error):" }
-                if ($diag) {
-                    Write-Host "  $($f.Name): $($diag.Count) diagnostic(s)" -ForegroundColor Yellow
-                    $diag | ForEach-Object { Write-Host "    $_" }
-                    $fails += "clang-tidy ($($f.Name))"
-                }
-            }
-            $ErrorActionPreference = $prevEAP
-        }
-    }
+if (-not $clangFormat -and -not $SkipFormat) {
+    Write-Host "clang-format not found." -ForegroundColor Yellow
+    $SkipFormat = $true
+}
+if (-not $clangTidy -and -not $SkipTidy) {
+    Write-Host "clang-tidy not found." -ForegroundColor Yellow
+    $SkipTidy = $true
 }
 
-if (-not $SkipWeb) {
-    $npm = Get-Command npm -ErrorAction SilentlyContinue
-    if (-not $npm) {
-        Write-Host "npm not found; skipping web formatting/linting." -ForegroundColor Yellow
-    } else {
-        if (-not (Test-Path (Join-Path $root "node_modules"))) {
-            Write-Host "-> npm install (first run)" -ForegroundColor Cyan
-            Push-Location $root
-            try   { & npm.cmd install --no-audit --no-fund | Out-Host }
-            finally { Pop-Location }
-            if ($LASTEXITCODE -ne 0) { $fails += "npm install"; }
-        }
-
-        Push-Location $root
-        try {
-            if ($CheckOnly) {
-                Write-Host "-> npm run check" -ForegroundColor Cyan
-                & npm.cmd run check
-                if ($LASTEXITCODE -ne 0) { $fails += "web check" }
-            } else {
-                Write-Host "-> npm run fix" -ForegroundColor Cyan
-                & npm.cmd run fix
-                if ($LASTEXITCODE -ne 0) { $fails += "web fix" }
-            }
-        }
-        finally { Pop-Location }
-    }
-}
-
-if ($fails.Count -gt 0) {
-    Write-Host ""
-    Write-Host ("Failed: " + ($fails -join ", ")) -ForegroundColor Red
+if ($SkipFormat -and $SkipTidy) {
+    Write-Host "Nothing to do -- both clang-format and clang-tidy unavailable." -ForegroundColor Red
     exit 1
 }
 
-Write-Host ""
-Write-Host "OK." -ForegroundColor Green
+if ($clangFormat) { Write-Host "clang-format: $($clangFormat.Path)" -ForegroundColor DarkGray }
+if (-not $SkipTidy -and $clangTidy) {
+    Write-Host "clang-tidy:   $($clangTidy.Path) ($Jobs parallel job(s))" -ForegroundColor DarkGray
+}
+
+# Gather source files
+$allCpp = @(Get-ChildItem -Recurse -Filter "*.cpp" -Path (Join-Path $root "src") | ForEach-Object { $_.FullName })
+$allHpp = @(Get-ChildItem -Recurse -Filter "*.hpp" -Path (Join-Path $root "include") | ForEach-Object { $_.FullName })
+
+if ($Incremental) {
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) {
+        Write-Host "git not found; falling back to full lint." -ForegroundColor Yellow
+        $Incremental = $false
+    }
+}
+
+if ($Incremental) {
+    $changed = @(git -C $root diff --name-only --diff-filter=d HEAD -- src/ include/ 2>&1 |
+        Where-Object { $_ -match '\.(cpp|hpp)$' } |
+        ForEach-Object { Join-Path $root $_ })
+    if ($changed.Count -eq 0) {
+        Write-Host "No changed C++ files since HEAD. Nothing to lint." -ForegroundColor Green
+        exit 0
+    }
+    $cppFiles = @($changed | Where-Object { $_ -match '\.cpp$' })
+    $hppFiles = @($changed | Where-Object { $_ -match '\.hpp$' })
+    Write-Host "Incremental mode: $($changed.Count) changed file(s)" -ForegroundColor DarkGray
+} else {
+    $cppFiles = $allCpp
+    $hppFiles = $allHpp
+}
+
+# ── clang-format ──────────────────────────────────────────────────────────
+
+$formatErrors = 0
+if (-not $SkipFormat) {
+    Write-Host "`n-> clang-format" -ForegroundColor Cyan
+    $allSources = $cppFiles + $hppFiles
+
+    if ($Fix) {
+        & $($clangFormat.Path) -i -style=file $allSources 2>&1 | Out-Null
+        Write-Host "  Formatted $($allSources.Count) files." -ForegroundColor Green
+    } else {
+        # --dry-run --Werror: exits non-zero if any file differs
+        $output = & $($clangFormat.Path) -n -style=file --Werror $allSources 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $dirty = $output | Where-Object { $_ -match '^(.+?): warning:' } | ForEach-Object { $matches[1] } | Sort-Object -Unique
+            foreach ($f in $dirty) {
+                $rel = if ($f.Length -gt $root.Length) { $f.Substring($root.Length + 1) } else { $f }
+                Write-Host "  !! $rel needs formatting" -ForegroundColor Yellow
+                $formatErrors++
+            }
+        }
+
+        if ($formatErrors -eq 0) {
+            Write-Host "  All $($allSources.Count) files formatted correctly." -ForegroundColor Green
+        } else {
+            Write-Host "  $formatErrors file(s) need formatting (run with -Fix to auto-fix)." -ForegroundColor Yellow
+        }
+    }
+}
+
+# ── clang-tidy ────────────────────────────────────────────────────────────
+
+$tidyErrors = 0
+if (-not $SkipTidy) {
+    Write-Host "`n-> clang-tidy" -ForegroundColor Cyan
+
+    $cc = Join-Path $root "build\compile_commands.json"
+    if (-not (Test-Path $cc)) {
+        Write-Host "  build\compile_commands.json not found -- run build.ps1 first." -ForegroundColor Yellow
+    } else {
+        # Prefer run-clang-tidy (native LLVM parallel runner) over manual parallelism
+        $runTidy = Find-Tool "run-clang-tidy"
+        $python  = Get-Command python -ErrorAction SilentlyContinue
+        if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+        $bp = Join-Path $root "build"
+
+        if ($runTidy -and $python) {
+            Write-Host "  Using run-clang-tidy ($Jobs parallel jobs)..." -ForegroundColor DarkGray
+
+            $tidyArgs = @($runTidy.Path, "-p", $bp, "-j", $Jobs, "-quiet", "-warnings-as-errors=*")
+            if ($Fix) { $tidyArgs += "-fix"; $tidyArgs += "-format" }
+            # Escape backslashes for regex (run-clang-tidy matches via re.search)
+            $tidyArgs += ($cppFiles | ForEach-Object { $_.Replace('\', '\\') })
+
+            $out = & $python.Source @tidyArgs 2>&1
+            $tidyExit = $LASTEXITCODE
+
+            # run-clang-tidy prints warnings/errors to stderr; count non-zero exits
+            if ($tidyExit -ne 0) {
+                $out | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+                $tidyErrors = @($cppFiles).Count  # pessimistic; run-clang-tidy doesn't report per-file
+            }
+        } else {
+            # Fallback: manual parallel via ForEach-Object -Parallel (PowerShell 7+)
+            if (-not $runTidy) { Write-Host "  run-clang-tidy not found; falling back to ForEach-Object -Parallel" -ForegroundColor Yellow }
+            elseif (-not $python) { Write-Host "  Python not found; falling back to ForEach-Object -Parallel (install: winget install Python.Python.3)" -ForegroundColor Yellow }
+            Write-Host "  Running on $($cppFiles.Count) translation units ($Jobs parallel jobs)..." -ForegroundColor DarkGray
+
+            $tidyPath = $clangTidy.Path
+
+            $results = $cppFiles | ForEach-Object -Parallel {
+                $file  = $_
+                $rel   = $file.Substring($using:root.Length + 1)
+                Write-Host "  tidy $rel" -ForegroundColor DarkGray
+
+                $args = @("-p", $using:bp, "--warnings-as-errors=*", "--quiet")
+                if ($using:Fix) { $args += "--fix"; $args += "--format" }
+
+                $out = & $using:tidyPath @args $file 2>&1
+
+                [PSCustomObject]@{ File = $rel; ExitCode = $LASTEXITCODE; Output = "$out" }
+            } -ThrottleLimit $Jobs
+
+            foreach ($r in $results) {
+                if ($r.ExitCode -ne 0) {
+                    Write-Host $r.Output -ForegroundColor Red
+                    $tidyErrors++
+                }
+            }
+        }
+
+        if ($tidyErrors -eq 0) {
+            Write-Host "  All $($cppFiles.Count) translation units clean." -ForegroundColor Green
+        } else {
+            Write-Host "  $tidyErrors file(s) have clang-tidy warnings." -ForegroundColor Yellow
+        }
+    }
+}
+
+# ── Summary ───────────────────────────────────────────────────────────────
+
+$sw.Stop()
+$exitCode = $formatErrors + $tidyErrors
+
+if ($exitCode -eq 0) {
+    Write-Host ("`nLint passed. ({0:f1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green
+} else {
+    Write-Host ("`nLint finished with {0} issue(s) ({1:f1}s)" -f $exitCode, $sw.Elapsed.TotalSeconds) -ForegroundColor Yellow
+}
+
+exit $exitCode

@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 // Overwrites the std::string slots the game reads to render the radio HUD,
 // so the active source's title/artist show up in-game instead of the
@@ -40,4 +40,4 @@ private:
     std::string last_artist_;
 };
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

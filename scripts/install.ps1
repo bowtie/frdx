@@ -1,19 +1,16 @@
-# Copies the built mod into a Forza Horizon 6 install. Run after build.ps1
-# (and fetch-media.ps1 for the radio-station overlay).
+# Copies the built mod into a Forza Horizon 6 install. Run after build.ps1.
 #
 #   PS> .\scripts\install.ps1 -GameDir "C:\XboxGames\Forza Horizon 6\Content"
 #
 # Existing files are backed up to *.bak before being overwritten.
 
 param(
-    [Parameter(Mandatory = $true)] [string] $GameDir,
-    [switch] $SkipMedia
+    [Parameter(Mandatory = $true)] [string] $GameDir
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root "dist"
-$mdir = Join-Path $dist "media"
 
 if (-not (Test-Path (Join-Path $dist "version.dll"))) {
     throw "dist\version.dll not found -- run scripts\build.ps1 first."
@@ -34,28 +31,30 @@ function Backup-AndCopy([string]$src, [string]$dst) {
 }
 
 Backup-AndCopy (Join-Path $dist "version.dll") (Join-Path $GameDir "version.dll") | Out-Host
-if (Test-Path (Join-Path $dist "fh6_overlay.exe")) {
-    Backup-AndCopy (Join-Path $dist "fh6_overlay.exe") (Join-Path $GameDir "fh6_overlay.exe") | Out-Host
-}
 
-$dataDir = Join-Path $GameDir "fh6-radio"
+$dataDir = Join-Path $GameDir "mods\frdx"
 if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Force -Path $dataDir | Out-Null }
-Copy-Item -Recurse -Force (Join-Path $dist "fh6-radio\ui") $dataDir
+New-Item -ItemType Directory -Force -Path (Join-Path $dataDir "fonts") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $dataDir "ffmpeg") | Out-Null
+
 $cfg = Join-Path $dataDir "config.toml"
 if (-not (Test-Path $cfg)) {
-    Copy-Item (Join-Path $dist "fh6-radio\config.toml") $cfg
-    Write-Host "  + fh6-radio\config.toml  (seeded from example)" -ForegroundColor Yellow
+    Copy-Item (Join-Path $dist "mods\frdx\config.toml") $cfg
+    Write-Host "  + mods\frdx\config.toml  (seeded from example)" -ForegroundColor Yellow
 }
-
-if (-not $SkipMedia -and (Test-Path $mdir)) {
-    Get-ChildItem -Recurse -File $mdir | ForEach-Object {
-        $rel = $_.FullName.Substring($mdir.Length + 1)
-        Backup-AndCopy $_.FullName (Join-Path $GameDir "media\$rel") | Out-Host
-    }
-} elseif (-not $SkipMedia) {
-    Write-Warning "dist\media\ missing -- radio station overlay not installed. Run scripts\fetch-media.ps1 first."
+$stations = Join-Path $dataDir "stations.json"
+if (-not (Test-Path $stations)) {
+    Copy-Item (Join-Path $dist "mods\frdx\stations.json") $stations
+    Write-Host "  + mods\frdx\stations.json  (seeded from example)" -ForegroundColor Yellow
+}
+if (Test-Path (Join-Path $dist "mods\frdx\fonts\FusionPixel12-ja.ttf")) {
+    Copy-Item (Join-Path $dist "mods\frdx\fonts\*") (Join-Path $dataDir "fonts") -Force
+    Write-Host "  + mods\frdx\fonts\" -ForegroundColor Yellow
+}
+if (Test-Path (Join-Path $dist "mods\frdx\ffmpeg\ffmpeg.exe")) {
+    Copy-Item (Join-Path $dist "mods\frdx\ffmpeg\ffmpeg.exe") (Join-Path $dataDir "ffmpeg\ffmpeg.exe") -Force
+    Write-Host "  + mods\frdx\ffmpeg\ffmpeg.exe" -ForegroundColor Yellow
 }
 
 Write-Host "`nDone. Launch the game, set Audio -> Radio DJ = Off, Streamer Mode = On." -ForegroundColor Green
-Write-Host "An RTSS-style overlay will appear automatically in-game (Ctrl+Shift+O to interact)."
-Write-Host "You can also open http://localhost:8420 in any browser on this LAN."
+Write-Host "The in-game overlay opens automatically; press F10 or Insert to show/hide it."

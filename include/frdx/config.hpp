@@ -4,13 +4,11 @@
 #include <string>
 #include <vector>
 
-namespace fh6 {
+namespace frdx {
 
 struct GeneralConfig {
-    uint16_t port               = 8420;
-    uint32_t ring_buffer_mb     = 4;
-    std::string default_source  = "shoutcast";
-    std::string fallback_source = "shoutcast";
+    uint32_t ring_buffer_mb = 4;
+    bool enable_overlay     = true;
 };
 
 struct ShoutcastConfig {
@@ -36,4 +34,4 @@ Config load_config(const std::filesystem::path& path);
 // Atomic write (temp + rename). Throws std::system_error on failure.
 void save_config(const std::filesystem::path& path, const Config& cfg);
 
-} // namespace fh6
+} // namespace frdx

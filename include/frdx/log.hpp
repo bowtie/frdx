@@ -5,7 +5,7 @@
 #include <string_view>
 #include <utility>
 
-namespace fh6::log {
+namespace frdx::log {
 
 enum class Level { trace, info, warn, error };
 
@@ -30,4 +30,4 @@ inline void trace(std::format_string<Args...> fmt, Args&&... args) noexcept {
     emit(Level::trace, std::format(fmt, std::forward<Args>(args)...));
 }
 
-} // namespace fh6::log
+} // namespace frdx::log

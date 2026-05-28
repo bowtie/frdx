@@ -1,13 +1,13 @@
-#include "fh6/fmod/radio_discovery.hpp"
-#include "fh6/log.hpp"
-#include "fh6/safe_mem.hpp"
+#include "frdx/fmod/radio_discovery.hpp"
+#include "frdx/log.hpp"
+#include "frdx/safe_mem.hpp"
 
 #include <atomic>
 #include <cstring>
 #include <mutex>
 #include <string_view>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 
@@ -124,8 +124,10 @@ std::vector<std::byte*> scan_heap(const PEImage& img, const std::byte* vtable) n
         const bool overlaps_module = region >= img.base && region < img.base + img.size;
 
         if (readable && mbi.RegionSize <= 0x4000000 && !overlaps_module) {
-            auto* p   = reinterpret_cast<std::byte*>((uintptr_t)(region + 15) & ~uintptr_t{15});
-            auto* end = reinterpret_cast<std::byte*>((uintptr_t)region_end & ~uintptr_t{7});
+            auto* p   = reinterpret_cast<std::byte*>((reinterpret_cast<uintptr_t>(region) + 15) &
+                                                     ~uintptr_t{15});
+            auto* end = reinterpret_cast<std::byte*>(reinterpret_cast<uintptr_t>(region_end) &
+                                                     ~uintptr_t{7});
             scan_region(img, vtable, p, end, out);
         }
         if (region_end <= prev_end) break;
@@ -145,10 +147,8 @@ std::vector<std::byte*> scan_heap(const PEImage& img, const std::byte* vtable) n
 // say which side of the chain is stuck. `out_body` receives the
 // SampleProperties body pointer so the caller can later overwrite the
 // DisplayName/Artist slots.
-std::string read_sound_name(std::byte* radio_stream, int* step,
-                            std::byte** out_body) noexcept {
-    std::string out;
-    *step        = 0;
+std::string read_sound_name(std::byte* radio_stream, int* step, std::byte** out_body) noexcept {
+    *step = 0;
     if (out_body) *out_body = nullptr;
     std::byte* a = nullptr;
     if (!safe_read(radio_stream + 0x48, a) || !a) return {};
@@ -157,11 +157,12 @@ std::string read_sound_name(std::byte* radio_stream, int* step,
     if (!safe_read(a + 0x18, b) || !b) return {};
     *step = 2;
     if (out_body) *out_body = b;
-    seh_call([&] {
-        auto s = safe_read_msvc_string(b + 0x10);
-        if (s) out = std::move(*s);
-    });
-    return out;
+
+    char name_buf[512];
+    name_buf[0] = '\0';
+    bool ok     = false;
+    seh_call([&] { ok = safe_read_msvc_string_buf(b + 0x10, name_buf, sizeof(name_buf)); });
+    return ok ? std::string{name_buf} : std::string{};
 }
 
 // Cache typedesc/COL/vtable + the heap-candidate list once located; retries
@@ -172,7 +173,7 @@ struct Cache {
     const std::byte* col      = nullptr;
     std::byte* vtable         = nullptr;
     std::vector<std::byte*> candidates;
-    int empty_streak          = 0;  // chain-invalid retries since last hit
+    int empty_streak = 0; // chain-invalid retries since last hit
 };
 std::mutex g_cache_mu;
 Cache g_cache;
@@ -291,7 +292,7 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
         {
             std::scoped_lock lk{g_cache_mu};
             if (invalidate) {
-                g_cache = Cache{};  // force a full heap rescan next call
+                g_cache = Cache{}; // force a full heap rescan next call
             } else {
                 g_cache.empty_streak = local.empty_streak;
             }
@@ -334,4 +335,4 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
     return result;
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

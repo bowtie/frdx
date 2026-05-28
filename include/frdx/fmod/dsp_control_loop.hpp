@@ -1,16 +1,16 @@
 #pragma once
 
-#include "fh6/fmod/dsp_bridge.hpp"
-#include "fh6/fmod/metadata_injector.hpp"
-#include "fh6/fmod/pe_image.hpp"
-#include "fh6/fmod/radio_discovery.hpp"
+#include "frdx/fmod/dsp_bridge.hpp"
+#include "frdx/fmod/metadata_injector.hpp"
+#include "frdx/fmod/pe_image.hpp"
+#include "frdx/fmod/radio_discovery.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <stop_token>
 #include <thread>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 // 50 Hz tick: keeps the DSP installed on the current radio channel and
 // drives the AudioSourceManager pump.
@@ -50,4 +50,4 @@ private:
     std::jthread thread_;
 };
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

@@ -1,13 +1,14 @@
-#include "fh6/fmod/dsp_bridge.hpp"
-#include "fh6/fmod/sig_scanner.hpp"
-#include "fh6/audio_source_manager.hpp"
-#include "fh6/log.hpp"
-#include "fh6/safe_mem.hpp"
+#define NOMINMAX
+#include "frdx/fmod/dsp_bridge.hpp"
+#include "frdx/fmod/sig_scanner.hpp"
+#include "frdx/audio_source_manager.hpp"
+#include "frdx/log.hpp"
+#include "frdx/safe_mem.hpp"
 
 #include <algorithm>
 #include <cstring>
 
-namespace fh6::fmod_bridge {
+namespace frdx::fmod_bridge {
 
 namespace {
 
@@ -112,12 +113,14 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
     out.handle_unlock =
         reinterpret_cast<FMODFns::HandleUnlock_t>(find_by_pattern(img, kUnlockPattern));
 
-    log::info("[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} setMode={} "
-              "resolver={} unlock={}",
-              (void*)out.system_create_dsp, (void*)out.dsp_release,
-              (void*)out.channel_control_add_dsp, (void*)out.channel_control_rem_dsp,
-              (void*)out.channel_control_set_mode, (void*)out.handle_resolver,
-              (void*)out.handle_unlock);
+    log::info(
+        "[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} setMode={} "
+        "resolver={} unlock={}",
+        reinterpret_cast<void*>(out.system_create_dsp), reinterpret_cast<void*>(out.dsp_release),
+        reinterpret_cast<void*>(out.channel_control_add_dsp),
+        reinterpret_cast<void*>(out.channel_control_rem_dsp),
+        reinterpret_cast<void*>(out.channel_control_set_mode),
+        reinterpret_cast<void*>(out.handle_resolver), reinterpret_cast<void*>(out.handle_unlock));
 
     if (!out.system_create_dsp) {
         log::info("[sigscan] System::createDSP not yet visible -- will retry at first install");
@@ -145,7 +148,7 @@ DSPBridge::~DSPBridge() {
 
 void DSPBridge::set_mode(DSPMode m) noexcept {
     auto prev = mode_.exchange(m, std::memory_order_acq_rel);
-    if (prev != m) log::info("[dsp] mode {} -> {}", (int)prev, (int)m);
+    if (prev != m) log::info("[dsp] mode {} -> {}", static_cast<int>(prev), static_cast<int>(m));
 }
 
 bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
@@ -192,7 +195,7 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
         fns_.system_create_dsp = resolve_create_dsp(parse(fns_.host_base));
         if (fns_.system_create_dsp) {
             log::info("[dsp] resolved System::createDSP late at {}",
-                      (void*)fns_.system_create_dsp);
+                      reinterpret_cast<void*>(fns_.system_create_dsp));
         } else {
             log::warn("[dsp] System::createDSP still unresolved -- install aborted");
             return;
@@ -204,7 +207,7 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     constexpr uint32_t kVersions[] = {0x00011000u, 0x00011003u, 0x00010000u};
 
     FMOD_DSP_DESCRIPTION desc{};
-    std::memcpy(desc.name, "FH6 Universal Radio", 19);
+    std::memcpy(desc.name, "Forza Radio DX", 14);
     desc.version          = 1;
     desc.numinputbuffers  = 1;
     desc.numoutputbuffers = 1;
@@ -220,7 +223,9 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
             dsp = nullptr;
             continue;
         }
-        if (rc == 0 && dsp) break;
+        if (rc == 0 && dsp) {
+            break;
+        }
         dsp = nullptr;
     }
     if (!dsp) {
@@ -320,8 +325,11 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         return 0;
     }
     if (m == DSPMode::passthrough) {
-        if (in_buf) std::memcpy(out_buf, in_buf, total * sizeof(float));
-        else        std::memset(out_buf, 0, total * sizeof(float));
+        if (in_buf) {
+            std::memcpy(out_buf, in_buf, total * sizeof(float));
+        } else {
+            std::memset(out_buf, 0, total * sizeof(float));
+        }
         stats();
         return 0;
     }
@@ -351,7 +359,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     for (uint32_t produced = 0; produced < length;) {
         const uint32_t want_frames = std::min(length - produced, kChunkFrames);
         const std::size_t got      = ring.read(scratch, want_frames * 4);
-        const uint32_t got_frames  = static_cast<uint32_t>(got / 4);
+        const auto got_frames      = static_cast<uint32_t>(got / 4);
 
         for (uint32_t f = 0; f < got_frames; ++f) {
             const float fl = scratch[f * 2 + 0] * scale;
@@ -363,10 +371,14 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
             if (out_ch == 1) {
                 o[0] = (L + R) * 0.5f;
             } else {
-                o[0]           = L;
-                o[1]           = R;
-                const float dn = (L + R) * 0.5f;
-                for (int32_t c = 2; c < out_ch; ++c) o[c] = dn;
+                o[0] = L;
+                o[1] = R;
+                if (out_ch > 2) {
+                    const float dn = (L + R) * 0.5f;
+                    for (int32_t c = 2; c < out_ch; ++c) {
+                        o[c] = dn;
+                    }
+                }
             }
         }
 
@@ -381,4 +393,4 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     return 0;
 }
 
-} // namespace fh6::fmod_bridge
+} // namespace frdx::fmod_bridge

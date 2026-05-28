@@ -1,7 +1,7 @@
 #pragma once
 
-#include "fh6/audio_source.hpp"
-#include "fh6/config.hpp"
+#include "frdx/audio_source.hpp"
+#include "frdx/config.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -13,18 +13,18 @@
 #include <unordered_map>
 #include <vector>
 
-namespace fh6::sources {
+namespace frdx::sources {
 
 // ---- Station preset data structures ----
 
 struct StationMetadataMapping {
-    std::string title;                // JSON dot-path, e.g. "data.track_title"
-    std::string artist;               // JSON dot-path, e.g. "data.track_artist"
-    std::string artwork_url;          // JSON dot-path, e.g. "data.artwork_urls.large"
-    std::string artist_array_field;   // if artist resolves to array of objects, extract this field from each
+    std::string title;  // JSON dot-path, e.g. "data.track_title"
+    std::string artist; // JSON dot-path, e.g. "data.track_artist"
+    std::string
+        artist_array_field; // if artist resolves to array of objects, extract this field from each
     std::string artist_separator{", "}; // join array elements with this separator
-    std::string split_separator;      // when set, split a combined "artist - title" value from a single field
-    std::string artwork_url_template; // "https://cdn.example.com/covers/{value}" — {value} replaced by resolved artwork_url
+    std::string
+        split_separator; // when set, split a combined "artist - title" value from a single field
 };
 
 struct StationStream {
@@ -59,16 +59,18 @@ struct StationMetadataWebSocketFilter {
 
 // WebSocket heartbeat / keep-alive configuration.
 struct StationMetadataWebSocketHeartbeat {
-    std::string message;            // JSON message to send, e.g. "{\"op\":9}"
-    std::string interval_field;     // dot-path in server response that gives interval, e.g. "d.heartbeat"
+    std::string message; // JSON message to send, e.g. "{\"op\":9}"
+    std::string
+        interval_field; // dot-path in server response that gives interval, e.g. "d.heartbeat"
     int default_interval_ms = 45000; // fallback if server doesn't provide interval
 };
 
 struct StationMetadata {
     std::string type; // "rest", "static", "websocket", or empty
     std::string url;
-    std::unordered_map<std::string, std::string> stream_url_map;   // stream_id -> metadata URL
-    std::unordered_map<std::string, std::string> stream_name_map;  // stream_id -> display name for entry_selector matching
+    std::unordered_map<std::string, std::string> stream_url_map; // stream_id -> metadata URL
+    std::unordered_map<std::string, std::string>
+        stream_name_map; // stream_id -> display name for entry_selector matching
     int poll_interval_secs = 20;
     StationMetadataMapping mapping;
     StationMetadataEntrySelector entry_selector;
@@ -76,7 +78,6 @@ struct StationMetadata {
     // Static metadata (type == "static").
     std::string static_title;
     std::string static_artist;
-    std::string static_cover_url;
 
     // WebSocket metadata (type == "websocket").
     StationMetadataWebSocketFilter ws_filter;
@@ -117,7 +118,6 @@ public:
 
     void play() override;
     void pause() override;
-    void stop() override;
     void next() override;
     void previous() override;
     void pump(RingBuffer& ring) override;
@@ -134,23 +134,29 @@ public:
         std::scoped_lock lk{mu_};
         return stations_;
     }
+    std::pair<std::string, std::string> active_station_stream() const {
+        std::scoped_lock lk{mu_};
+        return {active_station_id_, active_stream_id_};
+    }
     void select_station(const std::string& station_id, const std::string& stream_id);
 
     TrackInfo current_track() const override;
     PlaybackState playback_state() const noexcept override {
         return state_.load(std::memory_order_acquire);
     }
-    AuthState auth_state() const noexcept override { return auth_; }
-    std::string auth_instructions() const override;
-    SourceCapabilities capabilities() const noexcept override { return {false, true, true}; }
 
 private:
     struct Pipe;
 
-    void start_pipe_locked();         // mu_ held
-    void stop_pipe_locked();          // mu_ held
+    void start_pipe_locked();             // mu_ held
+    void stop_pipe_locked();              // mu_ held
     void cycle_preset(int direction = 1); // cycle through all streams by one step, mu_ held
-    void stop_metadata_poller();      // join bg thread (no-op now, kept for API compat)
+    void stop_metadata_poller();          // join bg thread (no-op now, kept for API compat)
+
+    // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
+    // Returns nullptr on any failure (CreateJob, CreatePipe, CreateProcess).
+    static std::unique_ptr<Pipe> launch_ffmpeg_pipe(const std::string& url,
+                                                    const std::filesystem::path& ffmpeg_path);
 
     ShoutcastConfig cfg_;
     std::unique_ptr<Pipe> pipe_;
@@ -160,7 +166,6 @@ private:
     std::size_t preset_idx_ = 0;
     TrackInfo info_{};
     std::atomic<uint64_t> position_ms_{0};
-    AuthState auth_ = AuthState::none_required;
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
 
     // Dynamic display name (includes station name when active).
@@ -184,10 +189,16 @@ private:
     mutable std::mutex ws_mu_;
     void* ws_handle_ = nullptr;
 
+    // Persistent WinHTTP session handle shared across REST and WebSocket polling.
+    void* winhttp_session_ = nullptr;
+
+    // Retry counter to preserve active station during brief network dropouts.
+    int reconnect_attempts_ = 0;
+
     // Timestamp (steady_clock ms) of the last ICY StreamTitle received in
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
-    // metadata, they skip overwriting title/artist and only update artwork.
+    // metadata, they skip overwriting title/artist.
     std::atomic<int64_t> last_icy_ms_{0};
 };
 
-} // namespace fh6::sources
+} // namespace frdx::sources

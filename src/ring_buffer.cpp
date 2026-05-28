@@ -1,10 +1,10 @@
-#include "fh6/ring_buffer.hpp"
+#include "frdx/ring_buffer.hpp"
 
 #include <algorithm>
 #include <bit>
 #include <cstring>
 
-namespace fh6 {
+namespace frdx {
 
 std::size_t RingBuffer::round_pow2(std::size_t n) noexcept {
     if (n < 4096) n = 4096;
@@ -64,4 +64,4 @@ void RingBuffer::drain() noexcept {
     read_pos_.store(write_pos_.load(std::memory_order_acquire), std::memory_order_release);
 }
 
-} // namespace fh6
+} // namespace frdx

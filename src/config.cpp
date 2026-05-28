@@ -1,12 +1,12 @@
-#include "fh6/config.hpp"
-#include "fh6/log.hpp"
+#include "frdx/config.hpp"
+#include "frdx/log.hpp"
 
 #include <toml.hpp>
 
 #include <fstream>
 #include <system_error>
 
-namespace fh6 {
+namespace frdx {
 
 namespace {
 
@@ -49,18 +49,15 @@ Config load_config(const std::filesystem::path& path) {
         return cfg;
     }
 
-    const auto& g    = section(root, "general");
-    cfg.general.port = static_cast<uint16_t>(pick<int>(g, "port", cfg.general.port));
+    const auto& g = section(root, "general");
     cfg.general.ring_buffer_mb =
         static_cast<uint32_t>(pick<int>(g, "ring_buffer_mb", cfg.general.ring_buffer_mb));
-    cfg.general.default_source = pick<std::string>(g, "default_source", cfg.general.default_source);
-    cfg.general.fallback_source =
-        pick<std::string>(g, "fallback_source", cfg.general.fallback_source);
+    cfg.general.enable_overlay = pick<bool>(g, "enable_overlay", cfg.general.enable_overlay);
 
-    const auto& sc                  = section(root, "shoutcast");
-    cfg.shoutcast.enabled           = pick<bool>(sc, "enabled", cfg.shoutcast.enabled);
-    cfg.shoutcast.default_url       = pick<std::string>(sc, "default_url", "");
-    cfg.shoutcast.ffmpeg_path       = pick_path(sc, "ffmpeg_path");
+    const auto& sc            = section(root, "shoutcast");
+    cfg.shoutcast.enabled     = pick<bool>(sc, "enabled", cfg.shoutcast.enabled);
+    cfg.shoutcast.default_url = pick<std::string>(sc, "default_url", "");
+    cfg.shoutcast.ffmpeg_path = pick_path(sc, "ffmpeg_path");
     try {
         if (sc.contains("presets")) {
             auto v = toml::find<std::vector<std::string>>(sc, "presets");
@@ -93,11 +90,11 @@ struct Emitter {
         // what we want for Windows paths. Use them when the value contains
         // \ or " and no '; otherwise basic double-quoted with backslash
         // escaping.
-        const bool has_bs = str.find('\\') != std::string_view::npos;
-        const bool has_dq = str.find('"') != std::string_view::npos;
-        const bool has_sq = str.find('\'') != std::string_view::npos;
-        out              += key;
-        out              += " = ";
+        const bool has_bs  = str.find('\\') != std::string_view::npos;
+        const bool has_dq  = str.find('"') != std::string_view::npos;
+        const bool has_sq  = str.find('\'') != std::string_view::npos;
+        out               += key;
+        out               += " = ";
         if ((has_bs || has_dq) && !has_sq) {
             out += '\'';
             out += str;
@@ -153,27 +150,24 @@ struct Emitter {
 void save_config(const std::filesystem::path& path, const Config& cfg) {
     Emitter e;
     e.header("general");
-    e.kv("port", (int64_t)cfg.general.port);
-    e.kv("ring_buffer_mb", (int64_t)cfg.general.ring_buffer_mb);
-    e.kv("default_source", cfg.general.default_source);
-    e.kv("fallback_source", cfg.general.fallback_source);
+    e.kv("ring_buffer_mb", static_cast<int64_t>(cfg.general.ring_buffer_mb));
+    e.kv("enable_overlay", cfg.general.enable_overlay);
 
     e.header("shoutcast");
     e.kv("enabled", cfg.shoutcast.enabled);
     e.kv("default_url", cfg.shoutcast.default_url);
     e.kv_path("ffmpeg_path", cfg.shoutcast.ffmpeg_path);
-    if (!cfg.shoutcast.presets.empty())
-        e.kv_strs("presets", cfg.shoutcast.presets);
+    if (!cfg.shoutcast.presets.empty()) e.kv_strs("presets", cfg.shoutcast.presets);
 
     e.header("audio");
-    e.kv("output_gain", (double)cfg.audio.output_gain);
+    e.kv("output_gain", static_cast<double>(cfg.audio.output_gain));
 
     auto tmp  = path;
     tmp      += ".tmp";
     {
         std::ofstream os{tmp, std::ios::binary | std::ios::trunc};
         if (!os) throw std::system_error{errno, std::system_category(), tmp.string()};
-        os.write(e.out.data(), (std::streamsize)e.out.size());
+        os.write(e.out.data(), static_cast<std::streamsize>(e.out.size()));
         if (!os) throw std::system_error{errno, std::system_category(), tmp.string()};
     }
     std::error_code ec;
@@ -181,4 +175,4 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     if (ec) throw std::system_error{ec};
 }
 
-} // namespace fh6
+} // namespace frdx
