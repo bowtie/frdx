@@ -3,7 +3,7 @@
 #
 # Runs:
 #   * clang-format on src/**.cpp + include/**.hpp
-#   * clang-tidy on src/**.cpp
+#   * run-clang-tidy -j8 -p build on src/  (requires compile_commands.json)
 #   * prettier on ui/dist/**.{js,css,html}
 #   * eslint on ui/dist/**.js
 #   * stylelint on ui/dist/**.css
@@ -20,8 +20,11 @@ $root  = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $root "build"
 
 function Find-LlvmTool([string]$exe) {
-    # Check PATH first (winget/choco add it there after a restart or refresh)
+    # Check PATH first (winget/choco add it there after a restart or refresh).
+    # Try with and without .exe — some tools like run-clang-tidy are
+    # Python scripts with no extension.
     $cmd = Get-Command $exe -ErrorAction SilentlyContinue
+    if (-not $cmd) { $cmd = Get-Command "$exe.exe" -ErrorAction SilentlyContinue }
     if ($cmd) { return $cmd.Source }
 
     $candidates = @()
@@ -33,13 +36,16 @@ function Find-LlvmTool([string]$exe) {
         if ($vs) {
             foreach ($arch in @("x64", "ARM64", "")) {
                 $candidates += Join-Path $vs "VC\Tools\Llvm\$arch\bin\$exe.exe"
+                $candidates += Join-Path $vs "VC\Tools\Llvm\$arch\bin\$exe"
             }
         }
     }
 
     # Standalone LLVM installs (winget: C:\Program Files\LLVM, choco: same or $env:ChocolateyInstall/lib)
     $candidates += "$env:ProgramFiles\LLVM\bin\$exe.exe"
+    $candidates += "$env:ProgramFiles\LLVM\bin\$exe"
     $candidates += "${env:ProgramFiles(x86)}\LLVM\bin\$exe.exe"
+    $candidates += "${env:ProgramFiles(x86)}\LLVM\bin\$exe"
 
     foreach ($p in $candidates) {
         if (Test-Path $p) { return $p }
@@ -69,41 +75,47 @@ if (-not $SkipCpp) {
     }
 
     if (-not $SkipTidy) {
-        $clangTidy = Find-LlvmTool "clang-tidy"
-        if (-not $clangTidy) {
-            Write-Host "clang-tidy not found; skipping." -ForegroundColor Yellow
+        $runClangTidy = Find-LlvmTool "run-clang-tidy"
+        if (-not $runClangTidy) {
+            Write-Host "run-clang-tidy not found; skipping." -ForegroundColor Yellow
         } else {
             Write-Host "-> clang-tidy" -ForegroundColor Cyan
-            # Inline include flags -- mirrors target_include_directories() in
-            # CMakeLists.txt. Saves having to feed clang-tidy compile_commands.json
-            # (which MSVC's CMake generator doesn't produce anyway).
-            $cxxArgs = @(
-                "-std=c++20", "-x", "c++",
-                "-D_WIN32_WINNT=0x0A00", "-DWIN32_LEAN_AND_MEAN", "-DNOMINMAX",
-                "-D_CRT_SECURE_NO_WARNINGS", "-DUNICODE", "-D_UNICODE",
-                "-DCPPHTTPLIB_NO_EXCEPTIONS",
-                "-I$(Join-Path $root 'include')",
-                "-I$(Join-Path $root 'third_party\cpp-httplib')",
-                "-I$(Join-Path $root 'third_party\nlohmann')",
-                "-I$(Join-Path $root 'third_party\toml11')",
-                "-I$(Join-Path $root 'third_party\miniaudio')"
-            )
-            $tidyFiles = Get-ChildItem -Path (Join-Path $root "src") -Recurse -Include *.cpp -File
-            # PS 5.1 turns clang-tidy's "N warnings generated." stderr line
-            # into a terminating error under $ErrorActionPreference="Stop"
-            # even with 2>&1 capture, so relax for this block only.
-            $prevEAP = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            foreach ($f in $tidyFiles) {
-                $out = & $clangTidy --quiet $f.FullName -- @cxxArgs 2>&1 | Out-String
-                $diag = ($out -split "`n") | Where-Object { $_ -match ":\d+:\d+: (warning|error):" }
-                if ($diag) {
-                    Write-Host "  $($f.Name): $($diag.Count) diagnostic(s)" -ForegroundColor Yellow
-                    $diag | ForEach-Object { Write-Host "    $_" }
-                    $fails += "clang-tidy ($($f.Name))"
+            $compileDb = Join-Path $build "compile_commands.json"
+            if (-not (Test-Path $compileDb)) {
+                Write-Host "compile_commands.json not found in build/; skipping." -ForegroundColor Yellow
+            } else {
+                # run-clang-tidy is a Python script on some installs — use
+                # python.exe to invoke it so it works inside a pipeline.
+                $tidyExe = $runClangTidy
+                $tidyArgs = @("-j8", "-p", $build)
+                if ((Get-Item $runClangTidy).Extension -eq '' -and
+                    (Get-Command python -ErrorAction SilentlyContinue)) {
+                    $tidyExe = (Get-Command python).Source
+                    $tidyArgs = @($runClangTidy) + $tidyArgs
+                }
+                $prevEAP = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                $out = & $tidyExe @tidyArgs 2>&1 | Out-String
+                $ErrorActionPreference = $prevEAP
+                # Parse output: group warnings by file.
+                $lines  = $out -split "`r?`n"
+                $byFile = @{}
+                foreach ($l in $lines) {
+                    if ($l -match "^(.+\.cpp):(\d+):\d+: (warning|error): (.+)") {
+                        $fname = Split-Path $Matches[1] -Leaf
+                        if (-not $byFile.ContainsKey($fname)) { $byFile[$fname] = @() }
+                        $byFile[$fname] += $l
+                    }
+                }
+                if ($byFile.Count -gt 0) {
+                    foreach ($fname in ($byFile.Keys | Sort-Object)) {
+                        $diag = $byFile[$fname]
+                        Write-Host "  ${fname}: $($diag.Count) diagnostic(s)" -ForegroundColor Yellow
+                        $diag | ForEach-Object { Write-Host "    $_" }
+                        $fails += "clang-tidy ($fname)"
+                    }
                 }
             }
-            $ErrorActionPreference = $prevEAP
         }
     }
 }
