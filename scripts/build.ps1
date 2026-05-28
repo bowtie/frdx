@@ -1,8 +1,10 @@
 # One-shot build script. Configures CMake (Release, Ninja), compiles, then
 # stages everything that needs to ship in dist\.
 #
-#   PS> .\scripts\build.ps1                # incremental
+#   PS> .\scripts\build.ps1                # incremental (auto jobs)
 #   PS> .\scripts\build.ps1 -Clean         # wipe build/ and start fresh
+#   PS> .\scripts\build.ps1 -Jobs 16       # build with 16 parallel jobs
+#   PS> .\scripts\build.ps1 -NoCache       # skip ccache/sccache even if installed
 #
 # Output:
 #   dist\version.dll            the proxy DLL (drops next to forzahorizon6.exe)
@@ -10,7 +12,7 @@
 #   dist\fh6-radio\config.toml  seeded from config.example.toml
 #   dist\fh6-radio\stations.json seeded from stations.example.json
 
-param([switch]$Clean)
+param([switch]$Clean, [int]$Jobs = 0, [switch]$NoCache)
 
 $ErrorActionPreference = "Stop"
 $root  = Split-Path -Parent $PSScriptRoot
@@ -58,6 +60,23 @@ function Find-Ninja {
     return $null
 }
 
+# Prefer sccache (Rust-based, better Windows + clang-cl support) over ccache.
+# Returns the executable path and its short name ("sccache" or "ccache").
+function Find-Ccache {
+    foreach ($name in @("sccache", "ccache")) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { return @{ Exe = $cmd.Source; Name = $name } }
+        # winget / scoop / cargo install paths
+        foreach ($p in @(
+            "${env:ProgramFiles}\$name\bin\$name.exe",
+            "${env:LOCALAPPDATA}\Microsoft\WinGet\Links\$name.exe",
+            "${env:USERPROFILE}\scoop\shims\$name.exe",
+            "${env:USERPROFILE}\.cargo\bin\$name.exe"
+        )) { if (Test-Path $p) { return @{ Exe = $p; Name = $name } } }
+    }
+    return $null
+}
+
 $cmake = Find-CMake
 Write-Host "Using cmake: $cmake" -ForegroundColor DarkGray
 
@@ -67,6 +86,13 @@ if ($ninja) {
 } else {
     Write-Host "Ninja not found -- falling back to MSBuild (slower)." -ForegroundColor Yellow
     Write-Host "Install it:  winget install Ninja-build.Ninja" -ForegroundColor Yellow
+}
+
+$ccache = if (-not $NoCache) { Find-Ccache } else { $null }
+if ($ccache) {
+    Write-Host "Using $($ccache.Name): $($ccache.Exe)" -ForegroundColor DarkGray
+} elseif (-not $NoCache) {
+    Write-Host "ccache/sccache not found (install: winget install sccache)." -ForegroundColor DarkGray
 }
 
 if (-not (Test-Path (Join-Path $root "third_party\cpp-httplib\httplib.h"))) {
@@ -87,12 +113,25 @@ if (-not (Test-Path (Join-Path $build "CMakeCache.txt"))) {
     } else {
         $cmakeArgs += @("-A", "x64")
     }
+    if ($ccache) {
+        $cmakeArgs += @(
+            "-DCMAKE_C_COMPILER_LAUNCHER=$($ccache.Name)",
+            "-DCMAKE_CXX_COMPILER_LAUNCHER=$($ccache.Name)"
+        )
+    }
+} elseif ($NoCache) {
+    # Explicitly clear stale launcher vars from a previous cached build.
+    $cmakeArgs += @(
+        "-DCMAKE_C_COMPILER_LAUNCHER=",
+        "-DCMAKE_CXX_COMPILER_LAUNCHER="
+    )
 }
 & $cmake @cmakeArgs | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 
 Write-Host "-> cmake build (Release)" -ForegroundColor Cyan
 $buildArgs = @("--build", $build)
+if ($Jobs -gt 0) { $buildArgs += @("--parallel", $Jobs) }
 if (-not $ninja) { $buildArgs += @("--config", "Release") }
 & $cmake @buildArgs | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
