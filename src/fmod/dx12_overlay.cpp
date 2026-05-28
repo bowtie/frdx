@@ -11,6 +11,7 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <unordered_map>
 #include <cmath>
 
 #include <MinHook.h>
@@ -28,15 +29,17 @@ namespace {
 
 // Hook signatures and originals
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
-using ResizeBuffers_t       = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT BufferCount,
-                                                  UINT Width, UINT Height, DXGI_FORMAT NewFormat,
-                                                  UINT SwapChainFlags);
-using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
-                                               ID3D12CommandList* const* ppCommandLists);
+using ResizeBuffers_t          = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT BufferCount,
+                                                     UINT Width, UINT Height, DXGI_FORMAT NewFormat,
+                                                     UINT SwapChainFlags);
+using CreateSwapChainForHwnd_t = HRESULT(__stdcall*)(
+    IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1* pDesc,
+    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGIOutput* pRestrictToOutput,
+    IDXGISwapChain1** ppSwapChain);
 
-Present_t original_Present                         = nullptr;
-ResizeBuffers_t original_ResizeBuffers             = nullptr;
-ExecuteCommandLists_t original_ExecuteCommandLists = nullptr;
+Present_t original_Present                               = nullptr;
+ResizeBuffers_t original_ResizeBuffers                   = nullptr;
+CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
 
 WNDPROC original_wnd_proc = nullptr;
 
@@ -50,12 +53,17 @@ ConfigStore* g_store             = nullptr;
 
 // DirectX 12 render contexts
 ID3D12Device* d3d12_device                    = nullptr;
-ID3D12CommandQueue* captured_command_queue    = nullptr;
+std::mutex swapchain_map_mutex;
+std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> swapchain_queues;
 ID3D12DescriptorHeap* srv_descriptor_heap     = nullptr;
 ID3D12DescriptorHeap* rtv_descriptor_heap     = nullptr;
 ID3D12GraphicsCommandList* imgui_command_list = nullptr;
+ID3D12Fence* imgui_fence                      = nullptr;
+HANDLE imgui_fence_event                      = nullptr;
+UINT64 imgui_fence_value                      = 0;
 
 std::vector<ID3D12CommandAllocator*> command_allocators;
+std::vector<UINT64> command_allocator_fence_values;
 std::vector<ID3D12Resource*> backbuffers;
 std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> backbuffer_rtvs;
 
@@ -94,6 +102,7 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 void pre_resize() {
     if (!initialized) return;
 
+    wait_for_all_overlay_work();
     ImGui_ImplDX12_InvalidateDeviceObjects();
 
     for (auto& buf : backbuffers) {
@@ -276,15 +285,47 @@ void draw_imgui_ui() {
     ImGui::End();
 }
 
-// Hooked DX12 ExecuteCommandLists callback
-void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
-                                        ID3D12CommandList* const* ppCommandLists) {
-    if (!captured_command_queue && pQueue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
-        captured_command_queue = pQueue;
-        log::info("[overlay] captured game's D3D12 Direct command queue: 0x{:X}",
-                  reinterpret_cast<uintptr_t>(captured_command_queue));
+bool wait_for_fence(UINT64 fence_value) {
+    if (!imgui_fence || fence_value == 0) return true;
+    if (imgui_fence->GetCompletedValue() >= fence_value) return true;
+    if (!imgui_fence_event) return false;
+    if (FAILED(imgui_fence->SetEventOnCompletion(fence_value, imgui_fence_event))) return false;
+    return WaitForSingleObject(imgui_fence_event, 2000) == WAIT_OBJECT_0;
+}
+
+void wait_for_all_overlay_work() {
+    for (const auto fence_value : command_allocator_fence_values) {
+        if (!wait_for_fence(fence_value)) {
+            log::warn("[overlay] timed out waiting for GPU overlay work to finish");
+        }
     }
-    original_ExecuteCommandLists(pQueue, NumCommandLists, ppCommandLists);
+}
+
+// Hooked DXGI CreateSwapChainForHwnd callback
+HRESULT __stdcall
+hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWnd,
+                            const DXGI_SWAP_CHAIN_DESC1* pDesc,
+                            const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+                            IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain) {
+    HRESULT hr = original_CreateSwapChainForHwnd(pFactory, pDevice, hWnd, pDesc, pFullscreenDesc,
+                                                 pRestrictToOutput, ppSwapChain);
+    if (SUCCEEDED(hr) && ppSwapChain && *ppSwapChain && pDevice) {
+        ID3D12CommandQueue* queue = nullptr;
+        if (SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), (void**)&queue)) &&
+            queue) {
+            std::scoped_lock lk{swapchain_map_mutex};
+            // Release existing if already mapped
+            auto it = swapchain_queues.find(*ppSwapChain);
+            if (it != swapchain_queues.end()) {
+                if (it->second) it->second->Release();
+            }
+            swapchain_queues[*ppSwapChain] = queue;
+            log::info("[overlay] intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to command queue 0x{:X}",
+                      reinterpret_cast<uintptr_t>(*ppSwapChain),
+                      reinterpret_cast<uintptr_t>(queue));
+        }
+    }
+    return hr;
 }
 
 // Hooked DXGI Swap Chain Present callback
@@ -303,8 +344,8 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
                 return original_Present(pSwapChain, SyncInterval, Flags);
             }
 
-            original_wnd_proc =
-                (WNDPROC)SetWindowLongPtr(desc.OutputWindow, GWLP_WNDPROC, (LONG_PTR)wnd_proc_hook);
+            original_wnd_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
+                desc.OutputWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wnd_proc_hook)));
             if (!original_wnd_proc) {
                 log::error(
                     "[overlay] failed to hook game window WndProc! Aborting ImGui initialization.");
@@ -320,24 +361,81 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             srvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
             srvHeapDesc.NumDescriptors             = 1;
             srvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-            d3d12_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&srv_descriptor_heap));
+            if (FAILED(d3d12_device->CreateDescriptorHeap(&srvHeapDesc,
+                                                          IID_PPV_ARGS(&srv_descriptor_heap))) ||
+                !srv_descriptor_heap) {
+                log::error("[overlay] failed to create SRV descriptor heap! Aborting ImGui "
+                           "initialization.");
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
+            }
 
             // Set up Descriptor Heap for RTV (Backbuffer Renders)
             D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
             rtvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
             rtvHeapDesc.NumDescriptors             = desc.BufferCount;
             rtvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-            d3d12_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&rtv_descriptor_heap));
+            if (FAILED(d3d12_device->CreateDescriptorHeap(&rtvHeapDesc,
+                                                          IID_PPV_ARGS(&rtv_descriptor_heap))) ||
+                !rtv_descriptor_heap) {
+                log::error("[overlay] failed to create RTV descriptor heap! Aborting ImGui "
+                           "initialization.");
+                srv_descriptor_heap->Release();
+                srv_descriptor_heap = nullptr;
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
+            }
 
             // Set up Command Allocators and Graphics Command List for ImGui
             command_allocators.resize(desc.BufferCount, nullptr);
+            command_allocator_fence_values.resize(desc.BufferCount, 0);
+            bool allocators_failed = false;
             for (UINT i = 0; i < desc.BufferCount; i++) {
-                d3d12_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                     IID_PPV_ARGS(&command_allocators[i]));
+                if (FAILED(d3d12_device->CreateCommandAllocator(
+                        D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&command_allocators[i]))) ||
+                    !command_allocators[i]) {
+                    log::error("[overlay] failed to create command allocator {}! Aborting ImGui "
+                               "initialization.",
+                               i);
+                    allocators_failed = true;
+                    break;
+                }
             }
-            d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                            command_allocators[0], nullptr,
-                                            IID_PPV_ARGS(&imgui_command_list));
+            if (allocators_failed) {
+                for (auto* alloc : command_allocators) {
+                    if (alloc) alloc->Release();
+                }
+                command_allocators.clear();
+                command_allocator_fence_values.clear();
+                srv_descriptor_heap->Release();
+                srv_descriptor_heap = nullptr;
+                rtv_descriptor_heap->Release();
+                rtv_descriptor_heap = nullptr;
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
+            }
+
+            if (FAILED(d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                       command_allocators[0], nullptr,
+                                                       IID_PPV_ARGS(&imgui_command_list))) ||
+                !imgui_command_list) {
+                log::error("[overlay] failed to create ImGui graphics command list! Aborting ImGui "
+                           "initialization.");
+                for (auto* alloc : command_allocators) {
+                    if (alloc) alloc->Release();
+                }
+                command_allocators.clear();
+                srv_descriptor_heap->Release();
+                srv_descriptor_heap = nullptr;
+                rtv_descriptor_heap->Release();
+                rtv_descriptor_heap = nullptr;
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
+            }
             imgui_command_list->Close();
 
             // Populate backbuffers list and create RTVs
@@ -348,18 +446,46 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             backbuffers.resize(desc.BufferCount, nullptr);
             backbuffer_rtvs.resize(desc.BufferCount);
 
+            bool buffers_failed = false;
             for (UINT i = 0; i < desc.BufferCount; i++) {
-                if (SUCCEEDED(pSwapChain->GetBuffer(i, IID_PPV_ARGS(&backbuffers[i])))) {
-                    d3d12_device->CreateRenderTargetView(backbuffers[i], nullptr, rtvHandle);
-                    backbuffer_rtvs[i]  = rtvHandle;
-                    rtvHandle.ptr      += rtvDescriptorSize;
+                if (FAILED(pSwapChain->GetBuffer(i, IID_PPV_ARGS(&backbuffers[i]))) ||
+                    !backbuffers[i]) {
+                    log::error("[overlay] failed to query swapchain backbuffer {}! Aborting ImGui "
+                               "initialization.",
+                               i);
+                    buffers_failed = true;
+                    break;
                 }
+                d3d12_device->CreateRenderTargetView(backbuffers[i], nullptr, rtvHandle);
+                backbuffer_rtvs[i]  = rtvHandle;
+                rtvHandle.ptr      += rtvDescriptorSize;
+            }
+
+            if (buffers_failed) {
+                for (auto* buf : backbuffers) {
+                    if (buf) buf->Release();
+                }
+                backbuffers.clear();
+                backbuffer_rtvs.clear();
+                imgui_command_list->Release();
+                imgui_command_list = nullptr;
+                for (auto* alloc : command_allocators) {
+                    if (alloc) alloc->Release();
+                }
+                command_allocators.clear();
+                srv_descriptor_heap->Release();
+                srv_descriptor_heap = nullptr;
+                rtv_descriptor_heap->Release();
+                rtv_descriptor_heap = nullptr;
+                d3d12_device->Release();
+                d3d12_device = nullptr;
+                return original_Present(pSwapChain, SyncInterval, Flags);
             }
 
             // Init Dear ImGui Win32 & DX12 contexts
             ImGui::CreateContext();
             ImGui_ImplWin32_Init(desc.OutputWindow);
-            ImGui_ImplDX12_Init(d3d12_device, desc.BufferCount, DXGI_FORMAT_R8G8B8A8_UNORM,
+            ImGui_ImplDX12_Init(d3d12_device, desc.BufferCount, desc.BufferDesc.Format,
                                 srv_descriptor_heap,
                                 srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart(),
                                 srv_descriptor_heap->GetGPUDescriptorHandleForHeapStart());
@@ -374,7 +500,16 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         }
     }
 
-    if (initialized && captured_command_queue) {
+    ID3D12CommandQueue* active_queue = nullptr;
+    {
+        std::scoped_lock lk{swapchain_map_mutex};
+        auto it = swapchain_queues.find(pSwapChain);
+        if (it != swapchain_queues.end()) {
+            active_queue = it->second;
+        }
+    }
+ 
+    if (initialized && active_queue) {
         UINT backBufferIdx          = 0;
         IDXGISwapChain3* swapChain3 = nullptr;
         if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&swapChain3))) && swapChain3) {
@@ -382,9 +517,11 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             swapChain3->Release();
         }
 
-        if (backBufferIdx >= command_allocators.size()) {
-            log::error("[overlay] backBufferIdx {} is out of bounds (size {})!", backBufferIdx,
-                       command_allocators.size());
+        if (backBufferIdx >= command_allocators.size() || backBufferIdx >= backbuffers.size() ||
+            !backbuffers[backBufferIdx]) {
+            log::error("[overlay] backBufferIdx {} is out of bounds or backbuffer is NULL! "
+                       "size={}, buf_size={}",
+                       backBufferIdx, command_allocators.size(), backbuffers.size());
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
         ID3D12CommandAllocator* allocator = command_allocators[backBufferIdx];
@@ -423,7 +560,8 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
 
         imgui_command_list->Close();
 
-        captured_command_queue->ExecuteCommandLists(1, (ID3D12CommandList**)&imgui_command_list);
+        active_queue->ExecuteCommandLists(
+            1, reinterpret_cast<ID3D12CommandList**>(&imgui_command_list));
     }
 
     return original_Present(pSwapChain, SyncInterval, Flags);
@@ -522,13 +660,13 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
         return false;
     }
 
-    // Retrieve function vtable pointers from the active dummy swapchain and queue
-    void** swapChainVtable    = *reinterpret_cast<void***>(swapChain);
-    void** commandQueueVtable = *reinterpret_cast<void***>(commandQueue);
+    // Retrieve function vtable pointers from the active dummy swapchain and factory
+    void** swapChainVtable = *reinterpret_cast<void***>(swapChain);
+    void** factoryVtable   = *reinterpret_cast<void***>(factory);
 
-    void* target_Present             = swapChainVtable[8];
-    void* target_ResizeBuffers       = swapChainVtable[13];
-    void* target_ExecuteCommandLists = commandQueueVtable[10];
+    void* target_Present                = swapChainVtable[8];
+    void* target_ResizeBuffers          = swapChainVtable[13];
+    void* target_CreateSwapChainForHwnd = factoryVtable[15];
 
     // Clean up temporary dummy resolution targets
     swapChain->Release();
@@ -538,10 +676,11 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
     DestroyWindow(hwnd);
     UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
 
-    log::info("[overlay] target resolved: Present=0x{:X} ResizeBuffers=0x{:X} Execute=0x{:X}",
+    log::info("[overlay] target resolved: Present=0x{:X} ResizeBuffers=0x{:X} "
+              "CreateSwapChainForHwnd=0x{:X}",
               reinterpret_cast<uintptr_t>(target_Present),
               reinterpret_cast<uintptr_t>(target_ResizeBuffers),
-              reinterpret_cast<uintptr_t>(target_ExecuteCommandLists));
+              reinterpret_cast<uintptr_t>(target_CreateSwapChainForHwnd));
 
     // 6. Hook via MinHook
     if (MH_Initialize() != MH_OK) {
@@ -553,9 +692,9 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
                       reinterpret_cast<LPVOID*>(&original_Present)) != MH_OK ||
         MH_CreateHook(target_ResizeBuffers, &hook_ResizeBuffers,
                       reinterpret_cast<LPVOID*>(&original_ResizeBuffers)) != MH_OK ||
-        MH_CreateHook(target_ExecuteCommandLists, &hook_ExecuteCommandLists,
-                      reinterpret_cast<LPVOID*>(&original_ExecuteCommandLists)) != MH_OK) {
-        log::error("[overlay] failed to create MinHook Present / Resize / Execute detours");
+        MH_CreateHook(target_CreateSwapChainForHwnd, &hook_CreateSwapChainForHwnd,
+                      reinterpret_cast<LPVOID*>(&original_CreateSwapChainForHwnd)) != MH_OK) {
+        log::error("[overlay] failed to create MinHook Present / Resize / CreateSwapChain detours");
         return false;
     }
 
@@ -599,6 +738,13 @@ void shutdown() noexcept {
         if (rtv_descriptor_heap) {
             rtv_descriptor_heap->Release();
             rtv_descriptor_heap = nullptr;
+        }
+        {
+            std::scoped_lock lk{swapchain_map_mutex};
+            for (auto& pair : swapchain_queues) {
+                if (pair.second) pair.second->Release();
+            }
+            swapchain_queues.clear();
         }
         if (d3d12_device) {
             d3d12_device->Release();

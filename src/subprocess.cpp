@@ -6,18 +6,19 @@ namespace fh6::subprocess {
 
 std::wstring widen(std::string_view s) {
     if (s.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
     std::wstring out(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n);
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
     return out;
 }
 
 std::string narrow(std::wstring_view ws) {
     if (ws.empty()) return {};
-    int n =
-        WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), nullptr, 0, nullptr, nullptr);
+    int n = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0,
+                                nullptr, nullptr);
     std::string out(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.data(), (int)ws.size(), out.data(), n, nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), out.data(), n, nullptr,
+                        nullptr);
     return out;
 }
 
@@ -89,9 +90,10 @@ std::string describe_launch_failure(const std::wstring& bin, DWORD ec, bool from
 
     std::string sys_msg;
     LPWSTR raw = nullptr;
-    DWORD len  = FormatMessageW(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, ec, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&raw, 0, nullptr);
+    DWORD len  = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                                    FORMAT_MESSAGE_IGNORE_INSERTS,
+                                nullptr, ec, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                reinterpret_cast<LPWSTR>(&raw), 0, nullptr);
     if (raw && len) {
         while (len && (raw[len - 1] == L'\r' || raw[len - 1] == L'\n' || raw[len - 1] == L' '))
             --len;

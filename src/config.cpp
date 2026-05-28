@@ -56,6 +56,7 @@ Config load_config(const std::filesystem::path& path) {
     cfg.general.default_source = pick<std::string>(g, "default_source", cfg.general.default_source);
     cfg.general.fallback_source =
         pick<std::string>(g, "fallback_source", cfg.general.fallback_source);
+    cfg.general.enable_overlay = pick<bool>(g, "enable_overlay", cfg.general.enable_overlay);
 
     const auto& sc            = section(root, "shoutcast");
     cfg.shoutcast.enabled     = pick<bool>(sc, "enabled", cfg.shoutcast.enabled);
@@ -153,10 +154,11 @@ struct Emitter {
 void save_config(const std::filesystem::path& path, const Config& cfg) {
     Emitter e;
     e.header("general");
-    e.kv("port", (int64_t)cfg.general.port);
-    e.kv("ring_buffer_mb", (int64_t)cfg.general.ring_buffer_mb);
+    e.kv("port", static_cast<int64_t>(cfg.general.port));
+    e.kv("ring_buffer_mb", static_cast<int64_t>(cfg.general.ring_buffer_mb));
     e.kv("default_source", cfg.general.default_source);
     e.kv("fallback_source", cfg.general.fallback_source);
+    e.kv("enable_overlay", cfg.general.enable_overlay);
 
     e.header("shoutcast");
     e.kv("enabled", cfg.shoutcast.enabled);
@@ -165,14 +167,14 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     if (!cfg.shoutcast.presets.empty()) e.kv_strs("presets", cfg.shoutcast.presets);
 
     e.header("audio");
-    e.kv("output_gain", (double)cfg.audio.output_gain);
+    e.kv("output_gain", static_cast<double>(cfg.audio.output_gain));
 
     auto tmp  = path;
     tmp      += ".tmp";
     {
         std::ofstream os{tmp, std::ios::binary | std::ios::trunc};
         if (!os) throw std::system_error{errno, std::system_category(), tmp.string()};
-        os.write(e.out.data(), (std::streamsize)e.out.size());
+        os.write(e.out.data(), static_cast<std::streamsize>(e.out.size()));
         if (!os) throw std::system_error{errno, std::system_category(), tmp.string()};
     }
     std::error_code ec;

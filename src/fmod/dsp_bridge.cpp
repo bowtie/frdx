@@ -112,12 +112,14 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
     out.handle_unlock =
         reinterpret_cast<FMODFns::HandleUnlock_t>(find_by_pattern(img, kUnlockPattern));
 
-    log::info("[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} setMode={} "
-              "resolver={} unlock={}",
-              (void*)out.system_create_dsp, (void*)out.dsp_release,
-              (void*)out.channel_control_add_dsp, (void*)out.channel_control_rem_dsp,
-              (void*)out.channel_control_set_mode, (void*)out.handle_resolver,
-              (void*)out.handle_unlock);
+    log::info(
+        "[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} setMode={} "
+        "resolver={} unlock={}",
+        reinterpret_cast<void*>(out.system_create_dsp), reinterpret_cast<void*>(out.dsp_release),
+        reinterpret_cast<void*>(out.channel_control_add_dsp),
+        reinterpret_cast<void*>(out.channel_control_rem_dsp),
+        reinterpret_cast<void*>(out.channel_control_set_mode),
+        reinterpret_cast<void*>(out.handle_resolver), reinterpret_cast<void*>(out.handle_unlock));
 
     if (!out.system_create_dsp) {
         log::info("[sigscan] System::createDSP not yet visible -- will retry at first install");
@@ -145,7 +147,7 @@ DSPBridge::~DSPBridge() {
 
 void DSPBridge::set_mode(DSPMode m) noexcept {
     auto prev = mode_.exchange(m, std::memory_order_acq_rel);
-    if (prev != m) log::info("[dsp] mode {} -> {}", (int)prev, (int)m);
+    if (prev != m) log::info("[dsp] mode {} -> {}", static_cast<int>(prev), static_cast<int>(m));
 }
 
 bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
@@ -191,7 +193,8 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     if (!fns_.system_create_dsp && fns_.host_base) {
         fns_.system_create_dsp = resolve_create_dsp(parse(fns_.host_base));
         if (fns_.system_create_dsp) {
-            log::info("[dsp] resolved System::createDSP late at {}", (void*)fns_.system_create_dsp);
+            log::info("[dsp] resolved System::createDSP late at {}",
+                      reinterpret_cast<void*>(fns_.system_create_dsp));
         } else {
             log::warn("[dsp] System::createDSP still unresolved -- install aborted");
             return;

@@ -10,6 +10,7 @@ port              = 8420
 ring_buffer_mb    = 4
 default_source    = "shoutcast"
 fallback_source   = "shoutcast"
+enable_overlay    = true                        # set false if game anti-cheat crashes on D3D12 overlay hooks
 
 [shoutcast]
 enabled            = true

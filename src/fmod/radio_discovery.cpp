@@ -124,8 +124,10 @@ std::vector<std::byte*> scan_heap(const PEImage& img, const std::byte* vtable) n
         const bool overlaps_module = region >= img.base && region < img.base + img.size;
 
         if (readable && mbi.RegionSize <= 0x4000000 && !overlaps_module) {
-            auto* p   = reinterpret_cast<std::byte*>((uintptr_t)(region + 15) & ~uintptr_t{15});
-            auto* end = reinterpret_cast<std::byte*>((uintptr_t)region_end & ~uintptr_t{7});
+            auto* p   = reinterpret_cast<std::byte*>((reinterpret_cast<uintptr_t>(region) + 15) &
+                                                     ~uintptr_t{15});
+            auto* end = reinterpret_cast<std::byte*>(reinterpret_cast<uintptr_t>(region_end) &
+                                                     ~uintptr_t{7});
             scan_region(img, vtable, p, end, out);
         }
         if (region_end <= prev_end) break;

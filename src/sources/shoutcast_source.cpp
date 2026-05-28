@@ -998,7 +998,8 @@ void ShoutcastSource::restart_metadata_for_current() {
                                      sizeof(recv_timeout_ms));
                 }
 
-                HINTERNET hConnect = WinHttpConnect(hSession, host, (INTERNET_PORT)port, 0);
+                HINTERNET hConnect =
+                    WinHttpConnect(hSession, host, static_cast<INTERNET_PORT>(port), 0);
                 if (!hConnect) {
                     log::warn("[shoutcast] ws: WinHttpConnect failed ({})", GetLastError());
                     if (local_session) WinHttpCloseHandle(hSession);
@@ -1076,9 +1077,10 @@ void ShoutcastSource::restart_metadata_for_current() {
                 auto last_heartbeat = std::chrono::steady_clock::now();
 
                 if (!hb.message.empty()) {
-                    DWORD err = WinHttpWebSocketSend(
-                        hWebSocket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                        (PVOID)hb.message.data(), (DWORD)hb.message.size());
+                    DWORD err = WinHttpWebSocketSend(hWebSocket,
+                                                     WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                                     const_cast<char*>(hb.message.data()),
+                                                     static_cast<DWORD>(hb.message.size()));
                     if (err != ERROR_SUCCESS)
                         log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
                     last_heartbeat = std::chrono::steady_clock::now();
@@ -1094,7 +1096,8 @@ void ShoutcastSource::restart_metadata_for_current() {
                         if (elapsed >= heartbeat_ms) {
                             DWORD err = WinHttpWebSocketSend(
                                 hWebSocket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                (PVOID)hb.message.data(), (DWORD)hb.message.size());
+                                const_cast<char*>(hb.message.data()),
+                                static_cast<DWORD>(hb.message.size()));
                             if (err != ERROR_SUCCESS) {
                                 log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
                                 break;
@@ -1144,8 +1147,9 @@ void ShoutcastSource::restart_metadata_for_current() {
                     if (!filter.op_field.empty()) {
                         const json* op_node = resolve_json_node(msg, filter.op_field);
                         if (!op_node) continue;
-                        int op_val =
-                            op_node->is_number_integer() ? (int)op_node->get<int64_t>() : 0;
+                        int op_val = op_node->is_number_integer()
+                                       ? static_cast<int>(op_node->get<int64_t>())
+                                       : 0;
                         if (op_val != filter.op_value) continue;
                     }
                     if (!filter.type_field.empty() && !filter.type_value.empty()) {
@@ -1448,7 +1452,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         if (want > 4096) want = 4096;
         int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
         DWORD got = 0;
-        if (!ReadFile(p->read_pipe, buf, (DWORD)want, &got, nullptr) || got == 0) {
+        if (!ReadFile(p->read_pipe, buf, static_cast<DWORD>(want), &got, nullptr) || got == 0) {
             on_eof();
             return;
         }

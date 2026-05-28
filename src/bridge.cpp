@@ -100,8 +100,12 @@ void run_bridge(HMODULE self) noexcept {
     http::HttpServer http{mgr, bridge, store, cfg.general.port, ui_dir};
     log::info("[bridge] running on port {}", cfg.general.port);
 
-    // Start the Direct3D 12 ImGui overlay detours
-    dx12_overlay::initialize(mgr, bridge, store);
+    // Start the Direct3D 12 ImGui overlay detours if enabled
+    if (cfg.general.enable_overlay) {
+        dx12_overlay::initialize(mgr, bridge, store);
+    } else {
+        log::info("[bridge] in-game D3D12 overlay is disabled via configuration");
+    }
 
     for (;;) Sleep(60'000);
 }

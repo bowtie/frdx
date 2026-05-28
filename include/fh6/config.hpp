@@ -11,6 +11,7 @@ struct GeneralConfig {
     uint32_t ring_buffer_mb     = 4;
     std::string default_source  = "shoutcast";
     std::string fallback_source = "shoutcast";
+    bool enable_overlay         = true;
 };
 
 struct ShoutcastConfig {
