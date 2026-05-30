@@ -167,5 +167,16 @@
         "url": "https://r-a-d.io/main"
       }
     ]
+  },
+  {
+    "id": "poolsuite",
+    "name": "PoolSuite ON AIR",
+    "streams": [
+      {
+        "id": "main",
+        "name": "Summer Radio",
+        "url": "https://s5.radio.co/sc9cb59935/listen"
+      }
+    ]
   }
 ]
