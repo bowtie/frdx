@@ -87,9 +87,22 @@ inline bool safe_read_msvc_string_buf(const void* addr, char* out_buf, std::size
 }
 
 // Run `fn()` under SEH. Returns false on access violations and similar.
-// The body must contain no C++ destructible locals: __try doesn't unwind
-// under /EHsc.
+//
+// WARNING: Under /EHsc, __try/__except does NOT unwind C++ objects.
+// The callable `fn` and everything it captures MUST be trivially
+// destructible. If `fn` captures a std::string, std::unique_ptr, or
+// any RAII type by value, and the SEH exception fires, those destructors
+// will NOT run — leaking memory or corrupting state.
+//
+// Safe:  seh_call([&] { rc = fns->handle_resolver(h, &inst, &lock); });
+//        (captures only trivial locals by reference)
+//
+// UNSAFE: seh_call([&s] { s = read_string(ptr); });
+//         (std::string assignment may throw, captured by ref, destructor skipped)
 template <class Fn> bool seh_call(Fn&& fn) noexcept {
+    static_assert(std::is_trivially_destructible_v<std::remove_reference_t<Fn>>,
+                  "seh_call: lambda must be trivially destructible — "
+                  "__try/__except does not unwind C++ objects under /EHsc");
     __try {
         fn();
         return true;

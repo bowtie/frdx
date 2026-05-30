@@ -87,6 +87,7 @@ void run_bridge(HMODULE self) noexcept {
 
     fmod_bridge::DSPBridge bridge{mgr, fns};
     bridge.set_gain(cfg.audio.output_gain);
+    bridge.set_force_stereo_audio(cfg.audio.force_stereo_audio);
 
     std::unique_ptr<fmod_bridge::ControlLoop> ctrl;
     if (fns.ready())
@@ -99,6 +100,7 @@ void run_bridge(HMODULE self) noexcept {
             if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
 
             bridge.set_gain(c.audio.output_gain);
+            bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
             if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
         });
 

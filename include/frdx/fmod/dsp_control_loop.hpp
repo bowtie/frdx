@@ -1,11 +1,13 @@
 #pragma once
 
 #include "frdx/fmod/dsp_bridge.hpp"
+#include "frdx/fmod/game_state_probe.hpp"
 #include "frdx/fmod/metadata_injector.hpp"
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/fmod/radio_discovery.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <stop_token>
 #include <thread>
@@ -30,23 +32,23 @@ private:
     void run(const std::stop_token& tok);
     void push_metadata() noexcept;
 
-    // Pick the best RadioInstance from a discovery result, preferring the
-    // target SoundName and optionally filtering to those whose +0x20 holds
-    // a live FMOD channel handle (used by recovery).
-    const RadioInstance* select_instance(const DiscoveryResult& disc,
-                                         bool require_live) const noexcept;
+    // Discover the live RadioStreamFmod carrying our sample and point the
+    // bridge + metadata injector at it. Used at startup and after a recovery
+    // toggle (the game may reallocate the wrapper).
+    bool acquire_target() noexcept;
 
-    // Re-discover and switch to an instance with a live channel handle when
-    // our DSP has stopped receiving reads (channel destroyed by FMOD with
-    // no replacement written to +0x20).
-    void recover_stale_dsp() noexcept;
+    // Pick the best RadioInstance from a discovery result, preferring
+    // instances with a live channel handle and the target SoundName.
+    const RadioInstance* select_instance(const DiscoveryResult& disc) const noexcept;
 
     DSPBridge& bridge_;
     const PEImage& img_;
     std::atomic<float> configured_gain_;
     MetadataInjector meta_;
+    GameStateProbe game_state_;
     std::uint64_t prev_calls_ = 0;
     int stale_ticks_          = 0;
+    std::chrono::steady_clock::time_point last_retune_{}; // cooldown for retune toggle
     std::jthread thread_;
 };
 

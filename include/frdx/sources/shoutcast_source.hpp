@@ -31,7 +31,6 @@ struct StationStream {
     std::string id;
     std::string name;
     std::string url;
-    std::string icon;
     // Per-stream mapping override — when non-empty, takes precedence over
     // the station-level mapping for metadata resolution. This allows fixing
     // individual streams whose API returns data in a different format (e.g.
@@ -87,8 +86,6 @@ struct StationMetadata {
 struct StationPreset {
     std::string id;
     std::string name;
-    std::string description;
-    std::string icon;
     std::vector<StationStream> streams;
     StationMetadata metadata;
 };
@@ -103,13 +100,14 @@ public:
     explicit ShoutcastSource(ShoutcastConfig cfg);
     ~ShoutcastSource() override;
 
+    SourceType type() const noexcept override { return SourceType::shoutcast; }
+    uint64_t track_generation() const noexcept override {
+        return info_gen_.load(std::memory_order_acquire);
+    }
+
     std::string_view name() const noexcept override { return "shoutcast"; }
-    std::string_view display_name() const noexcept override {
-        // No lock — display_name_ is only written under mu_ (in
-        // start_pipe_locked) from the HTTP server thread, and read from
-        // the audio thread.  A lock with string_view return creates a
-        // TOCTOU window where the pointed-to memory can be freed before
-        // the caller finishes copying.
+    std::string display_name() const override {
+        std::scoped_lock lk{mu_};
         return display_name_;
     }
 
@@ -152,6 +150,9 @@ private:
     void stop_pipe_locked();              // mu_ held
     void cycle_preset(int direction = 1); // cycle through all streams by one step, mu_ held
     void stop_metadata_poller();          // join bg thread (no-op now, kept for API compat)
+    void stop_icy_poller();               // join ICY metadata thread
+    void run_icy_poller(const std::string& stream_url,
+                        const std::stop_token& stop); // ICY metadata loop body
 
     // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
     // Returns nullptr on any failure (CreateJob, CreatePipe, CreateProcess).
@@ -180,9 +181,12 @@ private:
     // Restart metadata poller for the currently active station (releases mu_ first).
     void restart_metadata_for_current();
 
-    // Metadata poller thread (background REST polling).
+    // Metadata poller thread (background REST/WS polling).
     std::jthread metadata_thread_;
-    std::atomic<bool> metadata_stop_{false};
+
+    // ICY metadata poller — connects directly to the stream URL via WinHTTP,
+    // sends Icy-MetaData: 1, parses interleaved StreamTitle blocks.
+    std::jthread icy_poller_thread_;
 
     // WinHTTP WebSocket handle for forced close on stop.
     // void* avoids pulling <windows.h>/<winhttp.h> into this public header.
@@ -199,6 +203,10 @@ private:
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
     // metadata, they skip overwriting title/artist.
     std::atomic<int64_t> last_icy_ms_{0};
+
+    // Generation counter bumped on every info_ write so the overlay can
+    // avoid calling current_track() (which locks mu_) every frame.
+    std::atomic<uint64_t> info_gen_{0};
 };
 
 } // namespace frdx::sources

@@ -17,5 +17,18 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
 // Disables hooks and cleans up Dear ImGui resources safely.
 void shutdown() noexcept;
 
+// Lightweight init for the sandbox harness: sets up the overlay globals and
+// action worker thread WITHOUT hooking into the game's DX12 present chain.
+// Call this before draw_imgui_ui() in a standalone render loop.
+void init_ui(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
+             ConfigStore& store) noexcept;
+
+// Draws the full overlay UI (media bar + settings window).
+// Requires init_ui() or initialize() to have been called first.
+void draw_imgui_ui() noexcept;
+
+// Teardown matching init_ui() — stops the action worker, clears globals.
+void shutdown_ui() noexcept;
+
 } // namespace dx12_overlay
 } // namespace frdx

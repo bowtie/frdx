@@ -1,165 +1,90 @@
 [
   {
-    "schema_version": "1.0",
     "id": "doujinstyle",
     "name": "DoujinStyle.FM",
-    "description": "We are dedicated to playing nothing but Doujin Music and Japanese Underground Electronic Music. All genres welcome!",
-    "icon": "fa-solid fa-radio",
     "streams": [
       {
         "id": "main",
         "name": "Doujin & Underground Electronic",
-        "url": "https://streams.radio.co/s5ff57669c/listen",
-        "icon": "fa-solid fa-play"
+        "url": "https://streams.radio.co/s5ff57669c/listen"
       }
-    ],
-    "metadata": {
-      "type": "rest",
-      "url": "https://public.radio.co/api/v2/s5ff57669c/track/current",
-      "poll_interval_secs": 5,
-      "mapping": {
-        "title": "data.track_title",
-        "artist": "data.track_artist"
-      }
-    }
+    ]
   },
   {
-    "schema_version": "1.0",
     "id": "asiadreamradio",
     "name": "asia DREAM radio",
-    "description": "A curated network of Japanese music radio stations — J-Pop, J-Rock, J-Jazz, City Pop, and Hip Hop.",
-    "icon": "fa-solid fa-radio",
     "streams": [
       {
         "id": "japan_hits",
         "name": "Japan Hits",
-        "url": "https://quincy.torontocast.com:2020/;?type=http",
-        "icon": "fa-solid fa-fire"
+        "url": "https://quincy.torontocast.com/JapanHits"
       },
       {
         "id": "natsukashii",
         "name": "J-Pop Sakura 懐かしい",
-        "url": "https://quincy.torontocast.com:2070/;?type=http",
-        "icon": "fa-solid fa-clock-rotate-left"
+        "url": "https://quincy.torontocast.com/SakuraN"
       },
       {
         "id": "jpop_kawaii",
         "name": "J-Pop Powerplay Kawaii",
-        "url": "https://kathy.torontocast.com:3060/;?type=http",
-        "icon": "fa-solid fa-heart"
+        "url": "https://kathy.torontocast.com/kawaii"
       },
       {
         "id": "jpop_power",
         "name": "J-Pop Powerplay",
-        "url": "https://kathy.torontocast.com:3560/;?type=http",
-        "icon": "fa-solid fa-bolt"
+        "url": "https://kathy.torontocast.com/powerplay"
       },
       {
         "id": "jazz_sakura",
         "name": "Jazz Sakura",
-        "url": "https://kathy.torontocast.com:3330/;?type=http",
-        "icon": "fa-solid fa-leaf",
-        "mapping": {
-          "title": "results.0.metadata",
-          "split_separator": " - "
-        }
+        "url": "https://kathy.torontocast.com/jazzsakura"
       },
       {
         "id": "jrock",
         "name": "J-Rock Powerplay",
-        "url": "https://kathy.torontocast.com:3340/;?type=http",
-        "icon": "fa-solid fa-guitar"
+        "url": "https://kathy.torontocast.com/jrock"
       },
       {
         "id": "jclub_hiphop",
         "name": "J-Club Hip Hop",
-        "url": "https://kathy.torontocast.com:3350/;?type=http",
-        "icon": "fa-solid fa-compact-disc"
+        "url": "https://kathy.torontocast.com/jclubhiphop"
       },
       {
         "id": "bandstand_jazz",
         "name": "Bandstand Jazz",
-        "url": "https://cast1.torontocast.com/bandstand",
-        "icon": "fa-solid fa-music"
+        "url": "https://cast1.torontocast.com/bandstand"
       }
-    ],
-    "metadata": {
-      "type": "rest",
-      "url": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
-      "stream_url_map": {
-        "japan_hits": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
-        "natsukashii": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=3",
-        "jpop_kawaii": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=2",
-        "jpop_power": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=1",
-        "jazz_sakura": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=1",
-        "jrock": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=4",
-        "jclub_hiphop": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=5",
-        "bandstand_jazz": "https://cast1.torontocast.com:2050/api/v2/history/?limit=1&offset=0&server=1"
-      },
-      "poll_interval_secs": 5,
-      "mapping": {
-        "title": "results.0.title",
-        "artist": "results.0.author"
-      }
-    }
+    ]
   },
   {
-    "schema_version": "1.0",
     "id": "j1",
     "name": "J1 Radio",
-    "description": "Japan's hottest hits — J1 Loves Japan, J1 Loves You!",
-    "icon": "fa-solid fa-radio",
     "streams": [
       {
         "id": "J1HITS",
         "name": "J1 HITS",
-        "url": "https://jenny.torontocast.com:2000/stream/J1HITS",
-        "icon": "fa-solid fa-fire"
+        "url": "https://jenny.torontocast.com:2000/stream/J1HITS"
       },
       {
         "id": "J1GOLD",
         "name": "J1 GOLD",
-        "url": "https://jenny.torontocast.com:2000/stream/J1GOLD",
-        "icon": "fa-solid fa-compact-disc"
+        "url": "https://jenny.torontocast.com:2000/stream/J1GOLD"
       }
-    ],
-    "metadata": {
-      "type": "rest",
-      "url": "https://json.j1fm.tokyo/whatweplay.json",
-      "poll_interval_secs": 5,
-      "entry_selector": {
-        "array_path": "station",
-        "match_field": "name",
-        "match_value_from": "stream_name"
-      },
-      "stream_name_map": {
-        "J1HITS": "J1 HITS",
-        "J1GOLD": "J1 GOLD"
-      },
-      "mapping": {
-        "title": "title",
-        "artist": "artist"
-      }
-    }
+    ]
   },
   {
-    "schema_version": "1.0",
     "id": "listen_moe",
     "name": "LISTEN.moe",
-    "description": "A listener-powered radio streaming service dedicated to J-Pop, K-Pop, and anime music.",
-    "icon": "fa-solid fa-radio",
     "streams": [
       {
         "id": "jpop",
         "name": "J-Pop",
-        "url": "https://listen.moe/stream",
-        "icon": "fa-solid fa-music"
+        "url": "https://listen.moe/stream"
       },
       {
         "id": "kpop",
         "name": "K-Pop",
-        "url": "https://listen.moe/kpop/stream",
-        "icon": "fa-solid fa-compact-disc"
+        "url": "https://listen.moe/kpop/stream"
       }
     ],
     "metadata": {
@@ -189,27 +114,58 @@
     }
   },
   {
-    "schema_version": "1.0",
     "id": "vocaloid",
     "name": "Vocaloid Radio",
-    "description": "Dedicated to playing all types of Vocaloid music from all genres.",
-    "icon": "fa-solid fa-radio",
     "streams": [
       {
         "id": "main",
         "name": "All Vocaloid, All Genres",
-        "url": "https://vocaloid.radioca.st/stream",
-        "icon": "fa-solid fa-play"
+        "url": "https://vocaloid.radioca.st/stream"
       }
-    ],
-    "metadata": {
-      "type": "rest",
-      "url": "https://vocaloid.radioca.st/status-json.xsl",
-      "poll_interval_secs": 5,
-      "mapping": {
-        "title": "icestats.source.0.title",
-        "split_separator": " - "
+    ]
+  },
+  {
+    "id": "plaza",
+    "name": "Nightwave Plaza",
+    "streams": [
+      {
+        "id": "main",
+        "name": "Vaporwave & Future Funk",
+        "url": "http://radio.plaza.one/mp3"
       }
-    }
+    ]
+  },
+  {
+    "id": "usagi",
+    "name": "Usagi FM",
+    "streams": [
+      {
+        "id": "main",
+        "name": "Anime, K-pop & J-music",
+        "url": "https://agad.usagifm.com/listen/usagifm/radio.mp3"
+      }
+    ]
+  },
+  {
+    "id": "yumico",
+    "name": "Yumi Co. Radio",
+    "streams": [
+      {
+        "id": "main",
+        "name": "Future Funk, City Pop & Anime Groove",
+        "url": "https://yumicoradio.net/stream"
+      }
+    ]
+  },
+  {
+    "id": "radio",
+    "name": "R/a/dio",
+    "streams": [
+      {
+        "id": "main",
+        "name": "Anime Music (allegedly)",
+        "url": "https://r-a-d.io/main"
+      }
+    ]
   }
 ]
