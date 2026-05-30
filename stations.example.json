@@ -178,5 +178,56 @@
         "url": "https://s5.radio.co/sc9cb59935/listen"
       }
     ]
+  },
+  {
+    "id": "nightride",
+    "name": "Nightride FM",
+    "streams": [
+      {
+        "id": "nightride",
+        "name": "NIGHTRIDE FM",
+        "url": "https://stream.nightride.fm/nightride.mp3"
+      },
+      {
+        "id": "chillsynth",
+        "name": "CHILLSYNTH FM",
+        "url": "https://stream.nightride.fm/chillsynth.mp3"
+      },
+      {
+        "id": "datawave",
+        "name": "DATAWAVE FM",
+        "url": "https://stream.nightride.fm/datawave.mp3"
+      },
+      {
+        "id": "spacesynth",
+        "name": "SPACESYNTH FM",
+        "url": "https://stream.nightride.fm/spacesynth.mp3"
+      },
+      {
+        "id": "darksynth",
+        "name": "DARKSYNTH",
+        "url": "https://stream.nightride.fm/darksynth.mp3"
+      },
+      {
+        "id": "horrorsynth",
+        "name": "HORRORSYNTH",
+        "url": "https://stream.nightride.fm/horrorsynth.mp3"
+      },
+      {
+        "id": "ebsm",
+        "name": "EDM",
+        "url": "https://stream.nightride.fm/ebsm.mp3"
+      },
+      {
+        "id": "rekt",
+        "name": "BASS",
+        "url": "https://stream.nightride.fm/rekt.mp3"
+      },
+      {
+        "id": "rektory",
+        "name": "CLASSICS",
+        "url": "https://stream.nightride.fm/rektory.mp3"
+      }
+    ]
   }
 ]
