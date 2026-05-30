@@ -1410,16 +1410,32 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
             }
             if (error) break;
 
-            // Parse StreamTitle from metadata
+            // Parse StreamTitle from metadata.
+            // SHOUTcast format: StreamTitle='value';StreamUrl='url';
+            // Embedded apostrophes in the value (e.g. "Pizuya's Cell") are
+            // not escaped — search for the ' that is followed by ; to find
+            // the real end-of-value delimiter.
             std::string_view meta(buf, meta_read);
             auto st_pos = meta.find("StreamTitle='");
             if (st_pos == std::string_view::npos)
                 st_pos = meta.find("StreamTitle=\"");
             if (st_pos == std::string_view::npos) continue;
 
-            auto val_start = st_pos + 13; // "StreamTitle='"
-            auto quote_char = meta[st_pos + 12]; // ' or "
-            auto val_end   = meta.find(quote_char, val_start);
+            auto val_start  = st_pos + 13;
+            auto quote_char = meta[st_pos + 12];
+            auto val_end    = std::string_view::npos;
+
+            for (auto scan = val_start; scan < meta.size();) {
+                auto q = meta.find(quote_char, scan);
+                if (q == std::string_view::npos) break;
+                auto next = q + 1;
+                while (next < meta.size() && meta[next] == ' ') next++;
+                if (next < meta.size() && meta[next] == ';') {
+                    val_end = q;
+                    break;
+                }
+                scan = q + 1;
+            }
             if (val_end == std::string_view::npos || val_end <= val_start) continue;
 
             std::string val(meta.substr(val_start, val_end - val_start));

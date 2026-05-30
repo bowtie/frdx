@@ -377,7 +377,6 @@ void draw_imgui_ui_impl() {
                                     ImGuiWindowFlags_NoFocusOnAppearing;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
         ImGui::Begin("Settings", nullptr, setFlags);
-
         // Theme heading above the combo
         ImGui::Text("Theme");
         if (ImGui::Combo("##theme", &g_theme_idx, g_theme_names, IM_ARRAYSIZE(g_theme_names))) {
@@ -396,21 +395,61 @@ void draw_imgui_ui_impl() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
         }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        int dock_pos = 0;
+        if (g_store) {
+            auto cfg = g_store->snapshot();
+            dock_pos = cfg.general.dock_position;
+        }
+        ImGui::Text("Player Dock");
+        if (ImGui::RadioButton("Top", dock_pos == 0)) {
+            g_store->patch([&](Config& c) { c.general.dock_position = 0; });
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Bottom", dock_pos == 1)) {
+            g_store->patch([&](Config& c) { c.general.dock_position = 1; });
+        }
         ImGui::End();
         ImGui::PopStyleVar();
     }
 
     if (!show_player) return;
 
-    // ── Media player bar (auto-sized to content) ──────────────────────
-    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+    // ── Media player bar (docked to top or bottom) ──────────────────────
+    auto* viewport               = ImGui::GetMainViewport();
+    const float vp_w             = viewport->WorkSize.x;
+    const ImVec2 vp_pos          = viewport->WorkPos;
+    const float vp_avail_y       = viewport->WorkSize.y;
+
+    int dock_pos = 0;
+    if (g_store) {
+        auto cfg = g_store->snapshot();
+        dock_pos = cfg.general.dock_position;
+    }
+
+    const float rounding = 6.0f;
+    const float margin   = 20.0f;
+    if (dock_pos == 0) {
+        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + margin),
+                                ImGuiCond_Always, ImVec2(0.5f, 0));
+    } else {
+        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + vp_avail_y - margin),
+                                ImGuiCond_Always, ImVec2(0.5f, 1));
+    }
     ImGui::SetNextWindowBgAlpha(0.94f);
 
     ImGuiWindowFlags barFlags = ImGuiWindowFlags_AlwaysAutoResize |
+                                ImGuiWindowFlags_NoTitleBar |
+                                ImGuiWindowFlags_NoResize |
+                                ImGuiWindowFlags_NoMove |
                                 ImGuiWindowFlags_NoCollapse |
                                 ImGuiWindowFlags_NoScrollbar |
                                 ImGuiWindowFlags_NoScrollWithMouse;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, rounding);
     ImGui::Begin("Forza Radio DX", nullptr, barFlags);
 
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;

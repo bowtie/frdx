@@ -9,6 +9,7 @@ namespace frdx {
 struct GeneralConfig {
     uint32_t ring_buffer_mb = 4;
     bool enable_overlay     = true;
+    int dock_position       = 0; // 0 = top, 1 = bottom
 };
 
 struct ShoutcastConfig {
