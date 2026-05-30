@@ -3,6 +3,13 @@ build/
 /dist/
 compile_commands.json
 
+# Local artifacts (sandbox images, editor configs, project dumps, scripts)
+assets/sandbox_bg.jpg
+imgui.ini
+nul
+project_dump.md
+qwen.ps1
+
 # Downloaded by scripts\get-deps.ps1
 third_party/
 
