@@ -35,8 +35,8 @@ constexpr FMODSig kAnchored[] = {
 inline float soft_clip(float x) noexcept {
     constexpr float k = 0.85f;
     const float a    = std::fabs(x);
-    const float over = std::max(0.0f, a - k) / (1.0f - k);
-    return std::copysign(std::min(a, k) + (1.0f - k) * over / (1.0f + over), x);
+    const float over = (a > k) ? (a - k) / (1.0f - k) : 0.0f;
+    return std::copysign(a > 1.0f ? 1.0f : (a > k ? k + (1.0f - k) * over / (1.0f + over) : a), x);
 }
 
 // FMOD's `Handle::open` / `Handle::unlock` have no .rdata anchor; we match

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 namespace frdx {
 class AudioSourceManager;
 class ConfigStore;
@@ -29,6 +31,11 @@ void draw_imgui_ui() noexcept;
 
 // Teardown matching init_ui() — stops the action worker, clears globals.
 void shutdown_ui() noexcept;
+
+// Register a callback that flushes any residual audio buffered in the output
+// device (e.g. stops/resets WASAPI). Called by the pause action immediately
+// after draining the ring buffer.
+void set_flush_audio(std::function<void()> fn) noexcept;
 
 } // namespace dx12_overlay
 } // namespace frdx

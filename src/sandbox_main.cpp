@@ -135,6 +135,14 @@ public:
         if (hEvent_) { CloseHandle(hEvent_); hEvent_ = nullptr; }
     }
 
+    void flush() {
+        if (client_) {
+            client_->Stop();
+            client_->Reset();
+            client_->Start();
+        }
+    }
+
     ~WasapiOutput() { stop(); }
 
     uint64_t underruns() const { return underruns_.load(std::memory_order_relaxed); }
@@ -335,6 +343,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // WASAPI audio output (replaces FMOD for the sandbox)
     WasapiOutput wasapi;
     wasapi.start(mgr, bridge);
+    frdx::dx12_overlay::set_flush_audio([&wasapi] { wasapi.flush(); });
 
     // ── 2. Real ShoutcastSource with stations ────────────────────────────
     auto ffmpeg_path = resolve_path("mods/frdx/ffmpeg/ffmpeg.exe");

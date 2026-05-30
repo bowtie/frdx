@@ -59,6 +59,8 @@ bool initialized  = false;
 AudioSourceManager* g_mgr        = nullptr;
 fmod_bridge::DSPBridge* g_bridge = nullptr;
 ConfigStore* g_store             = nullptr;
+void (*g_flush_audio)()          = nullptr;
+std::function<void()> g_flush_audio_fn;
 
 // DirectX 12 render contexts
 ID3D12Device* d3d12_device = nullptr;
@@ -68,6 +70,11 @@ std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*>& get_swapchain_queues()
     return m;
 }
 #define swapchain_queues get_swapchain_queues()
+std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*>& get_swapchain3_cache() {
+    static std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*> c;
+    return c;
+}
+#define swapchain3_cache get_swapchain3_cache()
 ID3D12DescriptorHeap* srv_descriptor_heap     = nullptr;
 ID3D12DescriptorHeap* rtv_descriptor_heap     = nullptr;
 ID3D12GraphicsCommandList* imgui_command_list = nullptr;
@@ -506,6 +513,8 @@ void draw_imgui_ui_impl() {
             enqueue_action([active, is_playing] {
                 if (is_playing) {
                     active->pause();
+                    if (g_mgr) g_mgr->ring().drain();
+                    if (g_flush_audio_fn) g_flush_audio_fn();
                 } else {
                     active->play();
                 }
@@ -825,6 +834,10 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
 
 // Releases all partially-initialized overlay resources on init failure.
 static void cleanup_imgui_resources() {
+    for (auto& [sc, sc3] : swapchain3_cache) {
+        if (sc3) sc3->Release();
+    }
+    swapchain3_cache.clear();
     for (auto* buf : backbuffers) {
         if (buf) buf->Release();
     }
@@ -885,11 +898,23 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     }
 
     if (initialized && active_queue) {
-        UINT backBufferIdx          = 0;
-        IDXGISwapChain3* swapChain3 = nullptr;
-        if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&swapChain3))) && swapChain3) {
-            backBufferIdx = swapChain3->GetCurrentBackBufferIndex();
-            swapChain3->Release();
+        // Skip ImGui entirely when both UI panels are hidden.
+        if (!show_player && !show_settings) {
+            return original_Present(pSwapChain, SyncInterval, Flags);
+        }
+        UINT backBufferIdx = 0;
+        {
+            std::scoped_lock lk{swapchain_map_mutex};
+            auto it = swapchain3_cache.find(pSwapChain);
+            if (it == swapchain3_cache.end()) {
+                IDXGISwapChain3* sc3 = nullptr;
+                if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
+                    swapchain3_cache[pSwapChain] = sc3;
+                    backBufferIdx = sc3->GetCurrentBackBufferIndex();
+                }
+            } else {
+                backBufferIdx = it->second->GetCurrentBackBufferIndex();
+            }
         }
 
         if (backBufferIdx >= command_allocators.size() || backBufferIdx >= backbuffers.size() ||
@@ -989,6 +1014,11 @@ void shutdown_ui() noexcept {
     g_bridge = nullptr;
     g_store  = nullptr;
     log::info("[overlay] shutdown_ui (sandbox mode)");
+}
+
+void set_flush_audio(std::function<void()> fn) noexcept {
+    g_flush_audio_fn = std::move(fn);
+    log::info("[overlay] registered audio flush callback");
 }
 
 // ── Full hook-based init (used by the game) ──────────────────────────────
