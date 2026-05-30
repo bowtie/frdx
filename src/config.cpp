@@ -52,9 +52,6 @@ Config load_config(const std::filesystem::path& path) {
     const auto& g = section(root, "general");
     cfg.general.ring_buffer_mb =
         static_cast<uint32_t>(pick<int>(g, "ring_buffer_mb", cfg.general.ring_buffer_mb));
-    cfg.general.enable_overlay = pick<bool>(g, "enable_overlay", cfg.general.enable_overlay);
-    cfg.general.dock_position =
-        static_cast<int>(pick<int>(g, "dock_position", cfg.general.dock_position));
 
     const auto& sc            = section(root, "shoutcast");
     cfg.shoutcast.enabled     = pick<bool>(sc, "enabled", cfg.shoutcast.enabled);
@@ -156,8 +153,6 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     Emitter e;
     e.header("general");
     e.kv("ring_buffer_mb", static_cast<int64_t>(cfg.general.ring_buffer_mb));
-    e.kv("enable_overlay", cfg.general.enable_overlay);
-    e.kv("dock_position", static_cast<int64_t>(cfg.general.dock_position));
 
     e.header("shoutcast");
     e.kv("enabled", cfg.shoutcast.enabled);

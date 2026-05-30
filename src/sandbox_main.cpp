@@ -328,7 +328,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // ── 1. Config + managers ─────────────────────────────────────────────
     auto cfg_path = data_dir / "config.toml";
     frdx::Config cfg = frdx::load_config(cfg_path);
-    cfg.general.enable_overlay   = true;
     cfg.audio.output_gain        = 0.1f;
     cfg.audio.force_stereo_audio = true;
     frdx::ConfigStore store(cfg_path, cfg);

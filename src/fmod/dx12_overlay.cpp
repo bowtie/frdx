@@ -28,6 +28,9 @@
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx12.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 // Forward WndProc handler defined in Dear ImGui impl_win32
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
                                                              LPARAM lParam);
@@ -53,13 +56,12 @@ CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
 WNDPROC original_wnd_proc = nullptr;
 
 // Overlay state
-bool show_player  = true; // player bar (transport, volume, station selector)
+std::atomic<bool> show_player{true}; // player bar (transport, volume, station selector)
 bool initialized  = false;
 
 AudioSourceManager* g_mgr        = nullptr;
 fmod_bridge::DSPBridge* g_bridge = nullptr;
 ConfigStore* g_store             = nullptr;
-void (*g_flush_audio)()          = nullptr;
 std::function<void()> g_flush_audio_fn;
 
 // DirectX 12 render contexts
@@ -86,8 +88,6 @@ std::vector<ID3D12CommandAllocator*> command_allocators;
 std::vector<UINT64> command_allocator_fence_values;
 std::vector<ID3D12Resource*> backbuffers;
 std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> backbuffer_rtvs;
-// font_glyph_ranges is a function-local static in load_overlay_font()
-// to avoid bugprone-throwing-static-initialization.
 
 std::mutex action_mutex;
 std::condition_variable action_cv;
@@ -103,7 +103,17 @@ std::atomic<bool> action_busy{false};
 // Theme state
 static const char* g_theme_names[] = {"Bess Dark", "Tokyo Night"};
 static int g_theme_idx             = 0;
-static bool show_settings          = false;
+static std::atomic<bool> show_settings{false};
+static std::atomic<bool> show_stations{false};
+static std::atomic<bool> show_hud{true};
+
+
+// Optional background image for sandbox visual testing
+static ID3D12Resource* g_bg_texture = nullptr;
+static ImTextureID g_bg_texture_id  = 0;
+
+// Anchor for stations browser placement
+static ImVec2 s_btn_min;
 
 // Station combo cache – rebuilds only when the active source changes
 struct StationComboCache {
@@ -119,14 +129,27 @@ static bool s_combo_dirty      = true;
 void wait_for_all_overlay_work();
 void enqueue_action(std::function<void()> action);
 
-// WndProc hook to hijack inputs
+// ── UI section private helpers ────────────────────────────────────────
+// These are extracted from draw_imgui_ui_impl() to keep each section
+// independently understandable.
+struct PlayerBarLayout {
+    ImVec2 pos;
+    ImVec2 size;
+    float  gear_right;
+};
+static void draw_hud(IAudioSource* active, const TrackInfo& track);
+static void draw_settings_window(const PlayerBarLayout& layout);
+static PlayerBarLayout draw_player_bar(IAudioSource* active);
+static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout);
+
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    const bool intercept = show_player || show_settings;
+    const bool intercept = show_player || show_settings || show_stations;
     if (intercept) {
         if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam)) {
             return true;
         }
-        // Suppress inputs from reaching the game window while overlay is active
+        // Suppress inputs from reaching the game window while overlay is active.
+        // Note: intercept excludes show_hud, so HUD-only visibility won't block input.
         if (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) {
             return true;
         }
@@ -140,7 +163,7 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         show_player = !show_player;
         if (initialized) {
-            ImGui::GetIO().MouseDrawCursor = show_player || show_settings;
+            ImGui::GetIO().MouseDrawCursor = show_player || show_settings || show_stations;
         }
         return 0;
     }
@@ -329,23 +352,11 @@ static void ApplyTheme(int idx) {
     }
 }
 
-// ── Always-on HUD + togglable player bar with separate settings ──────────
+// ── UI section: HUD ───────────────────────────────────────────────────
 
-void draw_imgui_ui_impl() {
-    auto* active = g_mgr->active();
+static void draw_hud(IAudioSource* active, const TrackInfo& track) {
+    if (!show_hud) return;
 
-    // Track info cache – only calls current_track() when generation changes
-    static uint64_t s_track_gen = 0;
-    static TrackInfo s_cached_track;
-    if (active) {
-        uint64_t gen = active->track_generation();
-        if (gen != s_track_gen) {
-            s_track_gen   = gen;
-            s_cached_track = active->current_track();
-        }
-    }
-
-    // ── Always-visible HUD overlay ─────────────────────────────────────
     ImGui::SetNextWindowBgAlpha(0.4f);
     ImGuiWindowFlags hudFlags =
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -354,33 +365,85 @@ void draw_imgui_ui_impl() {
 
     ImGui::Begin("Radio HUD", nullptr, hudFlags);
     if (active) {
-        std::string title = s_cached_track.title.empty() ? active->display_name()
-                                                         : s_cached_track.title;
+        std::string title =
+            track.title.empty() ? active->display_name() : track.title;
         ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "%s", title.c_str());
         ImGui::Separator();
-        if (!s_cached_track.artist.empty() && s_cached_track.artist != "Select a station") {
+        if (!track.artist.empty() && track.artist != "Select a station") {
             ImGui::TextColored(ImVec4(0.6f, 0.63f, 0.7f, 1.0f), "%s",
-                               s_cached_track.artist.c_str());
+                               track.artist.c_str());
         }
     } else {
         ImGui::Text("Radio Station Idle");
     }
     ImGui::End();
+}
 
-    // ── Settings window (always drawable, toggled by gear button) ──
-    if (show_settings) {
-        ImGui::SetNextWindowBgAlpha(0.94f);
-        ImGuiWindowFlags setFlags = ImGuiWindowFlags_AlwaysAutoResize |
-                                    ImGuiWindowFlags_NoCollapse |
-                                    ImGuiWindowFlags_NoScrollbar |
-                                    ImGuiWindowFlags_NoScrollWithMouse |
-                                    ImGuiWindowFlags_NoFocusOnAppearing;
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-        ImGui::Begin("Settings", nullptr, setFlags);
-        // Theme heading above the combo
+// ── UI section: settings window ────────────────────────────────────────
+
+static void draw_settings_window(const PlayerBarLayout& layout) {
+    if (!show_settings) return;
+
+    const float set_tb  = ImGui::GetFrameHeight();
+    ImGui::SetNextWindowPos(ImVec2(layout.gear_right, layout.pos.y + layout.size.y - set_tb),
+                            ImGuiCond_Always, ImVec2(1.0f, 0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(100.0f, 0), ImVec2(280.0f, 400.0f));
+    ImGui::SetNextWindowBgAlpha(0.94f);
+
+    ImGuiWindowFlags setFlags = ImGuiWindowFlags_AlwaysAutoResize |
+                                ImGuiWindowFlags_NoCollapse |
+                                ImGuiWindowFlags_NoResize |
+                                ImGuiWindowFlags_NoMove |
+                                ImGuiWindowFlags_NoScrollbar |
+                                ImGuiWindowFlags_NoScrollWithMouse |
+                                ImGuiWindowFlags_NoFocusOnAppearing |
+                                ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
+
+    if (ImGui::Begin("##Settings", nullptr, setFlags)) {
+        // Custom bordered background
+        {
+            auto* wdl       = ImGui::GetWindowDrawList();
+            auto* fdl       = ImGui::GetForegroundDrawList();
+            ImVec2 p        = ImGui::GetWindowPos();
+            ImVec2 sz       = ImGui::GetWindowSize();
+            float  r        = 6.0f;
+            ImU32  bg       = ImGui::GetColorU32(ImGuiCol_WindowBg, 0.94f);
+            ImU32  brd      = ImGui::GetColorU32(ImGuiCol_Border);
+            wdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), bg, r);
+            // Border via AddRect with only bottom corners rounded
+            // (top corners are sharp 90° so the sides start flat at the
+            // transparent titlebar boundary).  Clipped 1 px at the top
+            // so the top edge line is invisible through the titlebar.
+            {
+                const float tb = ImGui::GetFrameHeight();
+                fdl->PushClipRect(ImVec2(p.x - 1.0f, p.y + tb),
+                                   ImVec2(p.x + sz.x + 2.0f, p.y + sz.y + 2.0f));
+                fdl->AddRect(ImVec2(p.x - 1.0f, p.y + tb - 1.0f),
+                             ImVec2(p.x + sz.x + 1.0f, p.y + sz.y + 1.0f),
+                             brd, r, 1.0f, ImDrawFlags_RoundCornersBottom);
+                fdl->PopClipRect();
+            }
+        }
+
         ImGui::Text("Theme");
-        if (ImGui::Combo("##theme", &g_theme_idx, g_theme_names, IM_ARRAYSIZE(g_theme_names))) {
+        if (ImGui::Combo("##theme", &g_theme_idx, g_theme_names,
+                         IM_ARRAYSIZE(g_theme_names))) {
             ApplyTheme(g_theme_idx);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool hud = show_hud;
+        if (ImGui::Checkbox("Show Music Overlay", &hud)) {
+            show_hud = hud;
         }
 
         ImGui::Spacing();
@@ -390,57 +453,42 @@ void draw_imgui_ui_impl() {
         bool stereo = g_bridge->force_stereo_audio();
         if (ImGui::Checkbox("Force Stereo Audio", &stereo)) {
             g_bridge->set_force_stereo_audio(stereo);
-            g_store->patch([&](Config& c) { c.audio.force_stereo_audio = stereo; });
+            g_store->patch(
+                [&](Config& c) { c.audio.force_stereo_audio = stereo; });
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
+            ImGui::SetTooltip(
+                "ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        int dock_pos = 0;
-        if (g_store) {
-            auto cfg = g_store->snapshot();
-            dock_pos = cfg.general.dock_position;
+        // Close on click outside
+        if (ImGui::IsMouseClicked(0) &&
+            !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
+            !ImGui::GetIO().WantCaptureMouse) {
+            show_settings = false;
         }
-        ImGui::Text("Player Dock");
-        if (ImGui::RadioButton("Top", dock_pos == 0)) {
-            g_store->patch([&](Config& c) { c.general.dock_position = 0; });
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Bottom", dock_pos == 1)) {
-            g_store->patch([&](Config& c) { c.general.dock_position = 1; });
-        }
-        ImGui::End();
-        ImGui::PopStyleVar();
     }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+}
 
-    if (!show_player) return;
+// ── UI section: player bar ─────────────────────────────────────────────
+// Returns layout bounds so the stations browser can align itself.
 
-    // ── Media player bar (docked to top or bottom) ──────────────────────
-    auto* viewport               = ImGui::GetMainViewport();
-    const float vp_w             = viewport->WorkSize.x;
-    const ImVec2 vp_pos          = viewport->WorkPos;
-    const float vp_avail_y       = viewport->WorkSize.y;
-
-    int dock_pos = 0;
-    if (g_store) {
-        auto cfg = g_store->snapshot();
-        dock_pos = cfg.general.dock_position;
-    }
+static PlayerBarLayout draw_player_bar(IAudioSource* active) {
+    auto* viewport      = ImGui::GetMainViewport();
+    const float vp_w    = viewport->WorkSize.x;
+    const ImVec2 vp_pos = viewport->WorkPos;
+    ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + 20.0f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0));
+    ImGui::SetNextWindowBgAlpha(0.94f);
 
     const float rounding = 6.0f;
-    const float margin   = 20.0f;
-    if (dock_pos == 0) {
-        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + margin),
-                                ImGuiCond_Always, ImVec2(0.5f, 0));
-    } else {
-        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + vp_avail_y - margin),
-                                ImGuiCond_Always, ImVec2(0.5f, 1));
-    }
-    ImGui::SetNextWindowBgAlpha(0.94f);
 
     ImGuiWindowFlags barFlags = ImGuiWindowFlags_AlwaysAutoResize |
                                 ImGuiWindowFlags_NoTitleBar |
@@ -456,7 +504,7 @@ void draw_imgui_ui_impl() {
     const float btn_w     = 30.0f;
     const float btn_h     = 24.0f;
 
-    // Station/Stream combined combo
+    // ── Station selector button ──
     auto* sc = (active && active->type() == SourceType::shoutcast)
                    ? static_cast<sources::ShoutcastSource*>(active)
                    : nullptr;
@@ -466,15 +514,16 @@ void draw_imgui_ui_impl() {
             s_combo_cache.names.clear();
             s_combo_cache.sids.clear();
             s_combo_cache.strids.clear();
-            for (const auto& st : sc->stations()) {
+            for (const auto& st : sc->stations_nolock()) {
+                bool single = st.streams.size() == 1;
                 for (const auto& str : st.streams) {
-                    s_combo_cache.names.push_back(st.name + " - " + str.name);
+                    s_combo_cache.names.push_back(single ? st.name : str.name);
                     s_combo_cache.sids.push_back(st.id);
                     s_combo_cache.strids.push_back(str.id);
                 }
             }
             s_combo_cache.source_ptr = sc_ptr;
-            s_combo_dirty             = true;
+            s_combo_dirty            = true;
         }
 
         static bool s_prev_busy = false;
@@ -501,33 +550,12 @@ void draw_imgui_ui_impl() {
                                      static_cast<int>(s_combo_cache.names.size()) - 1);
 
             const char* preview = s_combo_cache.names[s_combo_sel].c_str();
-            ImGui::SetNextItemWidth(320.0f);
-            if (ImGui::BeginCombo("##station", preview)) {
-                for (size_t i = 0; i < s_combo_cache.names.size(); i++) {
-                    const bool is_sel = std::cmp_equal(i, s_combo_sel);
-                    if (ImGui::Selectable(s_combo_cache.names[i].c_str(), is_sel) &&
-                        !busy) {
-                        s_combo_sel = static_cast<int>(i);
-                        enqueue_action([sid = s_combo_cache.sids[i],
-                                        strid = s_combo_cache.strids[i]] {
-                            if (auto* s =
-                                    dynamic_cast<sources::ShoutcastSource*>(g_mgr->active())) {
-                                s->select_station(sid, strid);
-                                g_mgr->ring().drain();
-                                s->play();
-                            }
-                            if (g_store) {
-                                g_store->patch([&](Config& c) {
-                                    c.shoutcast.last_station_id = sid;
-                                    c.shoutcast.last_stream_id  = strid;
-                                });
-                            }
-                        });
-                    }
-                    if (is_sel) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
+            if (ImGui::Button(preview, ImVec2(90.0f + 3.0f + btn_w, btn_h))) {
+                show_stations = !show_stations;
+                if (show_stations) show_settings = false;
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse stations");
+            s_btn_min = ImGui::GetItemRectMin();
         } else {
             ImGui::TextDisabled("No stations loaded");
         }
@@ -535,9 +563,9 @@ void draw_imgui_ui_impl() {
         ImGui::TextDisabled("Shoutcast source unavailable");
     }
 
-    ImGui::SameLine(0, 6);
+    ImGui::SameLine(0, 20);
 
-    // Transport buttons
+    // ── Transport buttons ──
     if (ImGui::Button("\u23EE", ImVec2(btn_w, btn_h))) {
         if (active) {
             enqueue_action([active] {
@@ -570,35 +598,221 @@ void draw_imgui_ui_impl() {
         }
     }
 
-    ImGui::SameLine(0, 6);
+    ImGui::SameLine(0, 20);
 
-    // Volume slider
-    float gain_pct = g_bridge->gain() * 100.0f;
-    ImGui::SetNextItemWidth(90.0f);
-    if (ImGui::SliderFloat("##vol", &gain_pct, 0.0f, 100.0f, "%.0f%%")) {
-        g_bridge->set_gain(gain_pct / 100.0f);
-    }
-    if (ImGui::IsItemDeactivatedAfterEdit()) {
-        g_store->patch([&](Config& c) { c.audio.output_gain = gain_pct / 100.0f; });
+    // ── Volume progress bar (clickable + scroll) ──
+    {
+        static bool vol_active = false;
+        float       gain_pct   = g_bridge->gain() * 100.0f;
+        char        label[16];
+        std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
+        ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(90.0f, btn_h), label);
+
+        if (ImGui::IsItemHovered()) {
+            float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f) {
+                float new_gain = std::clamp(g_bridge->gain() + wheel * 0.05f, 0.0f, 1.0f);
+                g_bridge->set_gain(new_gain);
+                g_store->patch([&](Config& c) { c.audio.output_gain = new_gain; });
+            }
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                vol_active = true;
+            }
+        }
+
+        if (vol_active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            float bar_x   = ImGui::GetItemRectMin().x;
+            float bar_w   = ImGui::GetItemRectSize().x;
+            float mouse_x = ImGui::GetMousePos().x;
+            float new_val = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
+            g_bridge->set_gain(new_val);
+        } else if (vol_active) {
+            vol_active = false;
+            g_store->patch([&](Config& c) { c.audio.output_gain = g_bridge->gain(); });
+        }
     }
 
     ImGui::SameLine(0, 3);
 
-    // Settings gear icon
-    const bool settings_open = show_settings;
+    // ── Settings gear icon ──
+    const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
+    const bool   settings_open = show_settings;
     if (settings_open) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.45f, 0.70f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, hl_col);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hl_col);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hl_col);
     }
     if (ImGui::Button("\uF8F0", ImVec2(btn_w, btn_h))) {
         show_settings = !show_settings;
+        if (show_settings) show_stations = false;
     }
-    if (settings_open) {
-        ImGui::PopStyleColor();
-    }
+    ImGui::PopStyleColor();
+    if (settings_open) ImGui::PopStyleColor();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
+
+    // Capture layout data for the stations browser and settings before closing the window.
+    PlayerBarLayout layout;
+    layout.gear_right = ImGui::GetItemRectMax().x;
+    layout.pos        = ImGui::GetWindowPos();
+    layout.size       = ImGui::GetWindowSize();
 
     ImGui::End();
     ImGui::PopStyleVar();
+
+    return layout;
+}
+
+// ── UI section: stations browser popup ──────────────────────────────────
+
+static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) {
+    if (!show_stations) return;
+
+    auto* sc_st = (active && active->type() == SourceType::shoutcast)
+                      ? static_cast<sources::ShoutcastSource*>(active)
+                      : nullptr;
+    if (!sc_st) return;
+
+    float sw       = layout.gear_right - s_btn_min.x;
+    const float st_tb = ImGui::GetFrameHeight();
+    ImGui::SetNextWindowPos(ImVec2(s_btn_min.x, layout.pos.y + layout.size.y - st_tb));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(sw, 0), ImVec2(sw, 500));
+    ImGui::SetNextWindowBgAlpha(0.94f);
+
+    ImGuiWindowFlags stFlags = ImGuiWindowFlags_AlwaysAutoResize |
+                               ImGuiWindowFlags_NoCollapse |
+                               ImGuiWindowFlags_NoResize |
+                               ImGuiWindowFlags_NoMove |
+                               ImGuiWindowFlags_NoFocusOnAppearing |
+                               ImGuiWindowFlags_NoSavedSettings |
+                               ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
+
+    if (ImGui::Begin("##Stations", nullptr, stFlags)) {
+        // Custom bordered background
+        {
+            auto* wdl = ImGui::GetWindowDrawList();
+            auto* fdl = ImGui::GetForegroundDrawList();
+            ImVec2 p  = ImGui::GetWindowPos();
+            ImVec2 sz = ImGui::GetWindowSize();
+            float  r  = 6.0f;
+            ImU32  bg = ImGui::GetColorU32(ImGuiCol_WindowBg, 0.94f);
+            ImU32  brd = ImGui::GetColorU32(ImGuiCol_Border);
+            wdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), bg, r);
+            // Border via AddRect with only bottom corners rounded
+            // (top corners are sharp 90° so the sides start flat at the
+            // titlebar boundary).  Clipped 1 px at the top so the top edge
+            // line is invisible through the transparent title bar.
+            {
+                const float tb = ImGui::GetFrameHeight();
+                fdl->PushClipRect(ImVec2(p.x - 1.0f, p.y + tb),
+                                   ImVec2(p.x + sz.x + 2.0f, p.y + sz.y + 2.0f));
+                fdl->AddRect(ImVec2(p.x - 1.0f, p.y + tb - 1.0f),
+                             ImVec2(p.x + sz.x + 1.0f, p.y + sz.y + 1.0f),
+                             brd, r, 1.0f, ImDrawFlags_RoundCornersBottom);
+                fdl->PopClipRect();
+            }
+        }
+
+        // Rounded selections
+        ImVec4 hdr_col = ImGui::GetStyleColorVec4(ImGuiCol_Header);
+        ImVec4 hdr_hov = ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered);
+        ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(0, 0, 0, 0));
+
+        for (const auto& st : sc_st->stations_nolock()) {
+            ImGui::Text("%s", st.name.c_str());
+            ImGui::Indent(12.0f);
+            auto [active_st, active_str] = sc_st->active_station_stream();
+            for (const auto& str : st.streams) {
+                bool is_act = (st.id == active_st && str.id == active_str);
+                if (ImGui::Selectable(str.name.c_str(), is_act)) {
+                    show_stations = false;
+                    if (!is_act) {
+                        enqueue_action([sid = st.id, strid = str.id] {
+                            if (auto* s = dynamic_cast<sources::ShoutcastSource*>(
+                                    g_mgr->active())) {
+                                s->select_station(sid, strid);
+                                g_mgr->ring().drain();
+                                s->play();
+                            }
+                            if (g_store) {
+                                g_store->patch([&](Config& c) {
+                                    c.shoutcast.last_station_id = sid;
+                                    c.shoutcast.last_stream_id  = strid;
+                                });
+                            }
+                        });
+                    }
+                }
+                // Rounded highlight + text re-render
+                if (is_act || ImGui::IsItemHovered()) {
+                    ImDrawList* dl  = ImGui::GetWindowDrawList();
+                    ImVec2      min = ImGui::GetItemRectMin();
+                    ImVec2      max = ImGui::GetItemRectMax();
+                    ImU32       col =
+                        ImGui::ColorConvertFloat4ToU32(is_act ? hdr_col : hdr_hov);
+                    dl->AddRectFilled(min, max, col, 4.0f);
+                    dl->AddText(ImVec2(min.x + ImGui::GetStyle().FramePadding.x,
+                                       min.y +
+                                           (max.y - min.y - ImGui::GetTextLineHeight()) *
+                                               0.5f),
+                                ImGui::GetColorU32(ImGuiCol_Text), str.name.c_str());
+                }
+            }
+            ImGui::Unindent(12.0f);
+            ImGui::Spacing();
+        }
+
+        ImGui::PopStyleColor(3);
+        // Close on click outside both browser and player bar
+        if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
+            !ImGui::GetIO().WantCaptureMouse) {
+            show_stations = false;
+        }
+
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+}
+
+// ── Main UI orchestrator ────────────────────────────────────────────────
+
+void draw_imgui_ui_impl() {
+    // Draw background image behind everything (sandbox visual testing)
+    if (g_bg_texture_id) {
+        auto* vp = ImGui::GetMainViewport();
+        auto* dl = ImGui::GetBackgroundDrawList();
+        dl->AddImage(g_bg_texture_id, vp->Pos,
+                     ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y));
+    }
+
+    auto* active = g_mgr->active();
+
+    // Track info cache – only calls current_track() when generation changes
+    static uint64_t  s_track_gen   = 0;
+    static TrackInfo s_cached_track;
+    if (active) {
+        uint64_t gen = active->track_generation();
+        if (gen != s_track_gen) {
+            s_track_gen    = gen;
+            s_cached_track = active->current_track();
+        }
+    }
+
+    draw_hud(active, s_cached_track);
+
+    if (!show_player) return;
+
+    auto layout = draw_player_bar(active);
+    draw_settings_window(layout);
+    draw_stations_browser(active, layout);
 }
 
 bool wait_for_fence(UINT64 fence_value) {
@@ -634,18 +848,12 @@ void load_overlay_font() {
         return;
     }
 
-    ImFontGlyphRangesBuilder builder;
-    builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
-    builder.AddRanges(io.Fonts->GetGlyphRangesJapanese());
-    static ImVector<ImWchar> glyph_ranges;
-    builder.BuildRanges(&glyph_ranges);
-
     ImFontConfig cfg{};
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH  = true;
     auto* font =
-        io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg, glyph_ranges.Data);
+        io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg);
     if (font) {
         io.FontDefault = font;
         log::info("[overlay] loaded Fusion Pixel 12px ImGui font at 16px from {}",
@@ -656,6 +864,162 @@ void load_overlay_font() {
     }
 
 
+}
+
+static void load_background_texture(ID3D12CommandQueue* queue) {
+    auto bg_path = module_directory() / "mods" / "frdx" / "sandbox_bg.jpg";
+    if (!std::filesystem::exists(bg_path)) {
+        // Fallback: running from a build directory — look up to project assets/
+        auto fb = module_directory() / ".." / "assets" / "sandbox_bg.jpg";
+        std::error_code ec;
+        if (std::filesystem::exists(fb, ec)) {
+            bg_path = fb.lexically_normal();
+        } else {
+            log::info("[overlay] no sandbox background at {} — using solid clear color",
+                      bg_path.string());
+            return;
+        }
+    }
+
+    int w = 0, h = 0, channels = 0;
+    unsigned char* pixels =
+        stbi_load(bg_path.string().c_str(), &w, &h, &channels, 4);
+    if (!pixels) {
+        log::warn("[overlay] stbi_load failed for {}: {}", bg_path.string(),
+                   stbi_failure_reason());
+        return;
+    }
+
+    // ── Create default-heap texture resource ────────────────────────────
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width            = static_cast<UINT64>(w);
+    texDesc.Height           = static_cast<UINT>(h);
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels        = 1;
+    texDesc.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.SampleDesc       = {1, 0};
+    texDesc.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+    D3D12_HEAP_PROPERTIES defHeap = {};
+    defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    ID3D12Resource* tex = nullptr;
+    if (FAILED(d3d12_device->CreateCommittedResource(
+            &defHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)))) {
+        log::error("[overlay] failed to create background texture ({}x{})", w, h);
+        stbi_image_free(pixels);
+        return;
+    }
+
+    // ── Upload buffer (staging) ─────────────────────────────────────────
+    const UINT rowPitch =
+        (static_cast<UINT>(w) * 4 + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
+        ~(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    const UINT64 uploadSize = static_cast<UINT64>(rowPitch) * h;
+
+    D3D12_RESOURCE_DESC uploadDesc = {};
+    uploadDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+    uploadDesc.Width            = uploadSize;
+    uploadDesc.Height           = 1;
+    uploadDesc.DepthOrArraySize = 1;
+    uploadDesc.MipLevels        = 1;
+    uploadDesc.Format           = DXGI_FORMAT_UNKNOWN;
+    uploadDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    uploadDesc.SampleDesc       = {1, 0};
+
+    D3D12_HEAP_PROPERTIES uploadHeap = {};
+    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    ID3D12Resource* uploadBuf = nullptr;
+    if (FAILED(d3d12_device->CreateCommittedResource(
+            &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+            IID_PPV_ARGS(&uploadBuf)))) {
+        log::error("[overlay] failed to create background upload buffer");
+        tex->Release();
+        stbi_image_free(pixels);
+        return;
+    }
+
+    // ── Map, copy rows, unmap ───────────────────────────────────────────
+    void* mapped = nullptr;
+    D3D12_RANGE readRange = {0, 0};
+    uploadBuf->Map(0, &readRange, &mapped);
+    auto* dst = static_cast<uint8_t*>(mapped);
+    for (int y = 0; y < h; ++y)
+        std::memcpy(dst + y * rowPitch, pixels + y * w * 4,
+                    static_cast<size_t>(w) * 4);
+    uploadBuf->Unmap(0, nullptr);
+    stbi_image_free(pixels);
+
+    // ── GPU copy: upload → default texture ──────────────────────────────
+    {
+        command_allocators[0]->Reset();
+        imgui_command_list->Reset(command_allocators[0], nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+        dstLoc.pResource        = tex;
+        dstLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+        srcLoc.pResource = uploadBuf;
+        srcLoc.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        srcLoc.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
+        srcLoc.PlacedFootprint.Footprint.Width    = static_cast<UINT>(w);
+        srcLoc.PlacedFootprint.Footprint.Height   = static_cast<UINT>(h);
+        srcLoc.PlacedFootprint.Footprint.Depth    = 1;
+        srcLoc.PlacedFootprint.Footprint.RowPitch = rowPitch;
+
+        imgui_command_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc,
+                                              nullptr);
+
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource   = tex;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        imgui_command_list->ResourceBarrier(1, &barrier);
+
+        imgui_command_list->Close();
+        ID3D12CommandList* lists[] = {imgui_command_list};
+        queue->ExecuteCommandLists(1, lists);
+
+        // Wait for GPU to finish before creating SRV
+        const UINT64 fenceVal = ++imgui_fence_value;
+        queue->Signal(imgui_fence, fenceVal);
+        if (imgui_fence->GetCompletedValue() < fenceVal) {
+            imgui_fence->SetEventOnCompletion(fenceVal, imgui_fence_event);
+            WaitForSingleObject(imgui_fence_event, 2000);
+        }
+    }
+
+    uploadBuf->Release();
+
+    // ── Create SRV at descriptor slot 1 (slot 0 is ImGui font) ──────────
+    const SIZE_T inc = d3d12_device->GetDescriptorHandleIncrementSize(
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle =
+        srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+    cpuHandle.ptr += inc;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle =
+        srv_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+    gpuHandle.ptr += inc;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srvDesc.Texture2D.MipLevels     = 1;
+    d3d12_device->CreateShaderResourceView(tex, &srvDesc, cpuHandle);
+
+    g_bg_texture    = tex;
+    g_bg_texture_id = reinterpret_cast<ImTextureID>(gpuHandle.ptr);
+    log::info("[overlay] loaded sandbox background ({}x{}) from {}", w, h,
+              bg_path.string());
 }
 
 void enqueue_action(std::function<void()> action) {
@@ -774,7 +1138,7 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     // SRV descriptor heap (ImGui font textures)
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
     srvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvHeapDesc.NumDescriptors             = 1;
+    srvHeapDesc.NumDescriptors             = 2;
     srvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if (FAILED(d3d12_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&srv_descriptor_heap))) ||
         !srv_descriptor_heap) {
@@ -868,6 +1232,9 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
         return false;
     }
 
+    // Load optional background image for sandbox visual testing
+    load_background_texture(active_queue);
+
     return true;
 }
 
@@ -900,6 +1267,11 @@ static void cleanup_imgui_resources() {
     }
     command_allocators.clear();
     command_allocator_fence_values.clear();
+    if (g_bg_texture) {
+        g_bg_texture->Release();
+        g_bg_texture    = nullptr;
+        g_bg_texture_id = 0;
+    }
     if (srv_descriptor_heap) {
         srv_descriptor_heap->Release();
         srv_descriptor_heap = nullptr;
@@ -928,7 +1300,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             if (init_imgui(pSwapChain, active_queue)) {
                 ApplyTheme(g_theme_idx);
                 initialized                    = true;
-                ImGui::GetIO().MouseDrawCursor = show_player || show_settings;
+            ImGui::GetIO().MouseDrawCursor = show_player || show_settings || show_stations;
                 log::info("[overlay] Direct3D 12 Dear ImGui Overlay context initialized successfully!");
             } else {
                 cleanup_imgui_resources();
@@ -937,8 +1309,8 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     }
 
     if (initialized && active_queue) {
-        // Skip ImGui entirely when both UI panels are hidden.
-        if (!show_player && !show_settings) {
+        // Skip ImGui entirely when all UI panels and the HUD are hidden.
+        if (!show_player && !show_settings && !show_stations && !show_hud) {
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
         UINT backBufferIdx = 0;

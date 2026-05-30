@@ -85,27 +85,38 @@ static_assert(sizeof(FMOD_DSP_DESCRIPTION) == 216);
 // process when our scanner runs at DllMain. Pulled out so install_dsp_locked
 // can retry against a fresh parse of the same module.
 FMODFns::SystemCreateDSP_t resolve_create_dsp(const PEImage& img) noexcept {
-    return reinterpret_cast<FMODFns::SystemCreateDSP_t>(
-        find_by_anchor(img, kAnchored[0].anchor, kAnchored[0].pattern));
+    auto result = find_by_anchor(img, kAnchored[0].anchor, kAnchored[0].pattern);
+    return result ? reinterpret_cast<FMODFns::SystemCreateDSP_t>(*result) : nullptr;
 }
 
 } // namespace
 
-bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
-    if (!img.valid()) return false;
+std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img,
+                                              FMODFns& out) noexcept {
+    if (!img.valid()) return std::unexpected{DSPError::image_not_valid};
 
     out.host_base         = img.base;
     out.system_create_dsp = resolve_create_dsp(img);
-    out.dsp_release       = reinterpret_cast<FMODFns::DSPRelease_t>(
-        find_by_anchor(img, kAnchored[1].anchor, kAnchored[1].pattern));
-    out.channel_control_add_dsp = reinterpret_cast<FMODFns::ChannelControlAddDSP_t>(
-        find_by_anchor(img, kAnchored[2].anchor, kAnchored[2].pattern));
-    out.channel_control_rem_dsp = reinterpret_cast<FMODFns::ChannelControlRemDSP_t>(
-        find_by_anchor(img, kAnchored[3].anchor, kAnchored[3].pattern));
+
+    auto dsp_rel = find_by_anchor(img, kAnchored[1].anchor, kAnchored[1].pattern);
+    out.dsp_release =
+        dsp_rel ? reinterpret_cast<FMODFns::DSPRelease_t>(*dsp_rel) : nullptr;
+
+    auto add_dsp = find_by_anchor(img, kAnchored[2].anchor, kAnchored[2].pattern);
+    out.channel_control_add_dsp =
+        add_dsp ? reinterpret_cast<FMODFns::ChannelControlAddDSP_t>(*add_dsp) : nullptr;
+
+    auto rem_dsp = find_by_anchor(img, kAnchored[3].anchor, kAnchored[3].pattern);
+    out.channel_control_rem_dsp =
+        rem_dsp ? reinterpret_cast<FMODFns::ChannelControlRemDSP_t>(*rem_dsp) : nullptr;
+
+    auto resolver = find_by_pattern(img, kResolverPattern);
     out.handle_resolver =
-        reinterpret_cast<FMODFns::HandleResolver_t>(find_by_pattern(img, kResolverPattern));
+        resolver ? reinterpret_cast<FMODFns::HandleResolver_t>(*resolver) : nullptr;
+
+    auto unlock = find_by_pattern(img, kUnlockPattern);
     out.handle_unlock =
-        reinterpret_cast<FMODFns::HandleUnlock_t>(find_by_pattern(img, kUnlockPattern));
+        unlock ? reinterpret_cast<FMODFns::HandleUnlock_t>(*unlock) : nullptr;
 
     log::info(
         "[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} "
@@ -122,7 +133,8 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
         log::warn("[sigscan] Handle::unlock not resolved -- the resolver lock will leak; "
                   "expect the game to freeze a few seconds after DSP install");
     }
-    return out.ready();
+    // Missing sigs are not fatal errors - DSP injection just degrades gracefully.
+    return {};
 }
 
 DSPBridge::DSPBridge(AudioSourceManager& mgr, const FMODFns& fns) : mgr_{mgr}, fns_{fns} {
@@ -153,7 +165,7 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
         return false;
     }
     if (fns_.handle_unlock && lock_state) {
-        seh_call([&] { fns_.handle_unlock(lock_state); });
+        (void)seh_call([&] { fns_.handle_unlock(lock_state); });
     }
     if (rc != 0) {
         if (last_bad_handle_ != handle) {
@@ -167,9 +179,15 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
 
 void DSPBridge::release_current_dsp_locked() noexcept {
     if (!current_dsp_) return;
-    if (current_handle_)
-        seh_call([&] { fns_.channel_control_rem_dsp(current_handle_, current_dsp_); });
-    seh_call([&] { fns_.dsp_release(current_dsp_); });
+    if (current_handle_) {
+        if (!seh_call([&] { fns_.channel_control_rem_dsp(current_handle_, current_dsp_); })) {
+            log::warn("[dsp] SEH in channel_control_rem_dsp during cleanup (handle=0x{:X})",
+                      current_handle_);
+        }
+    }
+    if (!seh_call([&] { fns_.dsp_release(current_dsp_); })) {
+        log::warn("[dsp] SEH in dsp_release during cleanup (dsp={})", current_dsp_);
+    }
     current_dsp_    = nullptr;
     current_handle_ = 0;
 }
@@ -226,7 +244,9 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     const auto channel = static_cast<uint64_t>(handle);
     if (!seh_call([&] { rc = fns_.channel_control_add_dsp(channel, 0, dsp); }) || rc != 0) {
         log::warn("[dsp] addDSP failed r={}", rc);
-        seh_call([&] { fns_.dsp_release(dsp); });
+        if (!seh_call([&] { fns_.dsp_release(dsp); })) {
+            log::warn("[dsp] SEH in dsp_release during install rollback (dsp={})", dsp);
+        }
         return;
     }
 

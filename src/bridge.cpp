@@ -104,12 +104,8 @@ void run_bridge(HMODULE self) noexcept {
             if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
         });
 
-    // Start the Direct3D 12 ImGui overlay detours if enabled
-    if (cfg.general.enable_overlay) {
-        dx12_overlay::initialize(mgr, bridge, store);
-    } else {
-        log::info("[bridge] in-game D3D12 overlay is disabled via configuration");
-    }
+    // Start the Direct3D 12 ImGui overlay detours
+    dx12_overlay::initialize(mgr, bridge, store);
 
     for (;;) Sleep(60'000);
 }

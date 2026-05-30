@@ -145,14 +145,15 @@ std::vector<std::byte*> validate_candidates(const PEImage& img,
 
 } // namespace
 
-std::byte* find_by_anchor(const PEImage& img, std::string_view anchor,
-                          std::string_view pattern) noexcept {
-    if (!img.valid()) return nullptr;
+std::expected<std::byte*, SigScanError>
+find_by_anchor(const PEImage& img, std::string_view anchor,
+               std::string_view pattern) noexcept {
+    if (!img.valid()) return std::unexpected{SigScanError::image_not_valid};
 
     auto anchors = find_anchor_strings(img, anchor);
     if (anchors.empty()) {
         log::warn("[sigscan] anchor '{}': not found in .rdata", anchor);
-        return nullptr;
+        return std::unexpected{SigScanError::no_match};
     }
     std::ranges::sort(anchors);
 
@@ -160,7 +161,7 @@ std::byte* find_by_anchor(const PEImage& img, std::string_view anchor,
     if (leas.empty()) {
         log::warn("[sigscan] anchor '{}': {} string copies but no LEA targets", anchor,
                   anchors.size());
-        return nullptr;
+        return std::unexpected{SigScanError::no_match};
     }
 
     auto alts = parse_alternatives(pattern);
@@ -169,17 +170,18 @@ std::byte* find_by_anchor(const PEImage& img, std::string_view anchor,
         log::warn("[sigscan] anchor '{}': {} LEA(s), but no enclosing fn matches "
                   "the prologue pattern",
                   anchor, leas.size());
-        return nullptr;
+        return std::unexpected{SigScanError::no_match};
     }
     if (hits.size() > 1) {
         log::warn("[sigscan] anchor '{}': ambiguous -- {} candidates", anchor, hits.size());
-        return nullptr;
+        return std::unexpected{SigScanError::ambiguous};
     }
     return hits.front();
 }
 
-std::byte* find_by_pattern(const PEImage& img, std::string_view pattern) noexcept {
-    if (!img.valid()) return nullptr;
+std::expected<std::byte*, SigScanError>
+find_by_pattern(const PEImage& img, std::string_view pattern) noexcept {
+    if (!img.valid()) return std::unexpected{SigScanError::image_not_valid};
     auto alts = parse_alternatives(pattern);
 
     // Pass 1: function starts from .pdata (fast, no false hits inside bodies).
@@ -192,7 +194,7 @@ std::byte* find_by_pattern(const PEImage& img, std::string_view pattern) noexcep
         if (fn >= img.text && fn < img.text_end && match_any(fn, img.text_end, alts)) {
             if (++seen > 1) {
                 log::warn("[sigscan] direct pattern: ambiguous (pdata)");
-                return nullptr;
+                return std::unexpected{SigScanError::ambiguous};
             }
             match = fn;
         }
@@ -206,13 +208,16 @@ std::byte* find_by_pattern(const PEImage& img, std::string_view pattern) noexcep
             if (match_any(p, end, alts)) {
                 if (++seen > 1) {
                     log::warn("[sigscan] direct pattern: ambiguous (text scan)");
-                    return nullptr;
+                    return std::unexpected{SigScanError::ambiguous};
                 }
                 match = p;
             }
         }
     }
-    if (!match) log::warn("[sigscan] direct pattern: no match");
+    if (!match) {
+        log::warn("[sigscan] direct pattern: no match");
+        return std::unexpected{SigScanError::no_match};
+    }
     return match;
 }
 

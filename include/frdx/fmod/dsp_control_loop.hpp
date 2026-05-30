@@ -9,10 +9,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <expected>
 #include <stop_token>
 #include <thread>
 
 namespace frdx::fmod_bridge {
+
+enum class ControlLoopError { no_target, discover_failed, fmod_system_resolution_failed };
 
 // 50 Hz tick: keeps the DSP installed on the current radio channel and
 // drives the AudioSourceManager pump.
@@ -35,7 +38,7 @@ private:
     // Discover the live RadioStreamFmod carrying our sample and point the
     // bridge + metadata injector at it. Used at startup and after a recovery
     // toggle (the game may reallocate the wrapper).
-    bool acquire_target() noexcept;
+    std::expected<void, ControlLoopError> acquire_target() noexcept;
 
     // Pick the best RadioInstance from a discovery result, preferring
     // instances with a live channel handle and the target SoundName.

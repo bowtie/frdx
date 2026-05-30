@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <expected>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -14,6 +15,13 @@
 #include <vector>
 
 namespace frdx::sources {
+
+enum class ShoutcastError {
+    not_enabled,
+    ffmpeg_not_found,
+    pipe_creation_failed,
+    spawn_failed,
+};
 
 // ---- Station preset data structures ----
 
@@ -132,6 +140,9 @@ public:
         std::scoped_lock lk{mu_};
         return stations_;
     }
+    // Lock-free const-ref access for the render thread, where no concurrent
+    // station mutations occur (all mutations happen on the action/bridge thread).
+    const std::vector<StationPreset>& stations_nolock() const noexcept { return stations_; }
     std::pair<std::string, std::string> active_station_stream() const {
         std::scoped_lock lk{mu_};
         return {active_station_id_, active_stream_id_};
@@ -155,9 +166,9 @@ private:
                         const std::stop_token& stop); // ICY metadata loop body
 
     // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
-    // Returns nullptr on any failure (CreateJob, CreatePipe, CreateProcess).
-    static std::unique_ptr<Pipe> launch_ffmpeg_pipe(const std::string& url,
-                                                    const std::filesystem::path& ffmpeg_path);
+    static std::expected<std::unique_ptr<Pipe>, ShoutcastError>
+    launch_ffmpeg_pipe(const std::string& url,
+                       const std::filesystem::path& ffmpeg_path);
 
     ShoutcastConfig cfg_;
     std::unique_ptr<Pipe> pipe_;

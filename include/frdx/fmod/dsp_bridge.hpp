@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <expected>
 #include <mutex>
 
 namespace frdx {
@@ -13,6 +14,13 @@ class AudioSourceManager;
 } // namespace frdx
 
 namespace frdx::fmod_bridge {
+
+enum class DSPError {
+    image_not_valid,
+    create_dsp_not_found,
+    resolver_not_found,
+    signatures_incomplete,
+};
 
 enum class DSPMode : uint32_t { off = 0, passthrough = 1, silence = 2, pcm = 3 };
 
@@ -54,7 +62,8 @@ struct FMODFns {
     }
 };
 
-bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept;
+std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img,
+                                              FMODFns& out) noexcept;
 
 // Holds the FMOD DSP handle and the read callback that feeds PCM from the
 // AudioSourceManager's ring buffer into FMOD's mixer. Pinned as a global so

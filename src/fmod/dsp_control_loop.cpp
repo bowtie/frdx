@@ -96,7 +96,7 @@ void ControlLoop::run(const std::stop_token& tok) {
                     if (now - last_retune_ >= kRetuneCooldown &&
                         game_state_.retune_streamer_station()) {
                         last_retune_ = now;
-                        acquire_target();
+                        (void)acquire_target();
                     }
                 }
             }
@@ -125,10 +125,10 @@ void ControlLoop::run(const std::stop_token& tok) {
     log::info("[ctrl] control loop exiting");
 }
 
-bool ControlLoop::acquire_target() noexcept {
+std::expected<void, ControlLoopError> ControlLoop::acquire_target() noexcept {
     auto disc                   = discover_radio_instances(img_);
     const RadioInstance* chosen = select_instance(disc);
-    if (!chosen) return false;
+    if (!chosen) return std::unexpected{ControlLoopError::discover_failed};
     if (chosen->sound_name != kTargetSoundName)
         log::warn(R"([ctrl] no instance matches target "{}"; falling back to "{}")",
                   kTargetSoundName, chosen->sound_name);
@@ -136,14 +136,14 @@ bool ControlLoop::acquire_target() noexcept {
     void* fmod_system = resolve_fmod_system(img_, chosen->radio_stream);
     if (!fmod_system) {
         log::warn("[ctrl] FMOD SystemI resolution failed");
-        return false;
+        return std::unexpected{ControlLoopError::fmod_system_resolution_failed};
     }
     bridge_.set_target(*chosen, fmod_system);
     meta_.set_target(chosen->sample_props_body);
     log::info("[ctrl] targeting RadioStreamFmod @0x{:X} SoundName=\"{}\" SystemI*=0x{:X}",
               reinterpret_cast<uintptr_t>(chosen->radio_stream), chosen->sound_name,
               reinterpret_cast<uintptr_t>(fmod_system));
-    return true;
+    return {};
 }
 
 const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc) const noexcept {
@@ -163,7 +163,7 @@ const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc) c
 void ControlLoop::push_metadata() noexcept {
     auto* a = bridge_.manager().active();
     if (!a) {
-        meta_.update("Forza Radio DX", "Idle");
+        (void)meta_.update("Forza Radio DX", "Idle");
         return;
     }
     TrackInfo info;
@@ -176,10 +176,10 @@ void ControlLoop::push_metadata() noexcept {
     std::string artist = info.artist;
     if (artist.empty()) {
         // No state labels — just show the title/station name.
-        meta_.update(title, "");
+        (void)meta_.update(title, "");
         return;
     }
-    meta_.update(title, artist);
+    (void)meta_.update(title, artist);
 }
 
 } // namespace frdx::fmod_bridge

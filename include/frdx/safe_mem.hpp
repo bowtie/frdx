@@ -6,10 +6,22 @@
 
 #include <windows.h>
 #include <cstring>
+#include <expected>
 #include <optional>
 #include <string>
 
 namespace frdx {
+
+enum class SafeMemError {
+    invalid_address,
+    size_overflow,
+    not_committed,
+    guard_page,
+    not_readable,
+    seh_exception,
+    string_corrupt,
+    allocation_failed,
+};
 
 // True iff [addr, addr+size) lies in committed pages with read access and
 // no PAGE_GUARD. One VirtualQuery, cheap enough for the hot path.
@@ -27,10 +39,10 @@ inline bool is_readable(const void* addr, std::size_t size) noexcept {
     return p + size <= re;
 }
 
-template <class T> bool safe_read(const void* addr, T& out) noexcept {
-    if (!is_readable(addr, sizeof(T))) return false;
+template <class T> std::expected<void, SafeMemError> safe_read(const void* addr, T& out) noexcept {
+    if (!is_readable(addr, sizeof(T))) return std::unexpected{SafeMemError::not_readable};
     std::memcpy(&out, addr, sizeof(T));
-    return true;
+    return {};
 }
 
 // MSVC std::string (x64, 32 bytes):
@@ -61,32 +73,33 @@ inline std::optional<std::string> safe_read_msvc_string(const void* addr,
 // Reads an MSVC std::string layout directly into a raw char buffer, avoiding
 // the construction of any C++ destructible types (like std::string or std::optional)
 // inside the caller's SEH context to prevent unwinding leaks.
-inline bool safe_read_msvc_string_buf(const void* addr, char* out_buf, std::size_t buf_cap,
-                                      std::size_t max_size = 512) noexcept {
-    if (!out_buf || buf_cap == 0) return false;
+inline std::expected<void, SafeMemError>
+safe_read_msvc_string_buf(const void* addr, char* out_buf, std::size_t buf_cap,
+                          std::size_t max_size = 512) noexcept {
+    if (!out_buf || buf_cap == 0) return std::unexpected{SafeMemError::invalid_address};
     struct {
         std::byte sso_buf[16];
         std::uint64_t size;
         std::uint64_t cap;
     } hdr{};
-    if (!safe_read(addr, hdr)) return false;
-    if (hdr.size > max_size || hdr.size >= buf_cap) return false;
+    if (!safe_read(addr, hdr)) return std::unexpected{SafeMemError::not_readable};
+    if (hdr.size > max_size || hdr.size >= buf_cap) return std::unexpected{SafeMemError::size_overflow};
 
     if (hdr.cap >= 16) {
         const void* data = nullptr;
         std::memcpy(&data, hdr.sso_buf, sizeof(void*));
-        if (!data || !is_readable(data, hdr.size)) return false;
+        if (!data || !is_readable(data, hdr.size)) return std::unexpected{SafeMemError::not_readable};
         std::memcpy(out_buf, data, hdr.size);
         out_buf[hdr.size] = '\0';
-        return true;
+        return {};
     }
-    if (hdr.size > 16) return false;
+    if (hdr.size > 16) return std::unexpected{SafeMemError::size_overflow};
     std::memcpy(out_buf, hdr.sso_buf, hdr.size);
     out_buf[hdr.size] = '\0';
-    return true;
+    return {};
 }
 
-// Run `fn()` under SEH. Returns false on access violations and similar.
+// Run `fn()` under SEH. Returns unexpected on access violations and similar.
 //
 // WARNING: Under /EHsc, __try/__except does NOT unwind C++ objects.
 // The callable `fn` and everything it captures MUST be trivially
@@ -99,15 +112,15 @@ inline bool safe_read_msvc_string_buf(const void* addr, char* out_buf, std::size
 //
 // UNSAFE: seh_call([&s] { s = read_string(ptr); });
 //         (std::string assignment may throw, captured by ref, destructor skipped)
-template <class Fn> bool seh_call(Fn&& fn) noexcept {
+template <class Fn> std::expected<void, SafeMemError> seh_call(Fn&& fn) noexcept {
     static_assert(std::is_trivially_destructible_v<std::remove_reference_t<Fn>>,
                   "seh_call: lambda must be trivially destructible — "
                   "__try/__except does not unwind C++ objects under /EHsc");
     __try {
         fn();
-        return true;
+        return {};
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        return std::unexpected{SafeMemError::seh_exception};
     }
 }
 

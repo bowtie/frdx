@@ -4,9 +4,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <string_view>
 
 namespace frdx::fmod_bridge {
+
+enum class ProbeError { not_resolved, radio_state_read_failed, setter_unavailable };
 
 class GameStateProbe {
 public:
@@ -23,9 +26,8 @@ public:
 
     // Toggle the in-game station off and back on. The game only allocates a
     // fresh radio FMOD channel on a station change, so this is the only way
-    // back once it has torn the old one down. Blocks ~300 ms; false if the
-    // setter or radio_state isn't resolved.
-    bool retune_streamer_station() noexcept;
+    // back once it has torn the old one down. Blocks ~300 ms.
+    std::expected<void, ProbeError> retune_streamer_station() noexcept;
 
 private:
     using SetStationFn = void (*)(void* radio_state, const void* name);

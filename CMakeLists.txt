@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(forza_radio_dx LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -19,9 +19,10 @@ if(MSVC)
     endif()
     add_compile_options("$<$<CONFIG:Debug>:/MDd>")
     add_link_options("$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
-    add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
-                            _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 endif()
+
+add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
+                        _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 
 add_library(version SHARED
     src/proxy/dll_main.cpp
@@ -40,7 +41,6 @@ add_library(version SHARED
     src/fmod/dx12_overlay.cpp
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
-    src/fmod/dx12_overlay.cpp
     src/sources/shoutcast_source.cpp
 
     # Dear ImGui
@@ -66,6 +66,7 @@ target_include_directories(version PRIVATE
     third_party/wil/include
     third_party/imgui
     third_party/minhook
+    third_party/stb
 )
 
 target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi)
@@ -124,6 +125,7 @@ target_include_directories(frdx_sandbox PRIVATE
     third_party/wil/include
     third_party/imgui
     third_party/minhook
+    third_party/stb
 )
 
 target_link_libraries(frdx_sandbox PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi)

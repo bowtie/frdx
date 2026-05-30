@@ -7,7 +7,6 @@
 
 [general]
 ring_buffer_mb    = 4
-enable_overlay    = true                        # set false if game anti-cheat crashes on D3D12 overlay hooks
 
 [shoutcast]
 enabled            = true

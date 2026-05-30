@@ -43,7 +43,9 @@ constexpr const char* kTargetStation2 = "Universal Radio";
 } // namespace
 
 GameStateProbe::GameStateProbe(const PEImage& img) noexcept {
-    set_station_fn_ = reinterpret_cast<SetStationFn>(find_by_pattern(img, kSetStationPattern));
+    auto set_stn_result = find_by_pattern(img, kSetStationPattern);
+    set_station_fn_ =
+        set_stn_result ? reinterpret_cast<SetStationFn>(*set_stn_result) : nullptr;
     if (set_station_fn_)
         log::info("[gstate] station setter @ RVA 0x{:X}",
                   static_cast<uint32_t>(reinterpret_cast<std::byte*>(set_station_fn_) - img.base));
@@ -51,12 +53,13 @@ GameStateProbe::GameStateProbe(const PEImage& img) noexcept {
         log::warn("[gstate] station setter pattern not found -- "
                   "stall recovery (radio off/on) will be unavailable");
 
-    std::byte* match = find_by_pattern(img, kProloguePattern);
-    if (!match) {
+    auto match_result = find_by_pattern(img, kProloguePattern);
+    if (!match_result) {
         log::warn("[gstate] radio_state_singleton pattern not found -- "
                   "raceStartPlayback will stay inert");
         return;
     }
+    auto* match = *match_result;
     int32_t disp = 0;
     std::memcpy(&disp, match + kDispOffset, 4);
     const auto* slot = reinterpret_cast<const void* const*>(match + kInsnEndOffset + disp);
@@ -115,23 +118,26 @@ void GameStateProbe::set_station(const std::byte* radio_state,
     s.size   = n;
     s.cap    = sizeof(s.buf) - 1;
     auto* fn = set_station_fn_;
-    seh_call([&] { fn(const_cast<std::byte*>(radio_state), &s); });
+    (void)seh_call([&] { fn(const_cast<std::byte*>(radio_state), &s); });
 }
 
-bool GameStateProbe::retune_streamer_station() noexcept {
-    if (!singleton_slot_ || !set_station_fn_) return false;
+std::expected<void, ProbeError> GameStateProbe::retune_streamer_station() noexcept {
+    if (!singleton_slot_ || !set_station_fn_)
+        return std::unexpected{ProbeError::not_resolved};
 
     const std::byte* radio_state = nullptr;
-    if (!safe_read(singleton_slot_, radio_state) || !radio_state) return false;
+    if (!safe_read(singleton_slot_, radio_state) || !radio_state)
+        return std::unexpected{ProbeError::radio_state_read_failed};
 
     log::info(R"([gstate] radio stalled; cycling station off -> "{}" to rebuild the FMOD channel)",
               kTargetStation1);
     set_station(radio_state, kStationOff);
     Sleep(300);
     // The off transition can reallocate radio_state; re-read before re-tuning.
-    if (!safe_read(singleton_slot_, radio_state) || !radio_state) return false;
+    if (!safe_read(singleton_slot_, radio_state) || !radio_state)
+        return std::unexpected{ProbeError::radio_state_read_failed};
     set_station(radio_state, kTargetStation1);
-    return true;
+    return {};
 }
 
 } // namespace frdx::fmod_bridge

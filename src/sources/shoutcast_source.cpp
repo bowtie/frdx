@@ -367,14 +367,14 @@ void ShoutcastSource::load_stations(const std::filesystem::path& path) {
 
 // ---- ffmpeg subprocess launcher (no mu_ held) ----
 
-std::unique_ptr<ShoutcastSource::Pipe>
+std::expected<std::unique_ptr<ShoutcastSource::Pipe>, ShoutcastError>
 ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
                                     const std::filesystem::path& ffmpeg_path) {
     auto pipe = std::make_unique<Pipe>();
     pipe->job = frdx::subprocess::create_kill_on_close_job();
     if (!pipe->job) {
         log::warn("[shoutcast] CreateJobObject failed ({})", GetLastError());
-        return nullptr;
+        return std::unexpected{ShoutcastError::pipe_creation_failed};
     }
 
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
@@ -390,14 +390,14 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
 
     if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 1 << 20)) {
         bail();
-        return nullptr;
+        return std::unexpected{ShoutcastError::pipe_creation_failed};
     }
     SetHandleInformation(ff_out_r, 0, HANDLE_FLAG_INHERIT);
 
     // Stderr pipe for ICY metadata. ffmpeg prints [icy] StreamTitle='...' lines here.
     if (!CreatePipe(&err_r, &err_w, &sa, 1 << 16)) {
         bail();
-        return nullptr;
+        return std::unexpected{ShoutcastError::pipe_creation_failed};
     }
     SetHandleInformation(err_r, 0, HANDLE_FLAG_INHERIT);
 
@@ -430,7 +430,7 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
             frdx::subprocess::describe_launch_failure(std::wstring{ff}, ec_ff, ff != L"ffmpeg"));
         if (ff_out_r) CloseHandle(ff_out_r);
         if (err_r) CloseHandle(err_r);
-        return nullptr;
+        return std::unexpected{ShoutcastError::spawn_failed};
     }
 
     pipe->read_pipe   = ff_out_r;
@@ -512,7 +512,10 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     } // mu_ released — ffmpeg launch happens outside the lock
 
     // Phase 2: launch ffmpeg OUTSIDE the lock (expensive subprocess creation).
-    auto new_pipe = launch_url.empty() ? nullptr : launch_ffmpeg_pipe(launch_url, cfg_.ffmpeg_path);
+    auto new_pipe_result = launch_url.empty()
+                               ? std::expected<std::unique_ptr<Pipe>, ShoutcastError>{nullptr}
+                               : launch_ffmpeg_pipe(launch_url, cfg_.ffmpeg_path);
+    auto new_pipe = new_pipe_result ? std::move(*new_pipe_result) : nullptr;
 
     // Phase 3: install pipe and set metadata under lock.
     bool has_pipe = false;
@@ -617,83 +620,17 @@ void ShoutcastSource::start_pipe_locked() {
     display_name_ = "Online Radio";
     if (target_url_.empty()) return;
 
-    auto pipe = std::make_unique<Pipe>();
-    pipe->job = frdx::subprocess::create_kill_on_close_job();
-    if (!pipe->job) {
-        log::warn("[shoutcast] CreateJobObject failed ({})", GetLastError());
-        return;
-    }
+    // Delegate the heavy pipe creation to the shared static helper.
+    auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path);
+    if (!pipe_result) return;
 
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE ff_out_r = nullptr, ff_out_w = nullptr;
-    HANDLE err_r = nullptr, err_w = nullptr;
+    pipe_ = std::move(*pipe_result);
 
-    auto bail = [&] {
-        if (ff_out_r) CloseHandle(ff_out_r);
-        if (ff_out_w) CloseHandle(ff_out_w);
-        if (err_r) CloseHandle(err_r);
-        if (err_w) CloseHandle(err_w);
-    };
-
-    if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 1 << 20)) {
-        bail();
-        return;
-    }
-    SetHandleInformation(ff_out_r, 0, HANDLE_FLAG_INHERIT);
-
-    // Stderr pipe for ICY metadata. ffmpeg prints [icy] StreamTitle='...' lines here.
-    if (!CreatePipe(&err_r, &err_w, &sa, 1 << 16)) {
-        bail();
-        return;
-    }
-    SetHandleInformation(err_r, 0, HANDLE_FLAG_INHERIT);
-
-    HANDLE nul_in = frdx::subprocess::open_nul(GENERIC_READ);
-
-    const auto ff = resolve_ffmpeg_path(cfg_.ffmpeg_path);
-
-    std::wstring ff_cmd = frdx::subprocess::quote(ff) +
-                          L" -loglevel error"
-                          L" -icy 1"
-                          L" -user_agent \"WinampMPEG/5.0\""
-                          L" -reconnect 1"
-                          L" -reconnect_streamed 1"
-                          L" -reconnect_delay_max 5"
-                          L" -i " +
-                          frdx::subprocess::quote(frdx::subprocess::widen(target_url_)) +
-                          L" -f s16le -acodec pcm_s16le -ar 48000 -ac 2 pipe:1";
-
-    pipe->proc_ff     = frdx::subprocess::spawn_in_job(pipe->job, ff_cmd, nul_in, ff_out_w, err_w);
-    const DWORD ec_ff = pipe->proc_ff ? 0u : GetLastError();
-    CloseHandle(ff_out_w);
-    CloseHandle(err_w);
-    ff_out_w = nullptr;
-    err_w    = nullptr;
-    if (nul_in) CloseHandle(nul_in);
-
-    if (!pipe->proc_ff) {
-        log::warn(
-            "[shoutcast] failed to launch ffmpeg -- {}",
-            frdx::subprocess::describe_launch_failure(std::wstring{ff}, ec_ff, ff != L"ffmpeg"));
-        if (ff_out_r) CloseHandle(ff_out_r);
-        if (err_r) CloseHandle(err_r);
-        return;
-    }
-
-    pipe->read_pipe   = ff_out_r;
-    pipe->stderr_pipe = err_r;
-    pipe_             = std::move(pipe);
-
-    info_         = TrackInfo{};
-    info_.artist  = "Select a station";
-    display_name_ = "Online Radio";
+    // Set initial display metadata from the active station before real
+    // track info arrives from the background poller / ICY parser.
     if (!active_station_id_.empty()) {
         for (const auto& st : stations_) {
             if (st.id == active_station_id_) {
-                // Station name goes in title (top row), stream name goes
-                // in artist (bottom row) so both rows show meaningful
-                // content immediately. Real metadata overwrites both
-                // when the background poller / ICY parser delivers it.
                 info_.title   = st.name;
                 display_name_ = st.name;
                 for (const auto& str : st.streams) {
@@ -707,9 +644,6 @@ void ShoutcastSource::start_pipe_locked() {
             }
         }
     }
-    // Set artist to the station name too so the in-game HUD always shows
-    // meaningful content on both rows. When the background poller fetches
-    // real track metadata, it overwrites both fields.
     position_ms_.store(0, std::memory_order_release);
     state_.store(PlaybackState::buffering, std::memory_order_release);
 
@@ -975,7 +909,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     WINHTTP_DEFAULT_ACCEPT_TYPES, is_ssl ? WINHTTP_FLAG_SECURE : 0);
                 if (!hRequest) {
                     log::warn("[shoutcast] ws: WinHttpOpenRequest failed ({})", GetLastError());
-                    CloseHandle(hConnect);
+                    WinHttpCloseHandle(hConnect);
                     if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
