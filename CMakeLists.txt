@@ -57,6 +57,9 @@ add_library(version SHARED
     third_party/minhook/hook.c
     third_party/minhook/trampoline.c
     third_party/minhook/hde/hde64.c
+
+    # ImGui Animated
+    third_party/imgui-animated/imgui_animated.cpp
 )
 
 target_include_directories(version PRIVATE
@@ -67,6 +70,7 @@ target_include_directories(version PRIVATE
     third_party/imgui
     third_party/minhook
     third_party/stb
+    third_party/imgui-animated
 )
 
 target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi)
@@ -116,6 +120,9 @@ add_executable(frdx_sandbox
     third_party/minhook/hook.c
     third_party/minhook/trampoline.c
     third_party/minhook/hde/hde64.c
+
+    # ImGui Animated
+    third_party/imgui-animated/imgui_animated.cpp
 )
 
 target_include_directories(frdx_sandbox PRIVATE
@@ -126,6 +133,7 @@ target_include_directories(frdx_sandbox PRIVATE
     third_party/imgui
     third_party/minhook
     third_party/stb
+    third_party/imgui-animated
 )
 
 target_link_libraries(frdx_sandbox PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi)

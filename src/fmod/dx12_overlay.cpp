@@ -27,6 +27,7 @@
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx12.h>
+#include <imgui_animated.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -550,7 +551,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
                                      static_cast<int>(s_combo_cache.names.size()) - 1);
 
             const char* preview = s_combo_cache.names[s_combo_sel].c_str();
-            if (ImGui::Button(preview, ImVec2(90.0f + 3.0f + btn_w, btn_h))) {
+            if (ImGui::ButtonScrollable(preview, ImVec2(90.0f + 3.0f + btn_w, btn_h))) {
                 show_stations = !show_stations;
                 if (show_stations) show_settings = false;
             }
@@ -675,12 +676,17 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
 
     float sw       = layout.gear_right - s_btn_min.x;
     const float st_tb = ImGui::GetFrameHeight();
+    // Height: 8 visible items, each = text line + frame padding + gap
+    const auto& st_style = ImGui::GetStyle();
+    const float st_item_h =
+        ImGui::GetTextLineHeight() + st_style.FramePadding.y * 2 + st_style.ItemSpacing.y;
+    const float st_desired_h =
+        st_style.WindowPadding.y * 2 +        8.0f * st_item_h + ImGui::GetTextLineHeight() * 2;
     ImGui::SetNextWindowPos(ImVec2(s_btn_min.x, layout.pos.y + layout.size.y - st_tb));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(sw, 0), ImVec2(sw, 500));
+    ImGui::SetNextWindowSize(ImVec2(sw, st_desired_h), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.94f);
 
-    ImGuiWindowFlags stFlags = ImGuiWindowFlags_AlwaysAutoResize |
-                               ImGuiWindowFlags_NoCollapse |
+    ImGuiWindowFlags stFlags = ImGuiWindowFlags_NoCollapse |
                                ImGuiWindowFlags_NoResize |
                                ImGuiWindowFlags_NoMove |
                                ImGuiWindowFlags_NoFocusOnAppearing |

@@ -64,4 +64,13 @@ foreach ($file in $minhook_files) {
     Fetch-File $url $target
 }
 
+# ── ImGui Animated ────────────────────────────────────────────────────────
+Write-Host "-> ImGui Animated" -ForegroundColor Green
+Fetch-File `
+    "https://raw.githubusercontent.com/interception-team/imgui-animated/master/src/imgui_animated.h" `
+    (Join-Path $tp "imgui-animated/imgui_animated.h")
+Fetch-File `
+    "https://raw.githubusercontent.com/interception-team/imgui-animated/master/src/imgui_animated.cpp" `
+    (Join-Path $tp "imgui-animated/imgui_animated.cpp")
+
 Write-Host "`nAll dependencies fetched into $tp." -ForegroundColor Green
