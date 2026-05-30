@@ -2,10 +2,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <string>
 #include <string_view>
 
 namespace frdx::fmod_bridge {
+
+enum class MetadataInjectorError { no_target, write_failed, alloc_failed };
 
 // Overwrites the std::string slots the game reads to render the radio HUD,
 // so the active source's title/artist show up in-game instead of the
@@ -31,8 +34,9 @@ public:
     void reset_cache() noexcept;
 
     // Idempotent: writes only when title/artist differ from the last
-    // successful write. Returns true on a successful write (or no-op).
-    bool update(std::string_view title, std::string_view artist) noexcept;
+    // successful write.
+    std::expected<void, MetadataInjectorError> update(std::string_view title,
+                                               std::string_view artist) noexcept;
 
 private:
     std::byte* body_ = nullptr;

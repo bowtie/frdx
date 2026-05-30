@@ -7,7 +7,6 @@
 
 [general]
 ring_buffer_mb    = 4
-enable_overlay    = true                        # set false if game anti-cheat crashes on D3D12 overlay hooks
 
 [shoutcast]
 enabled            = true
@@ -17,3 +16,4 @@ presets            = []                          # e.g. ["http://server:8000/str
 
 [audio]
 output_gain = 1.0
+force_stereo_audio = true   # off => mono + FMOD_2D (clean 3D spatialisation)

@@ -7,8 +7,7 @@
 namespace frdx {
 
 struct GeneralConfig {
-    uint32_t ring_buffer_mb = 4;
-    bool enable_overlay     = true;
+    int ring_buffer_mb      = 32;
 };
 
 struct ShoutcastConfig {
@@ -16,10 +15,13 @@ struct ShoutcastConfig {
     std::string default_url;
     std::vector<std::string> presets;
     std::filesystem::path ffmpeg_path; // empty = look up on PATH
+    std::string last_station_id;
+    std::string last_stream_id;
 };
 
 struct AudioConfig {
-    float output_gain = 1.0f;
+    float output_gain       = 1.0f;
+    bool force_stereo_audio = true; // off => mono + FMOD_2D (clean 3D spatialisation)
 };
 
 struct Config {

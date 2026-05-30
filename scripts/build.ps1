@@ -127,8 +127,15 @@ $cmakeArgs = @("-S", $root, "-B", $build)
 if (-not (Test-Path (Join-Path $build "CMakeCache.txt"))) {
     if ($ninja) {
         $cmakeArgs += @("-G", "Ninja")
+        $cmakeArgs += @("-DCMAKE_BUILD_TYPE=Release")
     } else {
         $cmakeArgs += @("-A", "x64")
+    }
+    if ($clangCl) {
+        $cmakeArgs += @(
+            "-DCMAKE_C_COMPILER=clang-cl",
+            "-DCMAKE_CXX_COMPILER=clang-cl"
+        )
     }
     if ($ccache) {
         $cmakeArgs += @(

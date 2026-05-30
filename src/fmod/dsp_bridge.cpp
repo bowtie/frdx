@@ -1,4 +1,3 @@
-#define NOMINMAX
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/fmod/sig_scanner.hpp"
 #include "frdx/audio_source_manager.hpp"
@@ -6,6 +5,7 @@
 #include "frdx/safe_mem.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace frdx::fmod_bridge {
@@ -27,21 +27,17 @@ constexpr FMODSig kAnchored[] = {
     {"ChannelControl::addDSP", "4C 8B DC 56 48 81 EC 70 01 00 00|"
                                "40 53 55 56 57 41 56 48 81 EC 50 01 00 00"},
     {"ChannelControl::removeDSP", "48 89 5C 24 18 48 89 74 24 20 57 48 81 EC 50 01 00 00"},
-    // setMode is best-effort -- tries every FMOD prologue we know; install
-    // proceeds without it. Used to force FMOD_LOOP_NORMAL on the radio
-    // channel so the placeholder sample never reaches its natural end.
-    {"ChannelControl::setMode", "4C 8B DC 56 48 81 EC 70 01 00 00|"
-                                "40 53 55 56 57 41 56 48 81 EC 50 01 00 00|"
-                                "48 89 5C 24 10 57 48 81 EC 50 01 00 00|"
-                                "48 89 5C 24 18 48 89 74 24 20 57 48 81 EC 50 01 00 00|"
-                                "40 53 48 83 EC 20|"
-                                "48 89 5C 24 08 57 48 83 EC 20"},
 };
 
-// FMOD_LOOP_NORMAL: makes the channel loop forever on its source sample.
-// Set once at install time so the placeholder sample doesn't end and
-// drop the channel out from under our DSP.
-constexpr uint32_t kFmodLoopNormal = 0x2;
+// Smooth saturation near full-scale. Transparent for |x| <= knee and
+// asymptotically approaches ±1 above, so clean signals pass through
+// untouched and only over-driven peaks get rounded off.
+inline float soft_clip(float x) noexcept {
+    constexpr float k = 0.85f;
+    const float a    = std::fabs(x);
+    const float over = (a > k) ? (a - k) / (1.0f - k) : 0.0f;
+    return std::copysign(a > 1.0f ? 1.0f : (a > k ? k + (1.0f - k) * over / (1.0f + over) : a), x);
+}
 
 // FMOD's `Handle::open` / `Handle::unlock` have no .rdata anchor; we match
 // their (unique) prologues directly.
@@ -51,7 +47,7 @@ constexpr const char* kResolverPattern =
     "F2 4C 8B F9";
 constexpr const char* kUnlockPattern = "48 8B 89 F0 09 01 00 48 85 C9 0F 85 ?? ?? ?? ?? 33 C0 C3";
 
-DSPBridge* g_bridge = nullptr;
+std::atomic<DSPBridge*> g_bridge{nullptr};
 
 // FMOD Studio Core API DSP descriptor (216 bytes). Zero-valued fields are
 // treated as "unprovided", so we only fill what we use.
@@ -89,37 +85,45 @@ static_assert(sizeof(FMOD_DSP_DESCRIPTION) == 216);
 // process when our scanner runs at DllMain. Pulled out so install_dsp_locked
 // can retry against a fresh parse of the same module.
 FMODFns::SystemCreateDSP_t resolve_create_dsp(const PEImage& img) noexcept {
-    return reinterpret_cast<FMODFns::SystemCreateDSP_t>(
-        find_by_anchor(img, kAnchored[0].anchor, kAnchored[0].pattern));
+    auto result = find_by_anchor(img, kAnchored[0].anchor, kAnchored[0].pattern);
+    return result ? reinterpret_cast<FMODFns::SystemCreateDSP_t>(*result) : nullptr;
 }
 
 } // namespace
 
-bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
-    if (!img.valid()) return false;
+std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img,
+                                              FMODFns& out) noexcept {
+    if (!img.valid()) return std::unexpected{DSPError::image_not_valid};
 
     out.host_base         = img.base;
     out.system_create_dsp = resolve_create_dsp(img);
-    out.dsp_release       = reinterpret_cast<FMODFns::DSPRelease_t>(
-        find_by_anchor(img, kAnchored[1].anchor, kAnchored[1].pattern));
-    out.channel_control_add_dsp = reinterpret_cast<FMODFns::ChannelControlAddDSP_t>(
-        find_by_anchor(img, kAnchored[2].anchor, kAnchored[2].pattern));
-    out.channel_control_rem_dsp = reinterpret_cast<FMODFns::ChannelControlRemDSP_t>(
-        find_by_anchor(img, kAnchored[3].anchor, kAnchored[3].pattern));
-    out.channel_control_set_mode = reinterpret_cast<FMODFns::ChannelControlSetMode_t>(
-        find_by_anchor(img, kAnchored[4].anchor, kAnchored[4].pattern));
+
+    auto dsp_rel = find_by_anchor(img, kAnchored[1].anchor, kAnchored[1].pattern);
+    out.dsp_release =
+        dsp_rel ? reinterpret_cast<FMODFns::DSPRelease_t>(*dsp_rel) : nullptr;
+
+    auto add_dsp = find_by_anchor(img, kAnchored[2].anchor, kAnchored[2].pattern);
+    out.channel_control_add_dsp =
+        add_dsp ? reinterpret_cast<FMODFns::ChannelControlAddDSP_t>(*add_dsp) : nullptr;
+
+    auto rem_dsp = find_by_anchor(img, kAnchored[3].anchor, kAnchored[3].pattern);
+    out.channel_control_rem_dsp =
+        rem_dsp ? reinterpret_cast<FMODFns::ChannelControlRemDSP_t>(*rem_dsp) : nullptr;
+
+    auto resolver = find_by_pattern(img, kResolverPattern);
     out.handle_resolver =
-        reinterpret_cast<FMODFns::HandleResolver_t>(find_by_pattern(img, kResolverPattern));
+        resolver ? reinterpret_cast<FMODFns::HandleResolver_t>(*resolver) : nullptr;
+
+    auto unlock = find_by_pattern(img, kUnlockPattern);
     out.handle_unlock =
-        reinterpret_cast<FMODFns::HandleUnlock_t>(find_by_pattern(img, kUnlockPattern));
+        unlock ? reinterpret_cast<FMODFns::HandleUnlock_t>(*unlock) : nullptr;
 
     log::info(
-        "[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} setMode={} "
+        "[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} "
         "resolver={} unlock={}",
         reinterpret_cast<void*>(out.system_create_dsp), reinterpret_cast<void*>(out.dsp_release),
         reinterpret_cast<void*>(out.channel_control_add_dsp),
         reinterpret_cast<void*>(out.channel_control_rem_dsp),
-        reinterpret_cast<void*>(out.channel_control_set_mode),
         reinterpret_cast<void*>(out.handle_resolver), reinterpret_cast<void*>(out.handle_unlock));
 
     if (!out.system_create_dsp) {
@@ -129,21 +133,18 @@ bool resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
         log::warn("[sigscan] Handle::unlock not resolved -- the resolver lock will leak; "
                   "expect the game to freeze a few seconds after DSP install");
     }
-    if (!out.channel_control_set_mode) {
-        log::warn("[sigscan] ChannelControl::setMode not resolved -- the radio channel "
-                  "will die at the placeholder sample's end and the user will have to "
-                  "toggle the in-game radio to recover");
-    }
-    return out.ready();
+    // Missing sigs are not fatal errors - DSP injection just degrades gracefully.
+    return {};
 }
 
 DSPBridge::DSPBridge(AudioSourceManager& mgr, const FMODFns& fns) : mgr_{mgr}, fns_{fns} {
-    g_bridge = this;
+    g_bridge.store(this, std::memory_order_release);
 }
 
 DSPBridge::~DSPBridge() {
+    g_bridge.store(nullptr, std::memory_order_release);
+    std::scoped_lock lk{dsp_mu_};
     release_current_dsp_locked();
-    if (g_bridge == this) g_bridge = nullptr;
 }
 
 void DSPBridge::set_mode(DSPMode m) noexcept {
@@ -164,7 +165,7 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
         return false;
     }
     if (fns_.handle_unlock && lock_state) {
-        seh_call([&] { fns_.handle_unlock(lock_state); });
+        (void)seh_call([&] { fns_.handle_unlock(lock_state); });
     }
     if (rc != 0) {
         if (last_bad_handle_ != handle) {
@@ -178,9 +179,15 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
 
 void DSPBridge::release_current_dsp_locked() noexcept {
     if (!current_dsp_) return;
-    if (current_handle_)
-        seh_call([&] { fns_.channel_control_rem_dsp(current_handle_, current_dsp_); });
-    seh_call([&] { fns_.dsp_release(current_dsp_); });
+    if (current_handle_) {
+        if (!seh_call([&] { fns_.channel_control_rem_dsp(current_handle_, current_dsp_); })) {
+            log::warn("[dsp] SEH in channel_control_rem_dsp during cleanup (handle=0x{:X})",
+                      current_handle_);
+        }
+    }
+    if (!seh_call([&] { fns_.dsp_release(current_dsp_); })) {
+        log::warn("[dsp] SEH in dsp_release during cleanup (dsp={})", current_dsp_);
+    }
     current_dsp_    = nullptr;
     current_handle_ = 0;
 }
@@ -237,28 +244,19 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     const auto channel = static_cast<uint64_t>(handle);
     if (!seh_call([&] { rc = fns_.channel_control_add_dsp(channel, 0, dsp); }) || rc != 0) {
         log::warn("[dsp] addDSP failed r={}", rc);
-        seh_call([&] { fns_.dsp_release(dsp); });
+        if (!seh_call([&] { fns_.dsp_release(dsp); })) {
+            log::warn("[dsp] SEH in dsp_release during install rollback (dsp={})", dsp);
+        }
         return;
     }
 
     current_dsp_    = dsp;
     current_handle_ = handle;
     log::info("[dsp] installed dsp={} on handle=0x{:X}", dsp, handle);
-
-    // Pin the channel in loop mode so FMOD doesn't tear it down when the
-    // placeholder sample reaches its natural end. Without this, FMOD drops
-    // the channel after ~2 min and Forza only allocates a replacement
-    // handle when the user toggles the in-game radio.
-    if (fns_.channel_control_set_mode) {
-        uint32_t mrc = ~0u;
-        if (!seh_call([&] { mrc = fns_.channel_control_set_mode(channel, kFmodLoopNormal); }) ||
-            mrc != 0) {
-            log::warn("[dsp] setMode(FMOD_LOOP_NORMAL) failed r={}; channel may die early", mrc);
-        }
-    }
 }
 
 void DSPBridge::set_target(const RadioInstance& inst, void* fmod_system) noexcept {
+    std::scoped_lock lk{dsp_mu_};
     fmod_system_  = fmod_system;
     radio_stream_ = inst.radio_stream;
 }
@@ -272,15 +270,13 @@ uint32_t DSPBridge::read_live_handle(std::byte* radio_stream) const noexcept {
 }
 
 bool DSPBridge::current_handle_alive() const noexcept {
+    std::scoped_lock lk{dsp_mu_};
     return current_handle_ != 0 && fns_.ready() && validate_handle(current_handle_);
-}
-
-bool DSPBridge::channel_handle_alive(std::byte* radio_stream) const noexcept {
-    return read_live_handle(radio_stream) != 0;
 }
 
 void DSPBridge::retarget_if_needed() noexcept {
     if (mode() != DSPMode::pcm || !fmod_system_) return;
+    std::scoped_lock lk{dsp_mu_};
     const uint32_t handle = read_live_handle(radio_stream_);
     if (handle == current_handle_) return;
     // No live handle on the RadioStreamFmod. If we still think we're installed
@@ -299,17 +295,18 @@ void DSPBridge::retarget_if_needed() noexcept {
 // (miniaudio / ffmpeg resample upstream), which is FMOD's master rate, so
 // the callback is a straight int16 -> float conversion with gain.
 uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, float* out_buf,
-                                            uint32_t length, int32_t in_channels,
+                                            uint32_t length, int32_t /*in_channels*/,
                                             int32_t* out_channels) {
-    auto* b = g_bridge;
+    auto* b = g_bridge.load(std::memory_order_acquire);
     if (!b || !out_buf) return 0;
     const DSPMode m = b->mode();
 
-    // Use only what FMOD allocated: out_buf is pre-sized by FMOD, writing
-    // more channels than requested is a heap overflow that crashes the mixer
-    // a few seconds later. If FMOD wants mono, downmix our stereo.
-    int32_t out_ch = in_channels > 0 ? in_channels : 2;
-    if (out_channels && *out_channels > 0) out_ch = *out_channels;
+    // Declare our DSP output: stereo (default, force_stereo path) or mono
+    // (when force_stereo is off and we're feeding the 3D panner — stereo
+    // into a 3D panner phase-cancels into a metallic mess). FMOD re-reads
+    // *out_channels every callback, so writing it here unconditionally is
+    // all that's needed to switch layout live on a config change.
+    const int32_t out_ch = b->force_stereo_audio() ? 2 : 1;
     if (out_channels) *out_channels = out_ch;
     const std::size_t total = static_cast<std::size_t>(length) * out_ch;
 
@@ -364,8 +361,8 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         for (uint32_t f = 0; f < got_frames; ++f) {
             const float fl = scratch[f * 2 + 0] * scale;
             const float fr = scratch[f * 2 + 1] * scale;
-            const float L  = fl > 1.0f ? 1.0f : (fl < -1.0f ? -1.0f : fl);
-            const float R  = fr > 1.0f ? 1.0f : (fr < -1.0f ? -1.0f : fr);
+            const float L  = soft_clip(fl);
+            const float R  = soft_clip(fr);
 
             float* o = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
             if (out_ch == 1) {
@@ -373,12 +370,6 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
             } else {
                 o[0] = L;
                 o[1] = R;
-                if (out_ch > 2) {
-                    const float dn = (L + R) * 0.5f;
-                    for (int32_t c = 2; c < out_ch; ++c) {
-                        o[c] = dn;
-                    }
-                }
             }
         }
 

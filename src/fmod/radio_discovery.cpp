@@ -87,7 +87,7 @@ constexpr std::size_t kMaxHits = 64;
 
 void scan_region(const PEImage& img, const std::byte* vtable, std::byte* p, std::byte* end,
                  std::vector<std::byte*>& out) noexcept {
-    seh_call([&] {
+    (void)seh_call([&] {
         for (; p + 24 <= end && out.size() < kMaxHits; p += 16) {
             std::byte* slot_vtable;
             std::memcpy(&slot_vtable, p, 8);
@@ -161,7 +161,9 @@ std::string read_sound_name(std::byte* radio_stream, int* step, std::byte** out_
     char name_buf[512];
     name_buf[0] = '\0';
     bool ok     = false;
-    seh_call([&] { ok = safe_read_msvc_string_buf(b + 0x10, name_buf, sizeof(name_buf)); });
+    (void)seh_call([&] {
+        ok = safe_read_msvc_string_buf(b + 0x10, name_buf, sizeof(name_buf)).has_value();
+    });
     return ok ? std::string{name_buf} : std::string{};
 }
 
@@ -190,7 +192,7 @@ constexpr int kRescanThreshold = 30;
 void* resolve_fmod_system(const PEImage& img, std::byte* radio_stream) noexcept {
     if (!radio_stream) return nullptr;
     void* out = nullptr;
-    seh_call([&] {
+    (void)seh_call([&] {
         // radio_stream +0x08 -> X (first field past vtable), X +0xC0 -> SystemI*.
         std::byte* x = nullptr;
         if (!safe_read(radio_stream + 0x08, x) || !x) return;

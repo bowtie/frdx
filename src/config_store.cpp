@@ -17,13 +17,14 @@ void ConfigStore::patch(const std::function<void(Config&)>& mutator) {
     {
         std::scoped_lock lk{mu_};
         mutator(cfg_);
-        try {
-            save_config(path_, cfg_);
-        } catch (const std::exception& e) {
-            log::warn("[config] save failed: {}", e.what());
-        }
         copy = cfg_;
         obs  = observers_;
+    }
+    // Save outside the lock — file I/O can block on slow disks/antivirus.
+    try {
+        save_config(path_, copy);
+    } catch (const std::exception& e) {
+        log::warn("[config] save failed: {}", e.what());
     }
     for (auto& o : obs) {
         try {

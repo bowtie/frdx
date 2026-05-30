@@ -1,4 +1,3 @@
-#define NOMINMAX
 #include "frdx/fmod/pe_image.hpp"
 
 #include <windows.h>

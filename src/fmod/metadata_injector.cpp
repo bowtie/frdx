@@ -47,7 +47,7 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
             std::memcpy(heap, src.data(), src.size());
             heap[src.size()] = std::byte{0};
             std::memcpy(target + 16, &new_size, sizeof(new_size));
-        });
+        }).has_value();
     };
 
     auto inplace_overwrite_sso = [&]() -> bool {
@@ -56,7 +56,7 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
             target[src.size()] = std::byte{0};
             std::memcpy(target + 16, &new_size, sizeof(new_size));
             // Cap stays at 15 (SSO) -- we don't touch it.
-        });
+        }).has_value();
     };
 
     auto allocate_and_swap = [&]() -> bool {
@@ -79,7 +79,7 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
         // cap. A racing reader picks up either the old (still-valid) buffer
         // or the new one; never a mismatched (ptr, size, cap) trio that
         // points past the end. The old buffer leaks deliberately.
-        if (!seh_call([&] {
+        if (!            seh_call([&] {
                 std::memcpy(target, &fresh, sizeof(fresh));
                 std::memset(target + sizeof(fresh), 0, 16 - sizeof(fresh));
                 std::memcpy(target + 16, &new_size, sizeof(new_size));
@@ -115,9 +115,10 @@ void MetadataInjector::reset_cache() noexcept {
     last_artist_.clear();
 }
 
-bool MetadataInjector::update(std::string_view title, std::string_view artist) noexcept {
-    if (!body_) return false;
-    if (title == last_title_ && artist == last_artist_) return true;
+std::expected<void, MetadataInjectorError> MetadataInjector::update(std::string_view title,
+                                               std::string_view artist) noexcept {
+    if (!body_) return std::unexpected{MetadataInjectorError::no_target};
+    if (title == last_title_ && artist == last_artist_) return {};
 
     bool ok = true;
     if (title != last_title_) {
@@ -138,8 +139,9 @@ bool MetadataInjector::update(std::string_view title, std::string_view artist) n
     }
     if (ok) {
         log::info(R"([meta] wrote "{}" / "{}")", title, artist);
+        return {};
     }
-    return ok;
+    return std::unexpected{MetadataInjectorError::write_failed};
 }
 
 } // namespace frdx::fmod_bridge

@@ -52,12 +52,13 @@ Config load_config(const std::filesystem::path& path) {
     const auto& g = section(root, "general");
     cfg.general.ring_buffer_mb =
         static_cast<uint32_t>(pick<int>(g, "ring_buffer_mb", cfg.general.ring_buffer_mb));
-    cfg.general.enable_overlay = pick<bool>(g, "enable_overlay", cfg.general.enable_overlay);
 
     const auto& sc            = section(root, "shoutcast");
     cfg.shoutcast.enabled     = pick<bool>(sc, "enabled", cfg.shoutcast.enabled);
     cfg.shoutcast.default_url = pick<std::string>(sc, "default_url", "");
     cfg.shoutcast.ffmpeg_path = pick_path(sc, "ffmpeg_path");
+    cfg.shoutcast.last_station_id = pick<std::string>(sc, "last_station_id", "");
+    cfg.shoutcast.last_stream_id  = pick<std::string>(sc, "last_stream_id", "");
     try {
         if (sc.contains("presets")) {
             auto v = toml::find<std::vector<std::string>>(sc, "presets");
@@ -68,6 +69,7 @@ Config load_config(const std::filesystem::path& path) {
     const auto& au = section(root, "audio");
     cfg.audio.output_gain =
         static_cast<float>(pick<double>(au, "output_gain", cfg.audio.output_gain));
+    cfg.audio.force_stereo_audio = pick<bool>(au, "force_stereo_audio", cfg.audio.force_stereo_audio);
 
     return cfg;
 }
@@ -151,16 +153,20 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     Emitter e;
     e.header("general");
     e.kv("ring_buffer_mb", static_cast<int64_t>(cfg.general.ring_buffer_mb));
-    e.kv("enable_overlay", cfg.general.enable_overlay);
 
     e.header("shoutcast");
     e.kv("enabled", cfg.shoutcast.enabled);
     e.kv("default_url", cfg.shoutcast.default_url);
     e.kv_path("ffmpeg_path", cfg.shoutcast.ffmpeg_path);
+    if (!cfg.shoutcast.last_station_id.empty())
+        e.kv("last_station_id", cfg.shoutcast.last_station_id);
+    if (!cfg.shoutcast.last_stream_id.empty())
+        e.kv("last_stream_id", cfg.shoutcast.last_stream_id);
     if (!cfg.shoutcast.presets.empty()) e.kv_strs("presets", cfg.shoutcast.presets);
 
     e.header("audio");
     e.kv("output_gain", static_cast<double>(cfg.audio.output_gain));
+    e.kv("force_stereo_audio", cfg.audio.force_stereo_audio);
 
     auto tmp  = path;
     tmp      += ".tmp";
