@@ -103,23 +103,63 @@ CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
 
 WNDPROC original_wnd_proc = nullptr;
 
-// Overlay state
-std::atomic<bool> show_player{true}; // player bar (transport, volume, station selector)
-bool initialized  = false;
+// ── Grouped overlay state ───────────────────────────────────────────────
+
+struct DxResources {
+    ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    ComPtr<ID3D12GraphicsCommandList> cmd_list;
+    ComPtr<ID3D12Fence> fence;
+    HANDLE fence_event = nullptr;
+    UINT64 fence_value = 0;
+    std::vector<ComPtr<ID3D12CommandAllocator>> allocators;
+    std::vector<UINT64> allocator_fence_values;
+    std::vector<ComPtr<ID3D12Resource>> fb_bufs;
+    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> fb_rtvs;
+};
+static DxResources g_dx;
+
+struct StationComboCache {
+    std::vector<std::string> names;
+    std::vector<std::string> sids;
+    std::vector<std::string> strids;
+    const void* source_ptr = nullptr;
+};
+
+struct UiState {
+    std::atomic<bool> player_visible{true};
+    std::atomic<bool> settings_visible{false};
+    std::atomic<bool> stations_visible{false};
+    std::atomic<bool> hud_visible{true};
+    bool is_init = false;
+
+    const char* theme_names[2] = {"Bess Dark", "Tokyo Night"};
+    int theme_idx              = 0;
+
+    ComPtr<ID3D12Resource> bg_texture;
+    ImTextureID bg_texture_id = 0;
+
+    ImVec2 btn_min;
+    StationComboCache combo_cache;
+    int  combo_sel   = 0;
+    bool combo_dirty = true;
+};
+static UiState g_ui;
+
+// ── Remaining independent globals ──────────────────────────────────────
 
 AudioSourceManager* g_mgr        = nullptr;
 fmod_bridge::DSPBridge* g_bridge = nullptr;
 ConfigStore* g_store             = nullptr;
 std::function<void()> g_flush_audio_fn;
 
-// DirectX 12 render contexts.
-// NOTE: d3d12_device is the same COM object as the sandbox/game's dx.device.
+// NOTE: g_dx.device is the same COM object as the sandbox/game's dx.device.
 // It is acquired via IDXGISwapChain::GetDevice() in hook_Present() (which
 // AddRef's), released by cleanup_imgui_resources(), and finally released to
 // zero by the sandbox's destroy_dx().  Both pointers refer to the same
 // ID3D12Device; COM refcounting ensures the object stays alive until both
 // owners drop their reference.
-ComPtr<ID3D12Device> d3d12_device;
 
 // Swapchain → command-queue map.  Guarded by swapchain_map_mutex.
 // Lifted to namespace scope (from function-local statics) so the
@@ -143,17 +183,7 @@ std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*>& get_swapchain3_cache() {
     return swapchain3_cache_data;
 }
 
-ComPtr<ID3D12DescriptorHeap> srv_descriptor_heap;
-ComPtr<ID3D12DescriptorHeap> rtv_descriptor_heap;
-ComPtr<ID3D12GraphicsCommandList> imgui_command_list;
-ComPtr<ID3D12Fence> imgui_fence;
-HANDLE imgui_fence_event = nullptr;
-UINT64 imgui_fence_value = 0;
 
-std::vector<ComPtr<ID3D12CommandAllocator>> command_allocators;
-std::vector<UINT64> command_allocator_fence_values;
-std::vector<ComPtr<ID3D12Resource>> backbuffers;
-std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> backbuffer_rtvs;
 
 std::mutex action_mutex;
 std::condition_variable action_cv;
@@ -170,31 +200,7 @@ std::thread action_thread;
 bool action_thread_stop = false;
 std::atomic<bool> action_busy{false};
 
-// Theme state
-static const char* g_theme_names[] = {"Bess Dark", "Tokyo Night"};
-static int g_theme_idx             = 0;
-static std::atomic<bool> show_settings{false};
-static std::atomic<bool> show_stations{false};
-static std::atomic<bool> show_hud{true};
 
-
-// Optional background image for sandbox visual testing
-static ComPtr<ID3D12Resource> g_bg_texture;
-static ImTextureID g_bg_texture_id  = 0;
-
-// Anchor for stations browser placement
-static ImVec2 s_btn_min;
-
-// Station combo cache – rebuilds only when the active source changes
-struct StationComboCache {
-    std::vector<std::string> names;
-    std::vector<std::string> sids;
-    std::vector<std::string> strids;
-    const void* source_ptr = nullptr;
-};
-static StationComboCache s_combo_cache;
-static int s_combo_sel         = 0;
-static bool s_combo_dirty      = true;
 
 void wait_for_all_overlay_work();
 void enqueue_action(std::function<void()> action);
@@ -213,13 +219,13 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active);
 static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout);
 
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    const bool intercept = show_player || show_settings || show_stations;
+    const bool intercept = g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible;
     if (intercept) {
         if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam)) {
             return true;
         }
         // Suppress inputs from reaching the game window while overlay is active.
-        // Note: intercept excludes show_hud, so HUD-only visibility won't block input.
+        // Note: intercept excludes g_ui.hud_visible, so HUD-only visibility won't block input.
         if (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) {
             return true;
         }
@@ -231,9 +237,9 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     }
 
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
-        show_player = !show_player;
-        if (initialized) {
-            ImGui::GetIO().MouseDrawCursor = show_player || show_settings || show_stations;
+        g_ui.player_visible = !g_ui.player_visible;
+        if (g_ui.is_init) {
+            ImGui::GetIO().MouseDrawCursor = g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible;
         }
         return 0;
     }
@@ -244,40 +250,40 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
-// Releases all allocated RTV backbuffers prior to DXGI ResizeBuffers
+// Releases all allocated RTV g_dx.fb_bufs prior to DXGI ResizeBuffers
 void pre_resize() {
-    if (!initialized) return;
+    if (!g_ui.is_init) return;
 
     wait_for_all_overlay_work();
     ImGui_ImplDX12_InvalidateDeviceObjects();
 
-    backbuffers.clear();
-    backbuffer_rtvs.clear();
+    g_dx.fb_bufs.clear();
+    g_dx.fb_rtvs.clear();
 
     log::info("[overlay] released DX12 backbuffer RTV resources before resize");
 }
 
-// Re-creates the RTV descriptors and backbuffers immediately after ResizeBuffers
+// Re-creates the RTV descriptors and g_dx.fb_bufs immediately after ResizeBuffers
 void post_resize(IDXGISwapChain* swapChain) {
-    if (!initialized || !d3d12_device) return;
+    if (!g_ui.is_init || !g_dx.device) return;
 
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
 
     SIZE_T rtvDescriptorSize =
-        d3d12_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        g_dx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
-        rtv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        g_dx.rtv_heap->GetCPUDescriptorHandleForHeapStart();
 
-    backbuffers.resize(desc.BufferCount);
-    backbuffer_rtvs.resize(desc.BufferCount);
+    g_dx.fb_bufs.resize(desc.BufferCount);
+    g_dx.fb_rtvs.resize(desc.BufferCount);
 
     for (UINT i = 0; i < desc.BufferCount; i++) {
         ComPtr<ID3D12Resource> tmp;
         if (SUCCEEDED(swapChain->GetBuffer(i, IID_PPV_ARGS(tmp.GetAddressOf()))) && tmp) {
-            backbuffers[i] = std::move(tmp);
-            d3d12_device->CreateRenderTargetView(backbuffers[i].get(), nullptr, rtvHandle);
-            backbuffer_rtvs[i]  = rtvHandle;
+            g_dx.fb_bufs[i] = std::move(tmp);
+            g_dx.device->CreateRenderTargetView(g_dx.fb_bufs[i].get(), nullptr, rtvHandle);
+            g_dx.fb_rtvs[i]  = rtvHandle;
             rtvHandle.ptr      += rtvDescriptorSize;
         }
     }
@@ -421,7 +427,7 @@ static void ApplyTheme(int idx) {
 // ── UI section: HUD ───────────────────────────────────────────────────
 
 static void draw_hud(IAudioSource* active, const TrackInfo& track) {
-    if (!show_hud) return;
+    if (!g_ui.hud_visible) return;
 
     ImGui::SetNextWindowBgAlpha(0.4f);
     ImGuiWindowFlags hudFlags =
@@ -469,7 +475,7 @@ static void draw_bordered_background(float rounding = 6.0f) {
 // ── UI section: settings window ────────────────────────────────────────
 
 static void draw_settings_window(const PlayerBarLayout& layout) {
-    if (!show_settings) return;
+    if (!g_ui.settings_visible) return;
 
     const float set_tb  = ImGui::GetFrameHeight();
     ImGui::SetNextWindowPos(ImVec2(layout.gear_right, layout.pos.y + layout.size.y - set_tb),
@@ -496,18 +502,18 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
         draw_bordered_background();
 
         ImGui::Text("Theme");
-        if (ImGui::Combo("##theme", &g_theme_idx, g_theme_names,
-                         IM_ARRAYSIZE(g_theme_names))) {
-            ApplyTheme(g_theme_idx);
+        if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
+                         IM_ARRAYSIZE(g_ui.theme_names))) {
+            ApplyTheme(g_ui.theme_idx);
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
-        bool hud = show_hud;
+        bool hud = g_ui.hud_visible;
         if (ImGui::Checkbox("Show Music Overlay", &hud)) {
-            show_hud = hud;
+            g_ui.hud_visible = hud;
         }
 
         ImGui::Spacing();
@@ -533,7 +539,7 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
         if (ImGui::IsMouseClicked(0) &&
             !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
             !ImGui::GetIO().WantCaptureMouse) {
-            show_settings = false;
+            g_ui.settings_visible = false;
         }
     }
     ImGui::End();
@@ -574,52 +580,52 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
                    : nullptr;
     if (sc) {
         void* sc_ptr = static_cast<void*>(sc);
-        if (sc_ptr != s_combo_cache.source_ptr) {
-            s_combo_cache.names.clear();
-            s_combo_cache.sids.clear();
-            s_combo_cache.strids.clear();
+        if (sc_ptr != g_ui.combo_cache.source_ptr) {
+            g_ui.combo_cache.names.clear();
+            g_ui.combo_cache.sids.clear();
+            g_ui.combo_cache.strids.clear();
             for (const auto& st : sc->stations_nolock()) {
                 bool single = st.streams.size() == 1;
                 for (const auto& str : st.streams) {
-                    s_combo_cache.names.push_back(single ? st.name : str.name);
-                    s_combo_cache.sids.push_back(st.id);
-                    s_combo_cache.strids.push_back(str.id);
+                    g_ui.combo_cache.names.push_back(single ? st.name : str.name);
+                    g_ui.combo_cache.sids.push_back(st.id);
+                    g_ui.combo_cache.strids.push_back(str.id);
                 }
             }
-            s_combo_cache.source_ptr = sc_ptr;
-            s_combo_dirty            = true;
+            g_ui.combo_cache.source_ptr = sc_ptr;
+            g_ui.combo_dirty            = true;
         }
 
         static bool s_prev_busy = false;
         bool busy               = action_busy.load(std::memory_order_acquire);
-        if (s_prev_busy && !busy) s_combo_dirty = true;
+        if (s_prev_busy && !busy) g_ui.combo_dirty = true;
         s_prev_busy = busy;
 
-        if (!s_combo_cache.names.empty()) {
-            if (s_combo_dirty) {
+        if (!g_ui.combo_cache.names.empty()) {
+            if (g_ui.combo_dirty) {
                 auto [active_st, active_str] = sc->active_station_stream();
                 int active_idx               = -1;
-                for (size_t i = 0; i < s_combo_cache.sids.size(); i++) {
-                    if (s_combo_cache.sids[i] == active_st &&
-                        s_combo_cache.strids[i] == active_str) {
+                for (size_t i = 0; i < g_ui.combo_cache.sids.size(); i++) {
+                    if (g_ui.combo_cache.sids[i] == active_st &&
+                        g_ui.combo_cache.strids[i] == active_str) {
                         active_idx = static_cast<int>(i);
                         break;
                     }
                 }
-                if (active_idx >= 0) s_combo_sel = active_idx;
-                s_combo_dirty = false;
+                if (active_idx >= 0) g_ui.combo_sel = active_idx;
+                g_ui.combo_dirty = false;
             }
 
-            s_combo_sel = std::clamp(s_combo_sel, 0,
-                                     static_cast<int>(s_combo_cache.names.size()) - 1);
+            g_ui.combo_sel = std::clamp(g_ui.combo_sel, 0,
+                                     static_cast<int>(g_ui.combo_cache.names.size()) - 1);
 
-            const char* preview = s_combo_cache.names[s_combo_sel].c_str();
+            const char* preview = g_ui.combo_cache.names[g_ui.combo_sel].c_str();
             if (ImGui::ButtonScrollable(preview, ImVec2(130.0f, btn_h))) {
-                show_stations = !show_stations;
-                if (show_stations) show_settings = false;
+                g_ui.stations_visible = !g_ui.stations_visible;
+                if (g_ui.stations_visible) g_ui.settings_visible = false;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse stations");
-            s_btn_min = ImGui::GetItemRectMin();
+            g_ui.btn_min = ImGui::GetItemRectMin();
         } else {
             ImGui::TextDisabled("No stations loaded");
         }
@@ -727,10 +733,10 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     {
         const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
         const ImU32 hl_u32    = ImGui::GetColorU32(hl_col);
-        const ImU32 gear_rest = show_settings ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
+        const ImU32 gear_rest = g_ui.settings_visible ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
         if (draw_icon_btn("##gear", "\uF8F0", gear_rest, hl_u32)) {
-            show_settings = !show_settings;
-            if (show_settings) show_stations = false;
+            g_ui.settings_visible = !g_ui.settings_visible;
+            if (g_ui.settings_visible) g_ui.stations_visible = false;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
     }
@@ -750,7 +756,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
 // ── UI section: stations browser popup ──────────────────────────────────
 
 static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) {
-    if (!show_stations) return;
+    if (!g_ui.stations_visible) return;
 
     auto* sc_st = (active && active->type() == SourceType::shoutcast)
                       ? static_cast<sources::ShoutcastSource*>(active)
@@ -758,7 +764,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     if (!sc_st) return;
 
     // Slightly narrower than the full player bar, centered under it.
-    const float full_w = layout.gear_right - s_btn_min.x;
+    const float full_w = layout.gear_right - g_ui.btn_min.x;
     const float sw     = full_w - 16.0f;
     const float st_tb  = ImGui::GetFrameHeight();
     // Height: 8 visible items, each = text line + frame padding + gap
@@ -767,7 +773,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
         ImGui::GetTextLineHeight() + st_style.FramePadding.y * 2 + st_style.ItemSpacing.y;
     const float st_desired_h =
         st_style.WindowPadding.y * 2 +        8.0f * st_item_h + ImGui::GetTextLineHeight() * 2;
-    const float center_x = s_btn_min.x + full_w * 0.5f;
+    const float center_x = g_ui.btn_min.x + full_w * 0.5f;
     ImGui::SetNextWindowPos(ImVec2(center_x, layout.pos.y + layout.size.y - st_tb),
                             ImGuiCond_Always, ImVec2(0.5f, 0));
     ImGui::SetNextWindowSize(ImVec2(sw, st_desired_h), ImGuiCond_Always);
@@ -843,7 +849,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
                 }
 
                 if (pressed) {
-                    show_stations = false;
+                    g_ui.stations_visible = false;
                     if (!is_act) {
                         enqueue_action([sid = st.id, strid = str.id] {
                             if (auto* s = dynamic_cast<sources::ShoutcastSource*>(
@@ -868,7 +874,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
         // Close on click outside both browser and player bar
         if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
             !ImGui::GetIO().WantCaptureMouse) {
-            show_stations = false;
+            g_ui.stations_visible = false;
         }
 
     }
@@ -881,10 +887,10 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
 
 void draw_imgui_ui_impl() {
     // Draw background image behind everything (sandbox visual testing)
-    if (g_bg_texture_id) {
+    if (g_ui.bg_texture_id) {
         auto* vp = ImGui::GetMainViewport();
         auto* dl = ImGui::GetBackgroundDrawList();
-        dl->AddImage(g_bg_texture_id, vp->Pos,
+        dl->AddImage(g_ui.bg_texture_id, vp->Pos,
                      ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y));
     }
 
@@ -903,7 +909,7 @@ void draw_imgui_ui_impl() {
 
     draw_hud(active, s_cached_track);
 
-    if (!show_player) return;
+    if (!g_ui.player_visible) return;
 
     auto layout = draw_player_bar(active);
     draw_settings_window(layout);
@@ -911,15 +917,15 @@ void draw_imgui_ui_impl() {
 }
 
 bool wait_for_fence(UINT64 fence_value) {
-    if (!imgui_fence || fence_value == 0) return true;
-    if (imgui_fence->GetCompletedValue() >= fence_value) return true;
-    if (!imgui_fence_event) return false;
-    if (FAILED(imgui_fence->SetEventOnCompletion(fence_value, imgui_fence_event))) return false;
-    return WaitForSingleObject(imgui_fence_event, 2000) == WAIT_OBJECT_0;
+    if (!g_dx.fence || fence_value == 0) return true;
+    if (g_dx.fence->GetCompletedValue() >= fence_value) return true;
+    if (!g_dx.fence_event) return false;
+    if (FAILED(g_dx.fence->SetEventOnCompletion(fence_value, g_dx.fence_event))) return false;
+    return WaitForSingleObject(g_dx.fence_event, 2000) == WAIT_OBJECT_0;
 }
 
 void wait_for_all_overlay_work() {
-    for (const auto fence_value : command_allocator_fence_values) {
+    for (const auto fence_value : g_dx.allocator_fence_values) {
         if (!wait_for_fence(fence_value)) {
             log::warn("[overlay] timed out waiting for GPU overlay work to finish");
         }
@@ -993,7 +999,7 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
     ComPtr<ID3D12Resource> tex;
-    if (FAILED(d3d12_device->CreateCommittedResource(
+    if (FAILED(g_dx.device->CreateCommittedResource(
             &defHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(tex.GetAddressOf())))) {
         log::error("[overlay] failed to create background texture ({}x{})", w, h);
@@ -1021,7 +1027,7 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
 
     ComPtr<ID3D12Resource> uploadBuf;
-    if (FAILED(d3d12_device->CreateCommittedResource(
+    if (FAILED(g_dx.device->CreateCommittedResource(
             &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
             IID_PPV_ARGS(uploadBuf.GetAddressOf())))) {
@@ -1043,8 +1049,8 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
 
     // ── GPU copy: upload → default texture ──────────────────────────────
     {
-        command_allocators[0]->Reset();
-        imgui_command_list->Reset(command_allocators[0].get(), nullptr);
+        g_dx.allocators[0]->Reset();
+        g_dx.cmd_list->Reset(g_dx.allocators[0].get(), nullptr);
 
         D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
         dstLoc.pResource        = tex.get();
@@ -1060,7 +1066,7 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
         srcLoc.PlacedFootprint.Footprint.Depth    = 1;
         srcLoc.PlacedFootprint.Footprint.RowPitch = rowPitch;
 
-        imgui_command_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc,
+        g_dx.cmd_list->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc,
                                               nullptr);
 
         D3D12_RESOURCE_BARRIER barrier = {};
@@ -1069,29 +1075,29 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        imgui_command_list->ResourceBarrier(1, &barrier);
+        g_dx.cmd_list->ResourceBarrier(1, &barrier);
 
-        imgui_command_list->Close();
-        ID3D12CommandList* lists[] = {imgui_command_list.get()};
+        g_dx.cmd_list->Close();
+        ID3D12CommandList* lists[] = {g_dx.cmd_list.get()};
         queue->ExecuteCommandLists(1, lists);
 
         // Wait for GPU to finish before creating SRV
-        const UINT64 fenceVal = ++imgui_fence_value;
-        queue->Signal(imgui_fence.get(), fenceVal);
-        if (imgui_fence->GetCompletedValue() < fenceVal) {
-            imgui_fence->SetEventOnCompletion(fenceVal, imgui_fence_event);
-            WaitForSingleObject(imgui_fence_event, 2000);
+        const UINT64 fenceVal = ++g_dx.fence_value;
+        queue->Signal(g_dx.fence.get(), fenceVal);
+        if (g_dx.fence->GetCompletedValue() < fenceVal) {
+            g_dx.fence->SetEventOnCompletion(fenceVal, g_dx.fence_event);
+            WaitForSingleObject(g_dx.fence_event, 2000);
         }
     }
 
     // ── Create SRV at descriptor slot 1 (slot 0 is ImGui font) ──────────
-    const SIZE_T inc = d3d12_device->GetDescriptorHandleIncrementSize(
+    const SIZE_T inc = g_dx.device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle =
-        srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        g_dx.srv_heap->GetCPUDescriptorHandleForHeapStart();
     cpuHandle.ptr += inc;
     D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle =
-        srv_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        g_dx.srv_heap->GetGPUDescriptorHandleForHeapStart();
     gpuHandle.ptr += inc;
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -1099,10 +1105,10 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Texture2D.MipLevels     = 1;
-    d3d12_device->CreateShaderResourceView(tex.get(), &srvDesc, cpuHandle);
+    g_dx.device->CreateShaderResourceView(tex.get(), &srvDesc, cpuHandle);
 
-    g_bg_texture    = std::move(tex);
-    g_bg_texture_id = reinterpret_cast<ImTextureID>(gpuHandle.ptr);
+    g_ui.bg_texture    = std::move(tex);
+    g_ui.bg_texture_id = reinterpret_cast<ImTextureID>(gpuHandle.ptr);
     log::info("[overlay] loaded sandbox background ({}x{}) from {}", w, h,
               bg_path.string());
 }
@@ -1225,8 +1231,8 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     srvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.NumDescriptors             = 2;
     srvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(d3d12_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(srv_descriptor_heap.GetAddressOf()))) ||
-        !srv_descriptor_heap) {
+    if (FAILED(g_dx.device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(g_dx.srv_heap.GetAddressOf()))) ||
+        !g_dx.srv_heap) {
         log::error("[overlay] failed to create SRV descriptor heap!");
         return false;
     }
@@ -1236,54 +1242,54 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     rtvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvHeapDesc.NumDescriptors             = desc.BufferCount;
     rtvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    if (FAILED(d3d12_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(rtv_descriptor_heap.GetAddressOf()))) ||
-        !rtv_descriptor_heap) {
+    if (FAILED(g_dx.device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(g_dx.rtv_heap.GetAddressOf()))) ||
+        !g_dx.rtv_heap) {
         log::error("[overlay] failed to create RTV descriptor heap!");
         return false;
     }
 
     // Command allocators
-    command_allocators.resize(desc.BufferCount);
-    command_allocator_fence_values.resize(desc.BufferCount, 0);
+    g_dx.allocators.resize(desc.BufferCount);
+    g_dx.allocator_fence_values.resize(desc.BufferCount, 0);
     for (UINT i = 0; i < desc.BufferCount; i++) {
-        if (FAILED(d3d12_device->CreateCommandAllocator(
-                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(command_allocators[i].GetAddressOf()))) ||
-            !command_allocators[i]) {
+        if (FAILED(g_dx.device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(g_dx.allocators[i].GetAddressOf()))) ||
+            !g_dx.allocators[i]) {
             log::error("[overlay] failed to create command allocator {}!", i);
             return false;
         }
     }
 
     // Command list
-    if (FAILED(d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                command_allocators[0].get(), nullptr,
-                                                IID_PPV_ARGS(imgui_command_list.GetAddressOf()))) ||
-        !imgui_command_list) {
+    if (FAILED(g_dx.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                g_dx.allocators[0].get(), nullptr,
+                                                IID_PPV_ARGS(g_dx.cmd_list.GetAddressOf()))) ||
+        !g_dx.cmd_list) {
         log::error("[overlay] failed to create ImGui graphics command list!");
         return false;
     }
-    imgui_command_list->Close();
+    g_dx.cmd_list->Close();
 
     // GPU fence
-    if (FAILED(d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(imgui_fence.GetAddressOf()))) ||
-        !imgui_fence) {
+    if (FAILED(g_dx.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(g_dx.fence.GetAddressOf()))) ||
+        !g_dx.fence) {
         log::error("[overlay] failed to create ImGui GPU fence!");
         return false;
     }
 
-    imgui_fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!imgui_fence_event) {
+    g_dx.fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!g_dx.fence_event) {
         log::error("[overlay] failed to create ImGui GPU fence event!");
         return false;
     }
 
     // Backbuffers and RTVs
     SIZE_T rtvDescriptorSize =
-        d3d12_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        g_dx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
-        rtv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-    backbuffers.resize(desc.BufferCount);
-    backbuffer_rtvs.resize(desc.BufferCount);
+        g_dx.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    g_dx.fb_bufs.resize(desc.BufferCount);
+    g_dx.fb_rtvs.resize(desc.BufferCount);
 
     for (UINT i = 0; i < desc.BufferCount; i++) {
         ComPtr<ID3D12Resource> tmp;
@@ -1291,9 +1297,9 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
             log::error("[overlay] failed to query swapchain backbuffer {}!", i);
             return false;
         }
-        backbuffers[i] = std::move(tmp);
-        d3d12_device->CreateRenderTargetView(backbuffers[i].get(), nullptr, rtvHandle);
-        backbuffer_rtvs[i]  = rtvHandle;
+        g_dx.fb_bufs[i] = std::move(tmp);
+        g_dx.device->CreateRenderTargetView(g_dx.fb_bufs[i].get(), nullptr, rtvHandle);
+        g_dx.fb_rtvs[i]  = rtvHandle;
         rtvHandle.ptr      += rtvDescriptorSize;
     }
 
@@ -1303,15 +1309,15 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     ImGui_ImplWin32_Init(desc.OutputWindow);
 
     ImGui_ImplDX12_InitInfo init_info;
-    init_info.Device            = d3d12_device.get();
+    init_info.Device            = g_dx.device.get();
     init_info.CommandQueue      = active_queue;
     init_info.NumFramesInFlight = desc.BufferCount;
     init_info.RTVFormat         = desc.BufferDesc.Format;
-    init_info.SrvDescriptorHeap = srv_descriptor_heap.get();
+    init_info.SrvDescriptorHeap = g_dx.srv_heap.get();
     init_info.LegacySingleSrvCpuDescriptor =
-        srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+        g_dx.srv_heap->GetCPUDescriptorHandleForHeapStart();
     init_info.LegacySingleSrvGpuDescriptor =
-        srv_descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+        g_dx.srv_heap->GetGPUDescriptorHandleForHeapStart();
     if (!ImGui_ImplDX12_Init(&init_info)) {
         log::error("[overlay] ImGui DX12 backend initialization failed");
         ImGui_ImplWin32_Shutdown();
@@ -1331,34 +1337,34 @@ static void cleanup_imgui_resources() {
         if (sc3) sc3->Release();
     }
     get_swapchain3_cache().clear();
-    backbuffers.clear();
-    backbuffer_rtvs.clear();
+    g_dx.fb_bufs.clear();
+    g_dx.fb_rtvs.clear();
 
-    imgui_command_list.reset();
-    if (imgui_fence_event) {
-        CloseHandle(imgui_fence_event);
-        imgui_fence_event = nullptr;
+    g_dx.cmd_list.reset();
+    if (g_dx.fence_event) {
+        CloseHandle(g_dx.fence_event);
+        g_dx.fence_event = nullptr;
     }
-    imgui_fence.reset();
-    command_allocators.clear();
-    command_allocator_fence_values.clear();
-    g_bg_texture.reset();
-    g_bg_texture_id = 0;
-    srv_descriptor_heap.reset();
-    rtv_descriptor_heap.reset();
+    g_dx.fence.reset();
+    g_dx.allocators.clear();
+    g_dx.allocator_fence_values.clear();
+    g_ui.bg_texture.reset();
+    g_ui.bg_texture_id = 0;
+    g_dx.srv_heap.reset();
+    g_dx.rtv_heap.reset();
     // Release the overlay's reference to the shared device.
     // This device is the same COM object as the sandbox/game's dx.device
     // (acquired via pSwapChain->GetDevice in hook_Present).  The sandbox's
     // destroy_dx() still holds the final reference and will drop it to zero
     // during host teardown — see sandbox_main.cpp cleanup step 7e.
-    d3d12_device.reset();
+    g_dx.device.reset();
 }
 
 // Hooked DXGI Swap Chain Present callback
 HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
 
-    if (!initialized) {
+    if (!g_ui.is_init) {
         if (!active_queue) {
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
@@ -1371,10 +1377,10 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         ID3D12Device* rawDev = nullptr;
         if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&rawDev))) &&
             rawDev) {
-            d3d12_device.reset(rawDev);            if (init_imgui(pSwapChain, active_queue)) {
-                ApplyTheme(g_theme_idx);
-                initialized                    = true;
-            ImGui::GetIO().MouseDrawCursor = show_player || show_settings || show_stations;
+            g_dx.device.reset(rawDev);            if (init_imgui(pSwapChain, active_queue)) {
+                ApplyTheme(g_ui.theme_idx);
+                g_ui.is_init                    = true;
+            ImGui::GetIO().MouseDrawCursor = g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible;
                 log::info("[overlay] Direct3D 12 Dear ImGui Overlay context initialized successfully!");
             } else {
                 cleanup_imgui_resources();
@@ -1382,9 +1388,9 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         }
     }
 
-    if (initialized && active_queue) {
+    if (g_ui.is_init && active_queue) {
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
-        if (!show_player && !show_settings && !show_stations && !show_hud) {
+        if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible && !g_ui.hud_visible) {
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
         UINT backBufferIdx = 0;
@@ -1402,37 +1408,37 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             }
         }
 
-        if (backBufferIdx >= command_allocators.size() || backBufferIdx >= backbuffers.size() ||
-            !backbuffers[backBufferIdx]) {
+        if (backBufferIdx >= g_dx.allocators.size() || backBufferIdx >= g_dx.fb_bufs.size() ||
+            !g_dx.fb_bufs[backBufferIdx]) {
             log::error("[overlay] backBufferIdx {} is out of bounds or backbuffer is NULL! "
                        "size={}, buf_size={}",
-                       backBufferIdx, command_allocators.size(), backbuffers.size());
+                       backBufferIdx, g_dx.allocators.size(), g_dx.fb_bufs.size());
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
-        ID3D12CommandAllocator* allocator = command_allocators[backBufferIdx].get();
+        ID3D12CommandAllocator* allocator = g_dx.allocators[backBufferIdx].get();
 
-        if (!wait_for_fence(command_allocator_fence_values[backBufferIdx])) {
+        if (!wait_for_fence(g_dx.allocator_fence_values[backBufferIdx])) {
             log::warn("[overlay] skipped frame because GPU did not release command allocator {}",
                       backBufferIdx);
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
 
         allocator->Reset();
-        imgui_command_list->Reset(allocator, nullptr);
+        g_dx.cmd_list->Reset(allocator, nullptr);
 
         // Transition backbuffer state to RENDER_TARGET
         D3D12_RESOURCE_BARRIER barrier = {};
         barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource   = backbuffers[backBufferIdx].get();
+        barrier.Transition.pResource   = g_dx.fb_bufs[backBufferIdx].get();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        imgui_command_list->ResourceBarrier(1, &barrier);
+        g_dx.cmd_list->ResourceBarrier(1, &barrier);
 
-        imgui_command_list->OMSetRenderTargets(1, &backbuffer_rtvs[backBufferIdx], FALSE, nullptr);
+        g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
-        ID3D12DescriptorHeap* heaps[] = {srv_descriptor_heap.get()};
-        imgui_command_list->SetDescriptorHeaps(1, heaps);
+        ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.get()};
+        g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
 
         // Render custom dashboard panel UI
         ImGui_ImplDX12_NewFrame();
@@ -1442,23 +1448,23 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         draw_imgui_ui_impl();
 
         ImGui::Render();
-        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), imgui_command_list.get());
+        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
 
         // Transition backbuffer back to PRESENT state
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-        imgui_command_list->ResourceBarrier(1, &barrier);
+        g_dx.cmd_list->ResourceBarrier(1, &barrier);
 
-        imgui_command_list->Close();
+        g_dx.cmd_list->Close();
 
         {
-            ID3D12CommandList* cmdList = imgui_command_list.get();
+            ID3D12CommandList* cmdList = g_dx.cmd_list.get();
             active_queue->ExecuteCommandLists(1, &cmdList);
         }
 
-        const UINT64 fence_value = ++imgui_fence_value;
-        if (SUCCEEDED(active_queue->Signal(imgui_fence.get(), fence_value))) {
-            command_allocator_fence_values[backBufferIdx] = fence_value;
+        const UINT64 fence_value = ++g_dx.fence_value;
+        if (SUCCEEDED(active_queue->Signal(g_dx.fence.get(), fence_value))) {
+            g_dx.allocator_fence_values[backBufferIdx] = fence_value;
         } else {
             log::warn("[overlay] failed to signal ImGui GPU fence");
         }
@@ -1613,7 +1619,7 @@ void shutdown() noexcept {
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
 
-    if (initialized) {
+    if (g_ui.is_init) {
         wait_for_all_overlay_work();
 
         ImGui_ImplDX12_Shutdown();
@@ -1621,7 +1627,7 @@ void shutdown() noexcept {
         ImGui::DestroyContext();
 
         cleanup_imgui_resources();
-        imgui_fence_value = 0;
+        g_dx.fence_value = 0;
 
         {
             std::scoped_lock lk{swapchain_map_mutex};
@@ -1631,7 +1637,7 @@ void shutdown() noexcept {
             get_swapchain_queues().clear();
         }
 
-        initialized = false;
+        g_ui.is_init = false;
         log::info("[overlay] Dear ImGui overlay cleaned up safely");
     }
 }

@@ -119,7 +119,6 @@ public:
                         }
                     } else {
                         std::memset(data, 0, static_cast<std::size_t>(avail) * 2 * sizeof(float));
-                        underruns_.fetch_add(1, std::memory_order_relaxed);
                     }
                     render_->ReleaseBuffer(avail, 0);
                 }
@@ -147,8 +146,6 @@ public:
 
     ~WasapiOutput() { stop(); }
 
-    uint64_t underruns() const { return underruns_.load(std::memory_order_relaxed); }
-
 private:
     frdx::AudioSourceManager* mgr_     = nullptr;
     frdx::fmod_bridge::DSPBridge* bridge_ = nullptr;
@@ -159,7 +156,6 @@ private:
     HANDLE hEvent_                = nullptr;
     UINT32 buffer_frames_         = 0;
     uint32_t sample_rate_         = 48000;
-    std::atomic<uint64_t> underruns_{0};
 };
 
 // ─── Minimal DX12 Context ────────────────────────────────────────────────
