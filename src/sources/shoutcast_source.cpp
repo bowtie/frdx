@@ -603,7 +603,8 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         // Only install if we're still on the same station (not changed during launch).
         if (active_station_id_ == station_id && active_stream_id_ == stream_id) {
             if (new_pipe) {
-                pipe_    = std::move(new_pipe);
+                pipe_.store(std::shared_ptr<Pipe>(std::move(new_pipe)),
+                            std::memory_order_release);
                 has_pipe = true;
             }
 
@@ -691,7 +692,8 @@ void ShoutcastSource::start_pipe_locked() {
     auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path);
     if (!pipe_result) return;
 
-    pipe_ = std::move(*pipe_result);
+    pipe_.store(std::shared_ptr<Pipe>(std::move(*pipe_result)),
+                std::memory_order_release);
 
     // Set initial display metadata from the active station before real
     // track info arrives from the background poller / ICY parser.
@@ -718,7 +720,7 @@ void ShoutcastSource::start_pipe_locked() {
 }
 
 void ShoutcastSource::stop_pipe_locked() {
-    pipe_.reset();
+    pipe_.store(nullptr, std::memory_order_release);
     state_.store(PlaybackState::stopped, std::memory_order_release);
 }
 
@@ -726,8 +728,8 @@ void ShoutcastSource::play() {
     bool has_pipe = false;
     {
         frdx::ScopedLock lk{mu_};
-        if (!pipe_) start_pipe_locked();
-        has_pipe = (pipe_ != nullptr);
+        if (!pipe_.load(std::memory_order_acquire)) start_pipe_locked();
+        has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
     } // mu_ released before poller restart to avoid deadlock
     // Restart the metadata poller — pause() stops it, so unpausing needs to
     // bring it back to get live track info again.
@@ -769,7 +771,7 @@ void ShoutcastSource::cycle_and_restart(int direction) {
                 break;
             }
         }
-        has_pipe = (pipe_ != nullptr);
+        has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
     } // mu_ released before poller stop/start
     restart_metadata_for_current();
     if (has_pipe) {
@@ -1347,18 +1349,14 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         if (st != PlaybackState::playing && st != PlaybackState::buffering) return;
     }
 
-    Pipe* p = nullptr;
-    HANDLE stderr_pipe = nullptr;
-    HANDLE read_pipe = nullptr;
-    bool ended = false;
-    {
-        frdx::UniqueLock lk{mu_};
-        p = pipe_.get();
-        if (!p) return;
-        stderr_pipe = p->stderr_pipe;
-        read_pipe = p->read_pipe;
-        ended = p->ended;
-    }
+    // Lock-free acquire of the current pipe.  Shared ownership ensures the Pipe
+    // stays alive for the entire call, even if a concurrent stop_pipe_locked()
+    // replaces pipe_ with nullptr.
+    auto p          = pipe_.load(std::memory_order_acquire);
+    if (!p) return;
+    HANDLE stderr_pipe = p->stderr_pipe;
+    HANDLE read_pipe   = p->read_pipe;
+    bool ended         = p->ended;
 
     auto update_position = [&] {
         const std::size_t r        = ring.readable();
@@ -1375,10 +1373,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             DWORD eavail = 0;
             if (!PeekNamedPipe(stderr_pipe, nullptr, 0, nullptr, &eavail, nullptr)) {
                 CloseHandle(stderr_pipe);
-                {
-                    frdx::UniqueLock lk{mu_};
-                    if (p && pipe_.get() == p) p->stderr_pipe = nullptr;
-                }
+                p->stderr_pipe = nullptr;
                 break;
             }
             if (eavail == 0) break;
@@ -1386,26 +1381,14 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             DWORD egot = 0;
             if (!ReadFile(stderr_pipe, ebuf, sizeof(ebuf) - 1, &egot, nullptr) || egot == 0) {
                 CloseHandle(stderr_pipe);
-                {
-                    frdx::UniqueLock lk{mu_};
-                    if (p && pipe_.get() == p) p->stderr_pipe = nullptr;
-                }
+                p->stderr_pipe = nullptr;
                 break;
             }
-            {
-                frdx::UniqueLock lk{mu_};
-                if (p && pipe_.get() == p) p->stderr_buf.append(ebuf, egot);
-            }
-            std::string local_buf;
-            {
-                frdx::UniqueLock lk{mu_};
-                if (p && pipe_.get() == p) {
-                    if (p->stderr_buf.size() > 65536)
-                        p->stderr_buf.erase(0, p->stderr_buf.size() - 32768);
-                    local_buf = std::move(p->stderr_buf);
-                    p->stderr_buf.clear();
-                }
-            }
+            p->stderr_buf.append(ebuf, egot);
+            if (p->stderr_buf.size() > 65536)
+                p->stderr_buf.erase(0, p->stderr_buf.size() - 32768);
+            std::string local_buf = std::move(p->stderr_buf);
+            p->stderr_buf.clear();
             if (!local_buf.empty()) {
                 for (;;) {
                     auto nl = local_buf.find('\n');
@@ -1426,15 +1409,16 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         update_position();
         if (ring.readable() == 0) {
             frdx::UniqueLock lk{mu_};
-            if (reconnect_attempts_ < 3) {
-                reconnect_attempts_++;
+            int attempts = reconnect_attempts_.load(std::memory_order_acquire);
+            if (attempts < 3) {
+                reconnect_attempts_.store(attempts + 1, std::memory_order_release);
                 log::info("[shoutcast] stream disconnected; attempting reconnect {}/3",
-                          reconnect_attempts_);
+                          attempts + 1);
                 info_.title  = display_name_;
                 info_.artist = "Attempting to reconnect to station";
                 info_gen_.fetch_add(1, std::memory_order_release);
             } else {
-                reconnect_attempts_ = 0;
+                reconnect_attempts_.store(0, std::memory_order_release);
                 log::warn("[shoutcast] max reconnect attempts reached; cycling presets");
                 if (!cfg_.presets.empty() || !stations_.empty()) {
                     info_.title  = display_name_;
@@ -1443,13 +1427,10 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                     cycle_preset();
                 }
             }
-            // Caution: p (captured via pipe_.get()) becomes dangling here
-            // because start_pipe_locked() calls stop_pipe_locked() → pipe_.reset().
-            // p is intentionally not dereferenced after this point.
             // Save before start_pipe_locked resets it to "Online Radio".
             std::string prev_name = display_name_;
             start_pipe_locked();
-            bool has_pipe = (pipe_ != nullptr);
+            bool has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
             if (!has_pipe) {
                 // Pipe launch failed — restore unreachable status.
                 info_.title   = prev_name;
@@ -1471,25 +1452,26 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     if (!read_pipe) return;
 
     auto on_eof = [&] {
-        frdx::UniqueLock lk{mu_};
-        if (p && pipe_.get() == p) {
-            if (p->bytes_written == 0) {
-                log::warn("[shoutcast] stream produced 0 bytes; stopping");
-                stop_pipe_locked();
-                return;
-            }
-            p->ended = true;
-            info_.title = display_name_;
+        if (p->bytes_written == 0) {
+            log::warn("[shoutcast] stream produced 0 bytes; stopping");
+            frdx::UniqueLock lk{mu_};
+            stop_pipe_locked();
+            return;
+        }
+        p->ended = true;
+        {
+            frdx::UniqueLock lk{mu_};
+            info_.title  = display_name_;
             info_.artist = "Lost connection to station";
             info_gen_.fetch_add(1, std::memory_order_release);
-            if (p->read_pipe) {
-                CloseHandle(p->read_pipe);
-                p->read_pipe = nullptr;
-            }
-            if (p->stderr_pipe) {
-                CloseHandle(p->stderr_pipe);
-                p->stderr_pipe = nullptr;
-            }
+        }
+        if (p->read_pipe) {
+            CloseHandle(p->read_pipe);
+            p->read_pipe = nullptr;
+        }
+        if (p->stderr_pipe) {
+            CloseHandle(p->stderr_pipe);
+            p->stderr_pipe = nullptr;
         }
     };
 
@@ -1510,14 +1492,10 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             return;
         }
         if (got > 0) {
-            frdx::UniqueLock lk{mu_};
-            if (reconnect_attempts_ > 0) reconnect_attempts_ = 0;
+            reconnect_attempts_.store(0, std::memory_order_relaxed);
         }
         ring.write(reinterpret_cast<std::byte*>(buf), got);
-        {
-            frdx::UniqueLock lk{mu_};
-            if (p && pipe_.get() == p) p->bytes_written += got;
-        }
+        p->bytes_written += got;
         update_position();
         avail = avail > got ? avail - got : 0;
         if (state_.load(std::memory_order_acquire) == PlaybackState::buffering &&

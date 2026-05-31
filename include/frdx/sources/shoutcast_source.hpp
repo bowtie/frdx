@@ -170,7 +170,10 @@ private:
                        const std::filesystem::path& ffmpeg_path);
 
     ShoutcastConfig cfg_;
-    std::unique_ptr<Pipe> pipe_ FRDX_GUARDED_BY(mu_);
+    // Lock-free audio path: pump() loads via acquire, start_pipe_locked() stores
+    // via release.  Shared ownership ensures the Pipe stays alive until pump()
+    // releases its local reference, even if stop_pipe_locked() replaces pipe_.
+    std::atomic<std::shared_ptr<Pipe>> pipe_{};
 
     mutable frdx::Mutex mu_;
     std::string target_url_          FRDX_GUARDED_BY(mu_);
@@ -214,7 +217,7 @@ private:
     void* winhttp_session_ = nullptr;
 
     // Retry counter to preserve active station during brief network dropouts.
-    int reconnect_attempts_ FRDX_GUARDED_BY(mu_) = 0;
+    std::atomic<int> reconnect_attempts_{0};
 
     // Timestamp (steady_clock ms) of the last ICY StreamTitle received in
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
