@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frdx/detail/thread_annotations.hpp"
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/fmod/radio_discovery.hpp"
 #include "frdx/ring_buffer.hpp"
@@ -19,7 +20,6 @@ enum class DSPError {
     image_not_valid,
     create_dsp_not_found,
     resolver_not_found,
-    signatures_incomplete,
 };
 
 enum class DSPMode : uint32_t { off = 0, passthrough = 1, silence = 2, pcm = 3 };
@@ -73,8 +73,13 @@ public:
     DSPBridge(AudioSourceManager& mgr, const FMODFns& fns);
     ~DSPBridge();
 
+    // Non-copyable and non-movable — holds a mutex (whose address must
+    // remain stable for GUARDED_BY annotations) and atomics accessed by
+    // the DSP read callback from FMOD's mixer thread.
     DSPBridge(const DSPBridge&)            = delete;
     DSPBridge& operator=(const DSPBridge&) = delete;
+    DSPBridge(DSPBridge&&)                 = delete;
+    DSPBridge& operator=(DSPBridge&&)      = delete;
 
     void set_target(const RadioInstance& inst, void* fmod_system) noexcept;
 
@@ -95,7 +100,6 @@ public:
     }
 
     DSPMode mode() const noexcept { return mode_.load(std::memory_order_acquire); }
-    void set_mode(DSPMode m) noexcept;
 
     // [0, 1]. Pure linear multiplier on the S16->float conversion; 1.0 is
     // unity (bit-perfect).
@@ -113,13 +117,10 @@ public:
 
     uint64_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
     uint64_t call_count() const noexcept { return calls_.load(std::memory_order_relaxed); }
-    uint32_t last_buffer_len() const noexcept { return last_len_.load(std::memory_order_relaxed); }
-    uint32_t last_out_channels() const noexcept {
-        return last_out_ch_.load(std::memory_order_relaxed);
-    }
 
     AudioSourceManager& manager() noexcept { return mgr_; }
 
+    FRDX_NO_THREAD_SAFETY_ANALYSIS
     static uint32_t __stdcall read_callback(void* dsp_state, float* in_buf, float* out_buf,
                                             uint32_t length, int32_t in_channels,
                                             int32_t* out_channels);

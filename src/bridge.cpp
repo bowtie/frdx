@@ -11,6 +11,8 @@
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/fmod/dx12_overlay.hpp"
 
+#include "frdx/subprocess.hpp"
+
 #include <windows.h>
 #include <filesystem>
 #include <memory>
@@ -20,15 +22,9 @@ namespace frdx {
 
 namespace {
 
-std::filesystem::path module_directory(HMODULE self) {
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetModuleFileNameW(self, buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return {};
-    return std::filesystem::path{buf}.parent_path();
-}
-
 } // namespace
 
+FRDX_NO_THREAD_SAFETY_ANALYSIS
 void run_bridge(HMODULE self) noexcept {
     const auto dir      = module_directory(self);
     const auto data_dir = dir / "mods" / "frdx";
@@ -69,8 +65,8 @@ void run_bridge(HMODULE self) noexcept {
             }
         } else {
             if (shoutcast) {
-                mgr.set_source(nullptr);
-                shoutcast.reset();
+                mgr.shutdown();
+                (void)shoutcast.release(); // mgr already shut it down
             }
         }
     };

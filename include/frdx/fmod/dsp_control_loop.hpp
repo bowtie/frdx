@@ -6,6 +6,8 @@
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/fmod/radio_discovery.hpp"
 
+#include "frdx/detail/thread_annotations.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -24,15 +26,22 @@ public:
     ControlLoop(DSPBridge& bridge, const PEImage& img, float configured_gain);
     ~ControlLoop();
 
+    // Non-copyable and non-movable — holds a jthread (which is movable
+    // but whose token would become dangling) and references to the DSP
+    // bridge and PE image that outlive the control loop.
     ControlLoop(const ControlLoop&)            = delete;
     ControlLoop& operator=(const ControlLoop&) = delete;
+    ControlLoop(ControlLoop&&)                 = delete;
+    ControlLoop& operator=(ControlLoop&&)      = delete;
 
     void set_configured_gain(float g) noexcept {
         configured_gain_.store(g, std::memory_order_release);
     }
 
 private:
+    FRDX_NO_THREAD_SAFETY_ANALYSIS
     void run(const std::stop_token& tok);
+    FRDX_NO_THREAD_SAFETY_ANALYSIS
     void push_metadata() noexcept;
 
     // Discover the live RadioStreamFmod carrying our sample and point the

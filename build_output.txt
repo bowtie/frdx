@@ -1,0 +1,17 @@
+Using clang-cl: C:\Program Files\LLVM\bin\clang-cl.exe
+Using cmake: C:\Program Files\CMake\bin\cmake.exe
+Using ninja:  C:\Users\Zoushie\AppData\Local\Microsoft\WinGet\Links\ninja.exe
+-> cmake configure
+-- Configuring done (0.1s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/Zoushie/Projects/forza-radio-dx/build
+-> cmake build (Release)
+ninja: no work to do.
+
+Built + staged in C:\Users\Zoushie\Projects\forza-radio-dx\dist  (0.6s)
+  README.txt
+  version.dll
+  mods\frdx\config.toml
+  mods\frdx\stations.json
+  mods\frdx\ffmpeg\ffmpeg.exe
+  mods\frdx\fonts\FusionPixel12-ja.ttf

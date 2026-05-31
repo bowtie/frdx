@@ -4,6 +4,7 @@
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/log.hpp"
+#include "frdx/subprocess.hpp"
 
 #include <cstdint>
 #include <windows.h>
@@ -13,7 +14,6 @@
 #include <string>
 #include <mutex>
 #include <unordered_map>
-#include <cmath>
 #include <filesystem>
 #include <algorithm>
 #include <condition_variable>
@@ -31,6 +31,8 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
+#include "frdx/detail/thread_annotations.hpp"
 
 // Forward WndProc handler defined in Dear ImGui impl_win32
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
@@ -65,19 +67,36 @@ fmod_bridge::DSPBridge* g_bridge = nullptr;
 ConfigStore* g_store             = nullptr;
 std::function<void()> g_flush_audio_fn;
 
-// DirectX 12 render contexts
+// DirectX 12 render contexts.
+// NOTE: d3d12_device is the same COM object as the sandbox/game's dx.device.
+// It is acquired via IDXGISwapChain::GetDevice() in hook_Present() (which
+// AddRef's), released by cleanup_imgui_resources(), and finally released to
+// zero by the sandbox's destroy_dx().  Both pointers refer to the same
+// ID3D12Device; COM refcounting ensures the object stays alive until both
+// owners drop their reference.
 ID3D12Device* d3d12_device = nullptr;
+
+// Swapchain → command-queue map.  Guarded by swapchain_map_mutex.
+// Lifted to namespace scope (from function-local statics) so the
+// clang thread-safety analyser can see the GUARDED_BY annotation.
 std::mutex swapchain_map_mutex;
+std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> swapchain_queues_data
+    FRDX_GUARDED_BY(swapchain_map_mutex);
+std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*> swapchain3_cache_data
+    FRDX_GUARDED_BY(swapchain_map_mutex);
+
+// Returns a reference to the swapchain→queue map.  Caller must hold
+// swapchain_map_mutex before accessing the returned reference.
+FRDX_REQUIRES(swapchain_map_mutex)
 std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*>& get_swapchain_queues() {
-    static std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> m;
-    return m;
+    return swapchain_queues_data;
 }
-#define swapchain_queues get_swapchain_queues()
+FRDX_REQUIRES(swapchain_map_mutex)
 std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*>& get_swapchain3_cache() {
-    static std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*> c;
-    return c;
+    return swapchain3_cache_data;
 }
-#define swapchain3_cache get_swapchain3_cache()
+#define swapchain_queues   get_swapchain_queues()
+#define swapchain3_cache    get_swapchain3_cache()
 ID3D12DescriptorHeap* srv_descriptor_heap     = nullptr;
 ID3D12DescriptorHeap* rtv_descriptor_heap     = nullptr;
 ID3D12GraphicsCommandList* imgui_command_list = nullptr;
@@ -92,9 +111,13 @@ std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> backbuffer_rtvs;
 
 std::mutex action_mutex;
 std::condition_variable action_cv;
+// Pending overlay actions (station change, play/pause, etc.).
+// Guarded by action_mutex.
+std::deque<std::function<void()>> pending_actions_data FRDX_GUARDED_BY(action_mutex);
+
+FRDX_REQUIRES(action_mutex)
 std::deque<std::function<void()>>& get_pending_actions() {
-    static std::deque<std::function<void()>> a;
-    return a;
+    return pending_actions_data;
 }
 #define pending_actions get_pending_actions()
 std::thread action_thread;
@@ -380,6 +403,27 @@ static void draw_hud(IAudioSource* active, const TrackInfo& track) {
     ImGui::End();
 }
 
+// Shared helper: draws a rounded, filled background + border with only bottom
+// corners rounded (top corners are left sharp, blending into the transparent
+// title bar).  Must be called inside a Begin() / End() pair.
+static void draw_bordered_background(float rounding = 6.0f) {
+    auto* wdl = ImGui::GetWindowDrawList();
+    auto* fdl = ImGui::GetForegroundDrawList();
+    ImVec2 p  = ImGui::GetWindowPos();
+    ImVec2 sz = ImGui::GetWindowSize();
+    ImU32  bg  = ImGui::GetColorU32(ImGuiCol_WindowBg, 0.94f);
+    ImU32  brd = ImGui::GetColorU32(ImGuiCol_Border);
+    wdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), bg, rounding);
+    // Clip 1 px at the top so the top edge is invisible through the titlebar.
+    const float tb = ImGui::GetFrameHeight();
+    fdl->PushClipRect(ImVec2(p.x - 1.0f, p.y + tb),
+                       ImVec2(p.x + sz.x + 2.0f, p.y + sz.y + 2.0f));
+    fdl->AddRect(ImVec2(p.x - 1.0f, p.y + tb - 1.0f),
+                 ImVec2(p.x + sz.x + 1.0f, p.y + sz.y + 1.0f),
+                 brd, rounding, 1.0f, ImDrawFlags_RoundCornersBottom);
+    fdl->PopClipRect();
+}
+
 // ── UI section: settings window ────────────────────────────────────────
 
 static void draw_settings_window(const PlayerBarLayout& layout) {
@@ -407,30 +451,7 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, setFlags)) {
-        // Custom bordered background
-        {
-            auto* wdl       = ImGui::GetWindowDrawList();
-            auto* fdl       = ImGui::GetForegroundDrawList();
-            ImVec2 p        = ImGui::GetWindowPos();
-            ImVec2 sz       = ImGui::GetWindowSize();
-            float  r        = 6.0f;
-            ImU32  bg       = ImGui::GetColorU32(ImGuiCol_WindowBg, 0.94f);
-            ImU32  brd      = ImGui::GetColorU32(ImGuiCol_Border);
-            wdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), bg, r);
-            // Border via AddRect with only bottom corners rounded
-            // (top corners are sharp 90° so the sides start flat at the
-            // transparent titlebar boundary).  Clipped 1 px at the top
-            // so the top edge line is invisible through the titlebar.
-            {
-                const float tb = ImGui::GetFrameHeight();
-                fdl->PushClipRect(ImVec2(p.x - 1.0f, p.y + tb),
-                                   ImVec2(p.x + sz.x + 2.0f, p.y + sz.y + 2.0f));
-                fdl->AddRect(ImVec2(p.x - 1.0f, p.y + tb - 1.0f),
-                             ImVec2(p.x + sz.x + 1.0f, p.y + sz.y + 1.0f),
-                             brd, r, 1.0f, ImDrawFlags_RoundCornersBottom);
-                fdl->PopClipRect();
-            }
-        }
+        draw_bordered_background();
 
         ImGui::Text("Theme");
         if (ImGui::Combo("##theme", &g_theme_idx, g_theme_names,
@@ -502,7 +523,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::Begin("Forza Radio DX", nullptr, barFlags);
 
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
-    const float btn_w     = 30.0f;
+    const float btn_w     = 27.0f;
     const float btn_h     = 24.0f;
 
     // ── Station selector button ──
@@ -551,7 +572,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
                                      static_cast<int>(s_combo_cache.names.size()) - 1);
 
             const char* preview = s_combo_cache.names[s_combo_sel].c_str();
-            if (ImGui::ButtonScrollable(preview, ImVec2(90.0f + 3.0f + btn_w, btn_h))) {
+            if (ImGui::ButtonScrollable(preview, ImVec2(130.0f, btn_h))) {
                 show_stations = !show_stations;
                 if (show_stations) show_settings = false;
             }
@@ -564,39 +585,64 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
         ImGui::TextDisabled("Shoutcast source unavailable");
     }
 
+    // Shared helper for icon buttons: InvisibleButton + rounded rect background + centered glyph.
+    // active_col / hover_col override the resting/hover colors (0 = use default theme colors).
+    auto draw_icon_btn = [&](const char* id, const char* glyph,
+                             ImU32 active_col = 0, ImU32 hover_col = 0) -> bool {
+        ImGui::InvisibleButton(id, ImVec2(btn_w, btn_h));
+        const bool hovered = ImGui::IsItemHovered();
+        const bool held    = ImGui::IsItemActive();
+        const bool pressed = ImGui::IsItemClicked();
+
+        ImU32 bg_col;
+        if (active_col) {
+            bg_col = held && hovered ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
+                     : hovered       ? hover_col
+                                     : active_col;
+        } else {
+            bg_col = held && hovered ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
+                     : hovered       ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
+                                    : ImGui::GetColorU32(ImGuiCol_Button);
+        }
+
+        auto* dl   = ImGui::GetWindowDrawList();
+        ImVec2 min = ImGui::GetItemRectMin();
+        ImVec2 max = ImGui::GetItemRectMax();
+        dl->AddRectFilled(min, max, bg_col, ImGui::GetStyle().FrameRounding);
+        ImVec2 gsz = ImGui::CalcTextSize(glyph);
+        float gx   = min.x + (btn_w - gsz.x) * 0.5f + 0.5f;
+        float gy   = min.y + (btn_h - gsz.y) * 0.5f;
+        dl->AddText(ImVec2(gx, gy), ImGui::GetColorU32(ImGuiCol_Text), glyph);
+        return pressed;
+    };
+
     ImGui::SameLine(0, 20);
 
     // ── Transport buttons ──
-    if (ImGui::Button("\u23EE", ImVec2(btn_w, btn_h))) {
-        if (active) {
-            enqueue_action([active] {
-                active->previous();
-                g_mgr->ring().drain();
-            });
-        }
+    if (draw_icon_btn("##prev", "\u23EE") && active) {
+        enqueue_action([active] {
+            active->previous();
+            g_mgr->ring().drain();
+        });
     }
     ImGui::SameLine(0, 3);
-    if (ImGui::Button(is_playing ? "\u23F8" : "\u23F5", ImVec2(btn_w, btn_h))) {
-        if (active) {
-            enqueue_action([active, is_playing] {
-                if (is_playing) {
-                    active->pause();
-                    if (g_mgr) g_mgr->ring().drain();
-                    if (g_flush_audio_fn) g_flush_audio_fn();
-                } else {
-                    active->play();
-                }
-            });
-        }
+    if (draw_icon_btn("##play", is_playing ? "\u23F8" : "\u23F5") && active) {
+        enqueue_action([active, is_playing] {
+            if (is_playing) {
+                active->pause();
+                if (g_mgr) g_mgr->ring().drain();
+                if (g_flush_audio_fn) g_flush_audio_fn();
+            } else {
+                active->play();
+            }
+        });
     }
     ImGui::SameLine(0, 3);
-    if (ImGui::Button("\u23ED", ImVec2(btn_w, btn_h))) {
-        if (active) {
-            enqueue_action([active] {
-                active->next();
-                g_mgr->ring().drain();
-            });
-        }
+    if (draw_icon_btn("##next", "\u23ED") && active) {
+        enqueue_action([active] {
+            active->next();
+            g_mgr->ring().drain();
+        });
     }
 
     ImGui::SameLine(0, 20);
@@ -607,7 +653,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
         float       gain_pct   = g_bridge->gain() * 100.0f;
         char        label[16];
         std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
-        ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(90.0f, btn_h), label);
+        ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(100.0f, btn_h), label);
 
         if (ImGui::IsItemHovered()) {
             float wheel = ImGui::GetIO().MouseWheel;
@@ -636,21 +682,16 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::SameLine(0, 3);
 
     // ── Settings gear icon ──
-    const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
-    const bool   settings_open = show_settings;
-    if (settings_open) {
-        ImGui::PushStyleColor(ImGuiCol_Button, hl_col);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hl_col);
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hl_col);
+    {
+        const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
+        const ImU32 hl_u32    = ImGui::GetColorU32(hl_col);
+        const ImU32 gear_rest = show_settings ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
+        if (draw_icon_btn("##gear", "\uF8F0", gear_rest, hl_u32)) {
+            show_settings = !show_settings;
+            if (show_settings) show_stations = false;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
     }
-    if (ImGui::Button("\uF8F0", ImVec2(btn_w, btn_h))) {
-        show_settings = !show_settings;
-        if (show_settings) show_stations = false;
-    }
-    ImGui::PopStyleColor();
-    if (settings_open) ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
 
     // Capture layout data for the stations browser and settings before closing the window.
     PlayerBarLayout layout;
@@ -674,15 +715,19 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
                       : nullptr;
     if (!sc_st) return;
 
-    float sw       = layout.gear_right - s_btn_min.x;
-    const float st_tb = ImGui::GetFrameHeight();
+    // Slightly narrower than the full player bar, centered under it.
+    const float full_w = layout.gear_right - s_btn_min.x;
+    const float sw     = full_w - 16.0f;
+    const float st_tb  = ImGui::GetFrameHeight();
     // Height: 8 visible items, each = text line + frame padding + gap
     const auto& st_style = ImGui::GetStyle();
     const float st_item_h =
         ImGui::GetTextLineHeight() + st_style.FramePadding.y * 2 + st_style.ItemSpacing.y;
     const float st_desired_h =
         st_style.WindowPadding.y * 2 +        8.0f * st_item_h + ImGui::GetTextLineHeight() * 2;
-    ImGui::SetNextWindowPos(ImVec2(s_btn_min.x, layout.pos.y + layout.size.y - st_tb));
+    const float center_x = s_btn_min.x + full_w * 0.5f;
+    ImGui::SetNextWindowPos(ImVec2(center_x, layout.pos.y + layout.size.y - st_tb),
+                            ImGuiCond_Always, ImVec2(0.5f, 0));
     ImGui::SetNextWindowSize(ImVec2(sw, st_desired_h), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.94f);
 
@@ -697,47 +742,65 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg,
+                          ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
 
     if (ImGui::Begin("##Stations", nullptr, stFlags)) {
-        // Custom bordered background
-        {
-            auto* wdl = ImGui::GetWindowDrawList();
-            auto* fdl = ImGui::GetForegroundDrawList();
-            ImVec2 p  = ImGui::GetWindowPos();
-            ImVec2 sz = ImGui::GetWindowSize();
-            float  r  = 6.0f;
-            ImU32  bg = ImGui::GetColorU32(ImGuiCol_WindowBg, 0.94f);
-            ImU32  brd = ImGui::GetColorU32(ImGuiCol_Border);
-            wdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), bg, r);
-            // Border via AddRect with only bottom corners rounded
-            // (top corners are sharp 90° so the sides start flat at the
-            // titlebar boundary).  Clipped 1 px at the top so the top edge
-            // line is invisible through the transparent title bar.
-            {
-                const float tb = ImGui::GetFrameHeight();
-                fdl->PushClipRect(ImVec2(p.x - 1.0f, p.y + tb),
-                                   ImVec2(p.x + sz.x + 2.0f, p.y + sz.y + 2.0f));
-                fdl->AddRect(ImVec2(p.x - 1.0f, p.y + tb - 1.0f),
-                             ImVec2(p.x + sz.x + 1.0f, p.y + sz.y + 1.0f),
-                             brd, r, 1.0f, ImDrawFlags_RoundCornersBottom);
-                fdl->PopClipRect();
-            }
-        }
+        draw_bordered_background();
 
         // Rounded selections
-        ImVec4 hdr_col = ImGui::GetStyleColorVec4(ImGuiCol_Header);
-        ImVec4 hdr_hov = ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered);
-        ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(0, 0, 0, 0));
+        // Pre-compute all highlight colours once (saves per-item ImVec4 construction + blend).
+        const ImVec4 hdr_col_v4 = ImGui::GetStyleColorVec4(ImGuiCol_Header);
+        const ImVec4 hdr_hov_v4 = ImGui::GetStyleColorVec4(ImGuiCol_HeaderHovered);
+        const ImU32  hdr_col_u32 = ImGui::ColorConvertFloat4ToU32(hdr_col_v4);
+        const ImU32  hdr_hov_u32 = ImGui::ColorConvertFloat4ToU32(hdr_hov_v4);
+        // 50 % blend of Header + HeaderHovered (used when an item is both active AND hovered)
+        const ImU32 hdr_blend_u32 = ImGui::ColorConvertFloat4ToU32(ImVec4{
+            hdr_col_v4.x * 0.5f + hdr_hov_v4.x * 0.5f,
+            hdr_col_v4.y * 0.5f + hdr_hov_v4.y * 0.5f,
+            hdr_col_v4.z * 0.5f + hdr_hov_v4.z * 0.5f,
+            hdr_col_v4.w * 0.5f + hdr_hov_v4.w * 0.5f,
+        });
 
+        // Cached text colour + padding for the inner loop
+        const ImU32  text_col    = ImGui::GetColorU32(ImGuiCol_Text);
+        const float  text_pad_x  = ImGui::GetStyle().FramePadding.x;
+        const float  text_height = ImGui::GetTextLineHeight();
+        const ImVec2 clip_min    = ImGui::GetWindowDrawList()->GetClipRectMin();
+        const ImVec2 clip_max    = ImGui::GetWindowDrawList()->GetClipRectMax();
+
+        auto [active_st, active_str] = sc_st->active_station_stream();
         for (const auto& st : sc_st->stations_nolock()) {
             ImGui::Text("%s", st.name.c_str());
             ImGui::Indent(12.0f);
-            auto [active_st, active_str] = sc_st->active_station_stream();
             for (const auto& str : st.streams) {
                 bool is_act = (st.id == active_st && str.id == active_str);
-                if (ImGui::Selectable(str.name.c_str(), is_act)) {
+                const float item_h = text_height + ImGui::GetStyle().FramePadding.y * 2;
+                ImGui::InvisibleButton(str.name.c_str(), ImVec2(-1.0f, item_h));
+                bool hovered = ImGui::IsItemHovered();
+                bool pressed = ImGui::IsItemClicked();
+
+                ImDrawList* dl  = ImGui::GetWindowDrawList();
+                ImVec2      min = ImGui::GetItemRectMin();
+                ImVec2      max = ImGui::GetItemRectMax();
+
+                // Skip drawing for items completely outside the clip rect
+                const bool visible = (max.y >= clip_min.y && min.y <= clip_max.y &&
+                                       max.x >= clip_min.x && min.x <= clip_max.x);
+                if (visible) {
+                    if (hovered || is_act) {
+                        const ImU32 col = hovered && is_act ? hdr_blend_u32
+                                          : hovered         ? hdr_hov_u32
+                                                            : hdr_col_u32;
+                        dl->AddRectFilled(min, max, col, 4.0f);
+                    }
+                    dl->AddText(
+                        ImVec2(min.x + text_pad_x,
+                               min.y + (max.y - min.y - text_height) * 0.5f),
+                        text_col, str.name.c_str());
+                }
+
+                if (pressed) {
                     show_stations = false;
                     if (!is_act) {
                         enqueue_action([sid = st.id, strid = str.id] {
@@ -756,26 +819,10 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
                         });
                     }
                 }
-                // Rounded highlight + text re-render
-                if (is_act || ImGui::IsItemHovered()) {
-                    ImDrawList* dl  = ImGui::GetWindowDrawList();
-                    ImVec2      min = ImGui::GetItemRectMin();
-                    ImVec2      max = ImGui::GetItemRectMax();
-                    ImU32       col =
-                        ImGui::ColorConvertFloat4ToU32(is_act ? hdr_col : hdr_hov);
-                    dl->AddRectFilled(min, max, col, 4.0f);
-                    dl->AddText(ImVec2(min.x + ImGui::GetStyle().FramePadding.x,
-                                       min.y +
-                                           (max.y - min.y - ImGui::GetTextLineHeight()) *
-                                               0.5f),
-                                ImGui::GetColorU32(ImGuiCol_Text), str.name.c_str());
-                }
             }
             ImGui::Unindent(12.0f);
             ImGui::Spacing();
         }
-
-        ImGui::PopStyleColor(3);
         // Close on click outside both browser and player bar
         if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
             !ImGui::GetIO().WantCaptureMouse) {
@@ -784,7 +831,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
 
     }
     ImGui::End();
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(2);
 }
 
@@ -835,13 +882,6 @@ void wait_for_all_overlay_work() {
             log::warn("[overlay] timed out waiting for GPU overlay work to finish");
         }
     }
-}
-
-std::filesystem::path module_directory() {
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return {};
-    return std::filesystem::path{buf}.parent_path();
 }
 
 void load_overlay_font() {
@@ -1286,6 +1326,11 @@ static void cleanup_imgui_resources() {
         rtv_descriptor_heap->Release();
         rtv_descriptor_heap = nullptr;
     }
+    // Release the overlay's reference to the shared device.
+    // This device is the same COM object as the sandbox/game's dx.device
+    // (acquired via pSwapChain->GetDevice in hook_Present).  The sandbox's
+    // destroy_dx() still holds the final reference and will drop it to zero
+    // during host teardown — see sandbox_main.cpp cleanup step 7e.
     if (d3d12_device) {
         d3d12_device->Release();
         d3d12_device = nullptr;
@@ -1301,6 +1346,11 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
 
+        // Acquire a shared reference to the host's ID3D12Device via the
+        // swapchain.  GetDevice() AddRef's — this is the same COM object
+        // as the sandbox/game's dx.device pointer.  The overlay releases
+        // its reference in cleanup_imgui_resources(); the host drops the
+        // final reference in destroy_dx().
         if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), (void**)&d3d12_device)) &&
             d3d12_device) {
             if (init_imgui(pSwapChain, active_queue)) {
@@ -1408,30 +1458,6 @@ HRESULT __stdcall hook_ResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCoun
 }
 
 } // namespace
-
-// ── Public UI functions for the sandbox harness ──────────────────────────
-
-void init_ui(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
-             ConfigStore& store) noexcept {
-    g_mgr    = &mgr;
-    g_bridge = &bridge;
-    g_store  = &store;
-    show_player = true;
-    start_action_worker();
-    log::info("[overlay] init_ui (sandbox mode)");
-}
-
-void draw_imgui_ui() noexcept {
-    draw_imgui_ui_impl();
-}
-
-void shutdown_ui() noexcept {
-    stop_action_worker();
-    g_mgr    = nullptr;
-    g_bridge = nullptr;
-    g_store  = nullptr;
-    log::info("[overlay] shutdown_ui (sandbox mode)");
-}
 
 void set_flush_audio(std::function<void()> fn) noexcept {
     g_flush_audio_fn = std::move(fn);

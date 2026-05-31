@@ -25,9 +25,5 @@ template <class... Args>
 inline void error(std::format_string<Args...> fmt, Args&&... args) noexcept {
     emit(Level::error, std::format(fmt, std::forward<Args>(args)...));
 }
-template <class... Args>
-inline void trace(std::format_string<Args...> fmt, Args&&... args) noexcept {
-    emit(Level::trace, std::format(fmt, std::forward<Args>(args)...));
-}
 
 } // namespace frdx::log

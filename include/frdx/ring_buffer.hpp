@@ -15,7 +15,14 @@ public:
     // capacity_bytes is rounded up to the next power of 2 (minimum 4096).
     explicit RingBuffer(std::size_t capacity_bytes);
 
-    std::size_t capacity() const noexcept { return capacity_; }
+    // Non-copyable (unique_ptr) and non-movable — moving would change
+    // the addresses of the atomic read_pos_/write_pos_ that producer
+    // and consumer threads rely on.
+    RingBuffer(const RingBuffer&)            = delete;
+    RingBuffer& operator=(const RingBuffer&) = delete;
+    RingBuffer(RingBuffer&&)                 = delete;
+    RingBuffer& operator=(RingBuffer&&)      = delete;
+
     std::size_t readable() const noexcept;
     std::size_t writable() const noexcept;
 
@@ -28,11 +35,6 @@ public:
     // Discard everything currently in flight (advance read to write).
     void drain() noexcept;
 
-    // Hold mode: while engaged, reads return 0 even if there's data. Lets the
-    // producer keep filling without anything reaching the mixer.
-    void set_hold(bool on) noexcept { hold_.store(on, std::memory_order_release); }
-    bool held() const noexcept { return hold_.load(std::memory_order_acquire); }
-
 private:
     static std::size_t round_pow2(std::size_t n) noexcept;
 
@@ -41,7 +43,6 @@ private:
     std::size_t mask_;     // capacity_ - 1
     alignas(64) std::atomic<std::size_t> write_pos_{0};
     alignas(64) std::atomic<std::size_t> read_pos_{0};
-    alignas(64) std::atomic<bool> hold_{false};
 };
 
 } // namespace frdx

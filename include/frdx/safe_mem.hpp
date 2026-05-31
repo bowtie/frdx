@@ -20,7 +20,6 @@ enum class SafeMemError {
     not_readable,
     seh_exception,
     string_corrupt,
-    allocation_failed,
 };
 
 // True iff [addr, addr+size) lies in committed pages with read access and
@@ -67,7 +66,7 @@ inline std::optional<std::string> safe_read_msvc_string(const void* addr,
         return out;
     }
     if (hdr.size > 16) return std::nullopt;
-    return std::string(reinterpret_cast<const char*>(hdr.sbo), (std::size_t)hdr.size);
+    return std::string(reinterpret_cast<const char*>(hdr.sbo), static_cast<std::size_t>(hdr.size));
 }
 
 // Reads an MSVC std::string layout directly into a raw char buffer, avoiding

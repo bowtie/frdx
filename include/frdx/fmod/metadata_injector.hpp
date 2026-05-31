@@ -8,7 +8,7 @@
 
 namespace frdx::fmod_bridge {
 
-enum class MetadataInjectorError { no_target, write_failed, alloc_failed };
+enum class MetadataInjectorError { no_target, write_failed };
 
 // Overwrites the std::string slots the game reads to render the radio HUD,
 // so the active source's title/artist show up in-game instead of the
@@ -28,6 +28,16 @@ enum class MetadataInjectorError { no_target, write_failed, alloc_failed };
 // leak is one buffer per outgrown overwrite.
 class MetadataInjector {
 public:
+    MetadataInjector() = default;
+
+    // Non-copyable and non-movable — holds a raw pointer (body_) into
+    // the game's SampleProperties body, which is only valid in the
+    // context of the target process.
+    MetadataInjector(const MetadataInjector&)            = delete;
+    MetadataInjector& operator=(const MetadataInjector&) = delete;
+    MetadataInjector(MetadataInjector&&)                 = delete;
+    MetadataInjector& operator=(MetadataInjector&&)      = delete;
+
     void set_target(std::byte* sample_props_body) noexcept;
 
     // Drops the cached strings so the next call rewrites unconditionally.

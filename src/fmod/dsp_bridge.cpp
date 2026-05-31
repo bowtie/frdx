@@ -147,11 +147,6 @@ DSPBridge::~DSPBridge() {
     release_current_dsp_locked();
 }
 
-void DSPBridge::set_mode(DSPMode m) noexcept {
-    auto prev = mode_.exchange(m, std::memory_order_acq_rel);
-    if (prev != m) log::info("[dsp] mode {} -> {}", static_cast<int>(prev), static_cast<int>(m));
-}
-
 bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
     if (!handle) return false;
     void* inst          = nullptr;
@@ -294,6 +289,7 @@ void DSPBridge::retarget_if_needed() noexcept {
 // FMOD DSP read callback (mixer thread). Sources write 48 kHz S16 stereo
 // (miniaudio / ffmpeg resample upstream), which is FMOD's master rate, so
 // the callback is a straight int16 -> float conversion with gain.
+FRDX_NO_THREAD_SAFETY_ANALYSIS
 uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, float* out_buf,
                                             uint32_t length, int32_t /*in_channels*/,
                                             int32_t* out_channels) {
@@ -361,8 +357,16 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         for (uint32_t f = 0; f < got_frames; ++f) {
             const float fl = scratch[f * 2 + 0] * scale;
             const float fr = scratch[f * 2 + 1] * scale;
-            const float L  = soft_clip(fl);
-            const float R  = soft_clip(fr);
+
+            float L;
+            float R;
+            if (gain > 1.0f) {
+                L = soft_clip(fl);
+                R = soft_clip(fr);
+            } else {
+                L = fl;
+                R = fr;
+            }
 
             float* o = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
             if (out_ch == 1) {

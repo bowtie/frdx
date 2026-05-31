@@ -6,12 +6,17 @@ namespace frdx {
 AudioSourceManager::AudioSourceManager(std::size_t ring_bytes) : ring_{ring_bytes} {}
 
 void AudioSourceManager::set_source(IAudioSource* src) {
-    auto* prev = active_.load(std::memory_order_acquire);
-    if (prev == src) return;
+    // Atomically swap in nullptr and capture the previous source.
+    // This avoids the TOCTOU race that load-then-store would have.
+    auto* prev = active_.exchange(nullptr, std::memory_order_acq_rel);
+    if (prev == src) {
+        // No change needed — restore src if it was non-null.
+        if (src) active_.store(src, std::memory_order_release);
+        return;
+    }
 
-    // Null out the active source first so the DSP read callback sees silence
-    // while we tear down the old source and set up the new one.
-    active_.store(nullptr, std::memory_order_release);
+    // The DSP read callback now sees nullptr (silence) while we tear down
+    // the old source and set up the new one.
     if (prev) prev->pause();
     ring_.drain();
 
@@ -22,6 +27,16 @@ void AudioSourceManager::set_source(IAudioSource* src) {
     } else {
         log::info("[mgr] source deactivated");
     }
+}
+
+void AudioSourceManager::shutdown() {
+    auto* prev = active_.exchange(nullptr, std::memory_order_acq_rel);
+    if (!prev) return;
+
+    prev->pause();
+    ring_.drain();
+    prev->shutdown();
+    log::info("[mgr] source shut down");
 }
 
 void AudioSourceManager::pump_once() {

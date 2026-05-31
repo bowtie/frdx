@@ -21,7 +21,6 @@ constexpr std::string_view level_name(Level l) noexcept {
         case Level::warn: return "WARN";
         case Level::error: return "ERROR";
     }
-    return "?";
 }
 } // namespace
 

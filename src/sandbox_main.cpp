@@ -23,6 +23,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 
 // ─── WASAPI Audio Output ─────────────────────────────────────────────────
 // Reads PCM from the ring buffer and plays it through the default audio
@@ -73,6 +75,7 @@ public:
         if (FAILED(hr)) { frdx::log::warn("[wasapi] Initialize failed ({})", hr); CloseHandle(hEvent_); hEvent_ = nullptr; client_->Release(); client_ = nullptr; return false; }
 
         client_->GetBufferSize(&buffer_frames_);
+        tmp_buf_.resize(static_cast<std::size_t>(buffer_frames_) * 2);
         hr = client_->GetService(IID_PPV_ARGS(&render_));
         if (FAILED(hr)) { frdx::log::warn("[wasapi] GetService failed ({})", hr); CloseHandle(hEvent_); hEvent_ = nullptr; client_->Release(); client_ = nullptr; return false; }
 
@@ -106,10 +109,9 @@ public:
                     float g = bridge_->gain();
 
                     if (readable >= need) {
-                        std::vector<int16_t> tmp(avail * 2);
-                        ring.read(tmp.data(), need);
+                        ring.read(tmp_buf_.data(), need);
                         for (UINT32 i = 0; i < avail * 2; i++)
-                            out[i] = (tmp[i] / 32768.0f) * g;
+                            out[i] = (tmp_buf_[i] / 32768.0f) * g;
                         if (!logged_first) {
                             frdx::log::info("[wasapi] first audio: {} frames, gain={:.2f}, ring_readable={}",
                                             avail, g, readable);
@@ -151,6 +153,7 @@ private:
     frdx::AudioSourceManager* mgr_     = nullptr;
     frdx::fmod_bridge::DSPBridge* bridge_ = nullptr;
     std::jthread thread_;
+    std::vector<int16_t> tmp_buf_;
     IAudioClient* client_         = nullptr;
     IAudioRenderClient* render_   = nullptr;
     HANDLE hEvent_                = nullptr;
@@ -188,6 +191,10 @@ static void destroy_dx(DxContext& dx) {
     if (dx.swapchain) { dx.swapchain->Release(); dx.swapchain = nullptr; }
     if (dx.queue) { dx.queue->Release(); dx.queue = nullptr; }
     if (dx.device) { dx.device->Release(); dx.device = nullptr; }
+    // NOTE: dx.device is the same COM object as the overlay's d3d12_device
+    // (acquired via pSwapChain->GetDevice in hook_Present).  This Release()
+    // drops the final reference — the overlay must have already released its
+    // own reference via cleanup_imgui_resources() before we get here.
 }
 
 static bool init_dx(HWND hwnd, DxContext& dx) {
@@ -308,6 +315,313 @@ static std::filesystem::path resolve_path(const std::filesystem::path& relative)
     return from_exe; // return the exe-relative path even if missing (for logging)
 }
 
+// ─── Teardown guard (typestate-enforced cleanup order) ───────────────────
+//
+// The sandbox teardown must respect a strict dependency chain:
+//   Overlay → WASAPI → Source → DX12 context
+//
+// Each phase is a distinct type; transition methods are rvalue-qualified
+// so they consume the previous state.  You cannot skip a step or reorder
+// them — the compiler will reject any other sequence.
+//
+// Method bodies are defined out-of-line after all specializations so that
+// each phase's constructor is visible when the previous phase needs it.
+
+namespace {
+
+enum class TeardownPhase : uint8_t { Init, OverlayDown, WasapiDown, SourceDown };
+
+template <TeardownPhase P>
+class TeardownGuard;
+
+// ── Phase declarations ────────────────────────────────────────────────
+// Each phase holds the components it needs for its transition and exposes
+// exactly one transition method.  Components are shed as they are torn down.
+
+template <>
+class TeardownGuard<TeardownPhase::Init> {
+public:
+    TeardownGuard(DxContext& dx, UINT64 fence_val, WasapiOutput& wasapi,
+                  frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className,
+                  HINSTANCE hInst);
+    ~TeardownGuard() noexcept;
+
+    TeardownGuard(const TeardownGuard&)            = delete;
+    TeardownGuard& operator=(const TeardownGuard&) = delete;
+
+    [[nodiscard]] TeardownGuard<TeardownPhase::OverlayDown> shutdown_overlay() &&;
+
+private:
+    DxContext* dx_;
+    WasapiOutput* wasapi_;
+    frdx::AudioSourceManager* mgr_;
+    HWND hwnd_;
+    LPCWSTR className_;
+    HINSTANCE hInst_;
+    bool abandoned_ = true;
+};
+
+template <>
+class TeardownGuard<TeardownPhase::OverlayDown> {
+public:
+    TeardownGuard(DxContext& dx, WasapiOutput& wasapi,
+                  frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className,
+                  HINSTANCE hInst);
+    ~TeardownGuard() noexcept;
+
+    TeardownGuard(const TeardownGuard&)            = delete;
+    TeardownGuard& operator=(const TeardownGuard&) = delete;
+
+    [[nodiscard]] TeardownGuard<TeardownPhase::WasapiDown> stop_wasapi() &&;
+
+private:
+    DxContext* dx_;
+    WasapiOutput* wasapi_;
+    frdx::AudioSourceManager* mgr_;
+    HWND hwnd_;
+    LPCWSTR className_;
+    HINSTANCE hInst_;
+    bool abandoned_ = true;
+};
+
+template <>
+class TeardownGuard<TeardownPhase::WasapiDown> {
+public:
+    TeardownGuard(DxContext& dx, frdx::AudioSourceManager& mgr, HWND hwnd,
+                  LPCWSTR className, HINSTANCE hInst);
+    ~TeardownGuard() noexcept;
+
+    TeardownGuard(const TeardownGuard&)            = delete;
+    TeardownGuard& operator=(const TeardownGuard&) = delete;
+
+    [[nodiscard]] TeardownGuard<TeardownPhase::SourceDown> shutdown_source() &&;
+
+private:
+    DxContext* dx_;
+    frdx::AudioSourceManager* mgr_;
+    HWND hwnd_;
+    LPCWSTR className_;
+    HINSTANCE hInst_;
+    bool abandoned_ = true;
+};
+
+template <>
+class TeardownGuard<TeardownPhase::SourceDown> {
+public:
+    TeardownGuard(DxContext& dx, HWND hwnd, LPCWSTR className, HINSTANCE hInst);
+    ~TeardownGuard() noexcept;
+
+    TeardownGuard(const TeardownGuard&)            = delete;
+    TeardownGuard& operator=(const TeardownGuard&) = delete;
+
+    void destroy_dx_and_window() &&;
+
+private:
+    DxContext* dx_;
+    HWND hwnd_;
+    LPCWSTR className_;
+    HINSTANCE hInst_;
+    bool abandoned_ = true;
+};
+
+// ── Method definitions (all types are complete at this point) ─────────
+
+// Phase 1 → 2: Stop the overlay action worker + uninstall MinHook detours.
+// This must happen first: the action worker can mutate the source and ring
+// buffer, so it must be stopped before either is torn down.
+inline TeardownGuard<TeardownPhase::Init>::TeardownGuard(
+    DxContext& dx, UINT64 fence_val, WasapiOutput& wasapi,
+    frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className, HINSTANCE hInst)
+    : dx_(&dx), wasapi_(&wasapi), mgr_(&mgr), hwnd_(hwnd),
+      className_(className), hInst_(hInst) {
+    // Prevent WndProc from touching DX during teardown.
+    g_dx = nullptr;
+
+    // Drain the final frame before tearing anything down.
+    if (dx_->fence && dx_->fence->GetCompletedValue() < fence_val) {
+        dx_->fence->SetEventOnCompletion(fence_val, dx_->fence_evt);
+        WaitForSingleObject(dx_->fence_evt, INFINITE);
+    }
+}
+
+inline TeardownGuard<TeardownPhase::OverlayDown>
+TeardownGuard<TeardownPhase::Init>::shutdown_overlay() && {
+    frdx::dx12_overlay::shutdown();
+    abandoned_ = false;
+    return {*dx_, *wasapi_, *mgr_, hwnd_, className_, hInst_};
+}
+
+// Phase 2 → 3: Stop the WASAPI audio thread.  At this point the overlay
+// action worker is dead, so no new UI-triggered mutations can race with
+// the audio thread's final pump callbacks.
+inline TeardownGuard<TeardownPhase::OverlayDown>::TeardownGuard(
+    DxContext& dx, WasapiOutput& wasapi, frdx::AudioSourceManager& mgr,
+    HWND hwnd, LPCWSTR className, HINSTANCE hInst)
+    : dx_(&dx), wasapi_(&wasapi), mgr_(&mgr), hwnd_(hwnd),
+      className_(className), hInst_(hInst) {}
+
+inline TeardownGuard<TeardownPhase::WasapiDown>
+TeardownGuard<TeardownPhase::OverlayDown>::stop_wasapi() && {
+    wasapi_->stop();
+    abandoned_ = false;
+    return {*dx_, *mgr_, hwnd_, className_, hInst_};
+}
+
+// Phase 3 → 4: Deactivate the source and shut it down (kills ffmpeg, joins
+// metadata poller threads).  Both consumers (overlay + WASAPI) have already
+// released it, so this is safe.
+inline TeardownGuard<TeardownPhase::WasapiDown>::TeardownGuard(
+    DxContext& dx, frdx::AudioSourceManager& mgr, HWND hwnd,
+    LPCWSTR className, HINSTANCE hInst)
+    : dx_(&dx), mgr_(&mgr), hwnd_(hwnd), className_(className), hInst_(hInst) {}
+
+inline TeardownGuard<TeardownPhase::SourceDown>
+TeardownGuard<TeardownPhase::WasapiDown>::shutdown_source() && {
+    mgr_->shutdown();
+    abandoned_ = false;
+    return {*dx_, hwnd_, className_, hInst_};
+}
+
+// Phase 4 → done: Release the DX12 context.  Must happen after overlay
+// shutdown because the overlay acquired its device ref from the swapchain.
+// Also destroys the window and unregisters its class.
+inline TeardownGuard<TeardownPhase::SourceDown>::TeardownGuard(
+    DxContext& dx, HWND hwnd, LPCWSTR className, HINSTANCE hInst)
+    : dx_(&dx), hwnd_(hwnd), className_(className), hInst_(hInst) {}
+
+inline void TeardownGuard<TeardownPhase::SourceDown>::destroy_dx_and_window() && {
+    destroy_dx(*dx_);
+    DestroyWindow(hwnd_);
+    UnregisterClassW(className_, hInst_);
+    abandoned_ = false;
+}
+
+// Factory — constructs the initial phase and immediately performs the
+// pre-teardown steps (null g_dx, GPU fence wait).
+[[nodiscard]] inline TeardownGuard<TeardownPhase::Init> begin_teardown(
+    DxContext& dx, UINT64 fence_val, WasapiOutput& wasapi,
+    frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className,
+    HINSTANCE hInst) {
+    return {dx, fence_val, wasapi, mgr, hwnd, className, hInst};
+}
+
+// ── Destructors (exception safety: run remaining teardown if chain abandoned) ──
+//
+// abandoned_ is true until this phase's transition method completes successfully.
+// If the destructor fires with abandoned_ still true, the chain was abandoned
+// (exception, early scope exit, or discarded return value).  The destructor runs
+// all remaining teardown steps in dependency order.  Every teardown function is
+// idempotent, so double-calling (normal chain + destructor fallback) is safe.
+
+inline TeardownGuard<TeardownPhase::Init>::~TeardownGuard() noexcept {
+    if (!abandoned_) return;
+    try {
+        frdx::dx12_overlay::shutdown();
+        wasapi_->stop();
+        mgr_->shutdown();
+        destroy_dx(*dx_);
+        DestroyWindow(hwnd_);
+        UnregisterClassW(className_, hInst_);
+    } catch (...) {
+        // Suppress: destructors must not throw (especially during stack
+        // unwinding, where an escaping exception calls std::terminate).
+        // All teardown functions are idempotent — partial cleanup is safe.
+    }
+}
+
+inline TeardownGuard<TeardownPhase::OverlayDown>::~TeardownGuard() noexcept {
+    if (!abandoned_) return;
+    try {
+        wasapi_->stop();
+        mgr_->shutdown();
+        destroy_dx(*dx_);
+        DestroyWindow(hwnd_);
+        UnregisterClassW(className_, hInst_);
+    } catch (...) {
+    }
+}
+
+inline TeardownGuard<TeardownPhase::WasapiDown>::~TeardownGuard() noexcept {
+    if (!abandoned_) return;
+    try {
+        mgr_->shutdown();
+        destroy_dx(*dx_);
+        DestroyWindow(hwnd_);
+        UnregisterClassW(className_, hInst_);
+    } catch (...) {
+    }
+}
+
+inline TeardownGuard<TeardownPhase::SourceDown>::~TeardownGuard() noexcept {
+    if (!abandoned_) return;
+    try {
+        destroy_dx(*dx_);
+        DestroyWindow(hwnd_);
+        UnregisterClassW(className_, hInst_);
+    } catch (...) {
+    }
+}
+
+// ── Compile-time typestate verification ───────────────────────────────
+// SFINAE detectors prove each phase exposes exactly its own transition
+// method and nothing else.  If a future change accidentally adds or
+// removes a method, the static_assert below catches it at compile time.
+
+template <typename T, typename = void>
+struct has_shutdown_overlay : std::false_type {};
+template <typename T>
+struct has_shutdown_overlay<T,
+    std::void_t<decltype(std::declval<T&&>().shutdown_overlay())>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_stop_wasapi : std::false_type {};
+template <typename T>
+struct has_stop_wasapi<T,
+    std::void_t<decltype(std::declval<T&&>().stop_wasapi())>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_shutdown_source : std::false_type {};
+template <typename T>
+struct has_shutdown_source<T,
+    std::void_t<decltype(std::declval<T&&>().shutdown_source())>> : std::true_type {};
+
+template <typename T, typename = void>
+struct has_destroy_dx_and_window : std::false_type {};
+template <typename T>
+struct has_destroy_dx_and_window<T,
+    std::void_t<decltype(std::declval<T&&>().destroy_dx_and_window())>> : std::true_type {};
+
+using TGInit        = TeardownGuard<TeardownPhase::Init>;
+using TGOverlayDown = TeardownGuard<TeardownPhase::OverlayDown>;
+using TGWasapiDown  = TeardownGuard<TeardownPhase::WasapiDown>;
+using TGSourceDown  = TeardownGuard<TeardownPhase::SourceDown>;
+
+// Init: only shutdown_overlay
+static_assert( has_shutdown_overlay<TGInit>::value,        "Init must expose shutdown_overlay()");
+static_assert(!has_stop_wasapi<TGInit>::value,              "Init must NOT expose stop_wasapi()");
+static_assert(!has_shutdown_source<TGInit>::value,          "Init must NOT expose shutdown_source()");
+static_assert(!has_destroy_dx_and_window<TGInit>::value,    "Init must NOT expose destroy_dx_and_window()");
+
+// OverlayDown: only stop_wasapi
+static_assert(!has_shutdown_overlay<TGOverlayDown>::value,  "OverlayDown must NOT expose shutdown_overlay()");
+static_assert( has_stop_wasapi<TGOverlayDown>::value,       "OverlayDown must expose stop_wasapi()");
+static_assert(!has_shutdown_source<TGOverlayDown>::value,   "OverlayDown must NOT expose shutdown_source()");
+static_assert(!has_destroy_dx_and_window<TGOverlayDown>::value, "OverlayDown must NOT expose destroy_dx_and_window()");
+
+// WasapiDown: only shutdown_source
+static_assert(!has_shutdown_overlay<TGWasapiDown>::value,   "WasapiDown must NOT expose shutdown_overlay()");
+static_assert(!has_stop_wasapi<TGWasapiDown>::value,         "WasapiDown must NOT expose stop_wasapi()");
+static_assert( has_shutdown_source<TGWasapiDown>::value,     "WasapiDown must expose shutdown_source()");
+static_assert(!has_destroy_dx_and_window<TGWasapiDown>::value, "WasapiDown must NOT expose destroy_dx_and_window()");
+
+// SourceDown: only destroy_dx_and_window
+static_assert(!has_shutdown_overlay<TGSourceDown>::value,   "SourceDown must NOT expose shutdown_overlay()");
+static_assert(!has_stop_wasapi<TGSourceDown>::value,         "SourceDown must NOT expose stop_wasapi()");
+static_assert(!has_shutdown_source<TGSourceDown>::value,     "SourceDown must NOT expose shutdown_source()");
+static_assert( has_destroy_dx_and_window<TGSourceDown>::value, "SourceDown must expose destroy_dx_and_window()");
+
+} // namespace
+
 // ─── Entry point ─────────────────────────────────────────────────────────
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
@@ -394,8 +708,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // ── 3. Install overlay hooks ─────────────────────────────────────────
     if (!frdx::dx12_overlay::initialize(mgr, bridge, store)) {
         frdx::log::error("[sandbox] overlay initialize() failed");
-        mgr.set_source(nullptr);
-        src->shutdown();
+        mgr.shutdown();
         return 1;
     }
 
@@ -477,22 +790,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         dx.queue->Signal(dx.fence, dx.fence_val);
     }
 
-    // ── 7. Cleanup ───────────────────────────────────────────────────────
-    g_dx = nullptr;
-    wasapi.stop();
-    if (dx.fence && dx.fence->GetCompletedValue() < dx.fence_val) {
-        dx.fence->SetEventOnCompletion(dx.fence_val, dx.fence_evt);
-        WaitForSingleObject(dx.fence_evt, INFINITE);
-    }
-
-    frdx::dx12_overlay::shutdown();
-
-    mgr.set_source(nullptr);
-    src->shutdown();
-
-    destroy_dx(dx);
-    DestroyWindow(hwnd);
-    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    // ── 7. Teardown (order enforced at compile time by typestate guard) ──
+    // RAII guard: if this scope exits early (exception, early return) before
+    // the chain completes, the Init destructor runs all remaining steps via
+    // the abandoned_ flag.  Normal completion sets abandoned_ = false at
+    // each phase, so the destructors become no-ops.
+    auto teardown = begin_teardown(dx, dx.fence_val, wasapi, mgr, hwnd,
+                                   wc.lpszClassName, wc.hInstance);
+    std::move(teardown)
+        .shutdown_overlay()
+        .stop_wasapi()
+        .shutdown_source()
+        .destroy_dx_and_window();
 
     frdx::log::info("[sandbox] exiting");
     frdx::log::shutdown();

@@ -39,6 +39,7 @@ ControlLoop::~ControlLoop() {
     if (thread_.joinable()) thread_.join();
 }
 
+FRDX_NO_THREAD_SAFETY_ANALYSIS
 void ControlLoop::run(const std::stop_token& tok) {
     log::info("[ctrl] control loop started");
 
@@ -160,6 +161,7 @@ const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc) c
     return target ? target : fallback;
 }
 
+FRDX_NO_THREAD_SAFETY_ANALYSIS
 void ControlLoop::push_metadata() noexcept {
     auto* a = bridge_.manager().active();
     if (!a) {

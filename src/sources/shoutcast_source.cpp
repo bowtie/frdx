@@ -11,10 +11,23 @@
 #include <chrono>
 #include <cstdint>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
+
+// The Clang thread-safety analyzer doesn't understand std::jthread boundaries
+// and traces lock state from restart_metadata_for_current() (which acquires mu_)
+// through the jthread lambda into run_icy_poller(), producing 14 false-positive
+// warnings.  Neither [[clang::no_thread_safety_analysis]] nor #pragma clang
+// diagnostic wrapping the function definitions suppresses the CFG-based
+// analysis when lock state is inherited via inter-procedural inlining.
+// File-level suppression is the only reliable mechanism.
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wthread-safety"
+#pragma clang diagnostic ignored "-Wthread-safety-analysis"
+#endif
 
 namespace frdx::sources {
 
@@ -40,41 +53,6 @@ std::wstring resolve_ffmpeg_path(const std::filesystem::path& configured) {
     }
     // Fall back to PATH lookup.
     return L"ffmpeg";
-}
-
-// Resolve a dot-notation JSON path (e.g. "data.track_title") to a value in a nlohmann::json tree.
-// Returns the value if found, otherwise an empty string.
-std::string resolve_json_path(const json& root, const std::string& dot_path) {
-    if (dot_path.empty()) return {};
-    const json* node = &root;
-    std::size_t pos  = 0;
-    while (pos < dot_path.size()) {
-        auto dot = dot_path.find('.', pos);
-        auto key =
-            (dot == std::string::npos) ? dot_path.substr(pos) : dot_path.substr(pos, dot - pos);
-        if (key.empty()) return {};
-        // Support array index: "results.0.title" -> key is "0" inside array
-        if (node->is_array()) {
-            try {
-                auto idx = static_cast<std::size_t>(std::stoul(key));
-                if (idx >= node->size()) return {};
-                node = &(*node)[idx];
-            } catch (...) {
-                return {};
-            }
-        } else if (node->is_object()) {
-            auto it = node->find(key);
-            if (it == node->end()) return {};
-            node = &*it;
-        } else {
-            return {};
-        }
-        pos = (dot == std::string::npos) ? dot_path.size() : dot + 1;
-    }
-    if (node->is_string()) return node->get<std::string>();
-    if (node->is_number_integer()) return std::to_string(node->get<int64_t>());
-    if (node->is_number_float()) return std::to_string(node->get<double>());
-    return node->dump();
 }
 
 // Resolve a JSON path to a const json* node (returns nullptr if not found).
@@ -106,6 +84,18 @@ const json* resolve_json_node(const json& root, const std::string& dot_path) {
         pos = (dot == std::string::npos) ? dot_path.size() : dot + 1;
     }
     return node;
+}
+
+// Resolve a dot-notation JSON path (e.g. "data.track_title") to a value in a nlohmann::json tree.
+// Returns the value if found, otherwise an empty string.
+std::string resolve_json_path(const json& root, const std::string& dot_path) {
+    if (dot_path.empty()) return {};
+    const json* node = resolve_json_node(root, dot_path);
+    if (!node) return {};
+    if (node->is_string()) return node->get<std::string>();
+    if (node->is_number_integer()) return std::to_string(node->get<int64_t>());
+    if (node->is_number_float()) return std::to_string(node->get<double>());
+    return node->dump();
 }
 
 // Apply enhanced mapping to resolve a single field from JSON.
@@ -186,7 +176,6 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
             const auto& m                  = j["metadata"];
             sp.metadata.type               = m.value("type", "");
             sp.metadata.url                = m.value("url", "");
-            sp.metadata.poll_interval_secs = m.value("poll_interval_secs", 20);
             if (m.contains("mapping")) {
                 const auto& mp                         = m["mapping"];
                 sp.metadata.mapping.title              = mp.value("title", "");
@@ -198,16 +187,6 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
             if (m.contains("stream_url_map") && m["stream_url_map"].is_object()) {
                 for (auto it = m["stream_url_map"].begin(); it != m["stream_url_map"].end(); ++it)
                     sp.metadata.stream_url_map[it.key()] = it.value().get<std::string>();
-            }
-            if (m.contains("stream_name_map") && m["stream_name_map"].is_object()) {
-                for (auto it = m["stream_name_map"].begin(); it != m["stream_name_map"].end(); ++it)
-                    sp.metadata.stream_name_map[it.key()] = it.value().get<std::string>();
-            }
-            if (m.contains("entry_selector")) {
-                const auto& es                              = m["entry_selector"];
-                sp.metadata.entry_selector.array_path       = es.value("array_path", "");
-                sp.metadata.entry_selector.match_field      = es.value("match_field", "");
-                sp.metadata.entry_selector.match_value_from = es.value("match_value_from", "");
             }
             // Static metadata (type == "static").
             sp.metadata.static_title  = m.value("title", "");
@@ -242,8 +221,115 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
     return out;
 }
 
-// Apply entry_selector + mapping to a parsed JSON body.
-// Returns {title, artist} — either may be empty.
+// RAII wrapper for HINTERNET handles — auto-closes via WinHttpCloseHandle.
+class ScopedWinHttp {
+public:
+    ScopedWinHttp() = default;
+    explicit ScopedWinHttp(HINTERNET h) : h_(h) {}
+    ~ScopedWinHttp() { close(); }
+
+    ScopedWinHttp(const ScopedWinHttp&) = delete;
+    ScopedWinHttp& operator=(const ScopedWinHttp&) = delete;
+    ScopedWinHttp(ScopedWinHttp&& o) noexcept : h_(o.h_) { o.h_ = nullptr; }
+    ScopedWinHttp& operator=(ScopedWinHttp&& o) noexcept {
+        if (this != &o) { close(); h_ = o.h_; o.h_ = nullptr; }
+        return *this;
+    }
+
+    void close() {
+        if (h_) { WinHttpCloseHandle(h_); h_ = nullptr; }
+    }
+    HINTERNET get() const { return h_; }
+    HINTERNET release() { HINTERNET h = h_; h_ = nullptr; return h; }
+    explicit operator bool() const { return h_ != nullptr; }
+
+private:
+    HINTERNET h_ = nullptr;
+};
+
+// Parsed WinHTTP URL components — handles ws:///wss:// → http/https substitution.
+struct ParsedUrl {
+    std::wstring wurl;
+    URL_COMPONENTS uc{};
+    wchar_t host[256]{};
+    wchar_t path[2048]{};
+    bool is_ssl = false;
+    INTERNET_PORT port = 80;
+
+    static std::optional<ParsedUrl> parse(const std::string& url) {
+        ParsedUrl p;
+        std::string tmp = url;
+        auto ws_pos      = tmp.find("://");
+        if (ws_pos != std::string::npos) {
+            std::string scheme = tmp.substr(0, ws_pos);
+            if (scheme == "wss")
+                tmp.replace(0, 3, "https");
+            else if (scheme == "ws")
+                tmp.replace(0, 2, "http");
+        }
+        p.wurl             = frdx::subprocess::widen(tmp);
+        p.uc.dwStructSize  = sizeof(p.uc);
+        p.uc.lpszHostName  = p.host;
+        p.uc.dwHostNameLength = 255;
+        p.uc.lpszUrlPath      = p.path;
+        p.uc.dwUrlPathLength  = 2047;
+        if (!WinHttpCrackUrl(p.wurl.c_str(), 0, 0, &p.uc)) return std::nullopt;
+        p.is_ssl = (p.uc.nScheme == INTERNET_SCHEME_HTTPS);
+        p.port   = p.uc.nPort ? static_cast<INTERNET_PORT>(p.uc.nPort)
+                              : (p.is_ssl ? 443 : 80);
+        return p;
+    }
+};
+
+// Shared WinHTTP connection setup — RAII-wrapped connect + request.
+struct WinHttpConn {
+    ScopedWinHttp request;
+    ScopedWinHttp connect;
+    ScopedWinHttp localSession;
+    explicit operator bool() const { return request.get() != nullptr; }
+};
+
+WinHttpConn winhttp_connect(void* shared_session, const ParsedUrl& parsed) {
+    WinHttpConn conn;
+    HINTERNET hSession =
+        shared_session ? static_cast<HINTERNET>(shared_session) : nullptr;
+
+    if (!hSession) {
+        hSession = WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) {
+            log::warn("[shoutcast] WinHttpOpen failed ({})", GetLastError());
+            return conn;
+        }
+        conn.localSession = ScopedWinHttp(hSession);
+        DWORD to_ms = 5000;
+        WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &to_ms, sizeof(to_ms));
+        WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &to_ms, sizeof(to_ms));
+        WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &to_ms, sizeof(to_ms));
+    }
+
+    conn.connect = ScopedWinHttp(
+        WinHttpConnect(hSession, parsed.host, parsed.port, 0));
+    if (!conn.connect) {
+        log::warn("[shoutcast] WinHttpConnect failed ({})", GetLastError());
+        return conn;
+    }
+
+    conn.request = ScopedWinHttp(WinHttpOpenRequest(
+        conn.connect.get(), L"GET", parsed.path, nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, parsed.is_ssl ? WINHTTP_FLAG_SECURE : 0));
+    if (!conn.request) {
+        log::warn("[shoutcast] WinHttpOpenRequest failed ({})", GetLastError());
+        return conn;
+    }
+
+    DWORD sec = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+    WinHttpSetOption(conn.request.get(), WINHTTP_OPTION_SECURITY_FLAGS, &sec, sizeof(sec));
+
+    return conn;
+}
+
 } // namespace
 
 // Replace CJK brackets that don't render in-game with ASCII [].
@@ -309,7 +395,7 @@ ShoutcastSource::~ShoutcastSource() {
 bool ShoutcastSource::initialize() {
     if (!cfg_.enabled) return false;
     if (!cfg_.default_url.empty()) {
-        std::scoped_lock lk{mu_};
+        frdx::ScopedLock lk{mu_};
         target_url_ = cfg_.default_url;
     }
 
@@ -336,7 +422,7 @@ void ShoutcastSource::shutdown() noexcept {
     stop_icy_poller();
     stop_metadata_poller();
     {
-        std::scoped_lock lk{mu_};
+        frdx::ScopedLock lk{mu_};
         stop_pipe_locked();
     }
     if (winhttp_session_) {
@@ -345,23 +431,15 @@ void ShoutcastSource::shutdown() noexcept {
     }
 }
 
-void ShoutcastSource::set_target(std::string url) {
-    std::scoped_lock lk{mu_};
-    target_url_ = std::move(url);
-    active_station_id_.clear();
-    active_stream_id_.clear();
-}
-
-void ShoutcastSource::set_presets(std::vector<std::string> presets) {
-    std::scoped_lock lk{mu_};
-    cfg_.presets = std::move(presets);
-    preset_idx_  = 0;
-}
-
 void ShoutcastSource::load_stations(const std::filesystem::path& path) {
     auto loaded = parse_stations_json(path);
-    std::scoped_lock lk{mu_};
+    frdx::ScopedLock lk{mu_};
     stations_ = std::move(loaded);
+    // Rebuild flat preset cache for cycle_preset().
+    flat_presets_.clear();
+    for (std::size_t i = 0; i < stations_.size(); ++i)
+        for (std::size_t j = 0; j < stations_[i].streams.size(); ++j)
+            flat_presets_.emplace_back(i, j);
     log::info("[shoutcast] {} station(s) available", stations_.size());
 }
 
@@ -450,7 +528,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     TrackInfo static_info;
     bool has_static = false;
     {
-        std::scoped_lock lk{mu_};
+        frdx::ScopedLock lk{mu_};
 
         const StationPreset* station = nullptr;
         const StationStream* stream  = nullptr;
@@ -520,7 +598,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     // Phase 3: install pipe and set metadata under lock.
     bool has_pipe = false;
     {
-        std::scoped_lock lk{mu_};
+        frdx::ScopedLock lk{mu_};
         // Only install if we're still on the same station (not changed during launch).
         if (active_station_id_ == station_id && active_stream_id_ == stream_id) {
             if (new_pipe) {
@@ -562,34 +640,22 @@ void ShoutcastSource::cycle_preset(int direction) {
         direction = -1;
     }
 
-    if (!stations_.empty()) {
-        // Build a flat list of (station_idx, stream_idx) pairs for all streams
-        // across all stations, so next/back cycles through every stream.
-        struct Entry {
-            std::size_t st_idx;
-            std::size_t str_idx;
-        };
-        std::vector<Entry> flat;
-        for (std::size_t i = 0; i < stations_.size(); ++i)
-            for (std::size_t j = 0; j < stations_[i].streams.size(); ++j) flat.push_back({i, j});
-
-        if (flat.empty()) return;
-
-        // Find the current (station_id, stream_id) in the flat list.
+    if (!flat_presets_.empty()) {
+        // Find the current (station_id, stream_id) in the cached flat list.
         std::size_t cur = 0;
-        for (; cur < flat.size(); ++cur) {
-            const auto& st  = stations_[flat[cur].st_idx];
-            const auto& str = st.streams[flat[cur].str_idx];
+        for (; cur < flat_presets_.size(); ++cur) {
+            const auto& st  = stations_[flat_presets_[cur].first];
+            const auto& str = st.streams[flat_presets_[cur].second];
             if (st.id == active_station_id_ && str.id == active_stream_id_) break;
         }
         // If not found (e.g. no station selected yet), start at index 0
         // for forward, last for backward.
-        if (cur >= flat.size()) cur = (direction > 0) ? flat.size() - 1 : 0;
+        if (cur >= flat_presets_.size()) cur = (direction > 0) ? flat_presets_.size() - 1 : 0;
 
         // Advance/retreat by 1, wrapping around.
-        std::size_t next    = (cur + flat.size() + direction) % flat.size();
-        const auto& new_st  = stations_[flat[next].st_idx];
-        const auto& new_str = new_st.streams[flat[next].str_idx];
+        std::size_t next    = (cur + flat_presets_.size() + direction) % flat_presets_.size();
+        const auto& new_st  = stations_[flat_presets_[next].first];
+        const auto& new_str = new_st.streams[flat_presets_[next].second];
 
         target_url_        = new_str.url;
         active_station_id_ = new_st.id;
@@ -658,7 +724,7 @@ void ShoutcastSource::stop_pipe_locked() {
 void ShoutcastSource::play() {
     bool has_pipe = false;
     {
-        std::scoped_lock lk{mu_};
+        frdx::ScopedLock lk{mu_};
         if (!pipe_) start_pipe_locked();
         has_pipe = (pipe_ != nullptr);
     } // mu_ released before poller restart to avoid deadlock
@@ -674,7 +740,7 @@ void ShoutcastSource::pause() {
     stop_icy_poller();
     stop_metadata_poller();
     {
-        std::scoped_lock lk{mu_};
+        frdx::ScopedLock lk{mu_};
         stop_pipe_locked();
         info_         = TrackInfo{};
         info_.artist  = "Nothing playing";
@@ -684,11 +750,11 @@ void ShoutcastSource::pause() {
     state_.store(PlaybackState::paused, std::memory_order_release);
 }
 
-void ShoutcastSource::next() {
+void ShoutcastSource::cycle_and_restart(int direction) {
     bool has_pipe = false;
     {
-        std::scoped_lock lk{mu_};
-        cycle_preset(1);
+        frdx::ScopedLock lk{mu_};
+        cycle_preset(direction);
         start_pipe_locked();
         // Handle static metadata from new station.
         for (const auto& st : stations_) {
@@ -710,34 +776,12 @@ void ShoutcastSource::next() {
     }
 }
 
-void ShoutcastSource::previous() {
-    bool has_pipe = false;
-    {
-        std::scoped_lock lk{mu_};
-        cycle_preset(-1);
-        start_pipe_locked();
-        // Handle static metadata from new station.
-        for (const auto& st : stations_) {
-            if (st.id == active_station_id_) {
-                if (st.metadata.type == "static") {
-                    info_.title =
-                        st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
-                    info_.artist = st.metadata.static_artist;
-                    info_gen_.fetch_add(1, std::memory_order_release);
-                }
-                break;
-            }
-        }
-        has_pipe = (pipe_ != nullptr);
-    } // mu_ released before poller stop/start
-    restart_metadata_for_current();
-    if (has_pipe) {
-        state_.store(PlaybackState::playing, std::memory_order_release);
-    }
-}
+void ShoutcastSource::next() { cycle_and_restart(1); }
+
+void ShoutcastSource::previous() { cycle_and_restart(-1); }
 
 TrackInfo ShoutcastSource::current_track() const {
-    std::scoped_lock lk{mu_};
+    frdx::ScopedLock lk{mu_};
     TrackInfo t   = info_;
     t.position_ms = position_ms_.load(std::memory_order_acquire);
     return t;
@@ -758,7 +802,7 @@ void ShoutcastSource::restart_metadata_for_current() {
     // 1. Stop any existing ICY poller before checking state.
     stop_icy_poller();
 
-    std::unique_lock lk{mu_};
+    frdx::UniqueLock lk{mu_};
 
     // ---- Legacy preset mode (no station selected, raw URL only) ----
     if (active_station_id_.empty()) {
@@ -766,8 +810,8 @@ void ShoutcastSource::restart_metadata_for_current() {
         lk.unlock();
         if (!legacy_url.empty()) {
             icy_poller_thread_ = std::jthread(
-                [this, stream_url = std::move(legacy_url)](const std::stop_token& stop) {
-                    run_icy_poller(stream_url, stop);
+                [this, url = std::move(legacy_url)](const std::stop_token& stop) {
+                    run_icy_poller(url, stop);
                 });
         }
         return;
@@ -818,9 +862,9 @@ void ShoutcastSource::restart_metadata_for_current() {
 
     // 2. Start ICY poller for non-WS, non-static stations.
     if (!stream_url.empty() && md_type != "websocket" && md_type != "static") {
-        icy_poller_thread_ =
-            std::jthread([this, stream_url = std::move(stream_url)](const std::stop_token& stop) {
-                run_icy_poller(stream_url, stop);
+        icy_poller_thread_ = std::jthread(
+            [this, url = std::move(stream_url)](const std::stop_token& stop) {
+                run_icy_poller(url, stop);
             });
     }
 
@@ -839,113 +883,34 @@ void ShoutcastSource::restart_metadata_for_current() {
                                          filter = std::move(ws_filter),
                                          hb =
                                              std::move(ws_heartbeat)](const std::stop_token& stop) {
+            auto parsed = ParsedUrl::parse(url);
+            if (!parsed) {
+                log::warn("[shoutcast] ws: failed to parse URL '{}'", url);
+                return;
+            }
             while (!stop.stop_requested()) {
-                // ---- Parse the WebSocket URL ----
-                // WinHttpCrackUrl doesn't recognise the wss:// scheme, so
-                // substitute https:// (the actual WebSocket upgrade is handled
-                // by WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET regardless).
-                std::string ws_url = url;
-                auto ws_pos        = ws_url.find("://");
-                if (ws_pos != std::string::npos) {
-                    std::string scheme = ws_url.substr(0, ws_pos);
-                    if (scheme == "wss") {
-                        ws_url.replace(0, 3, "https");
-                    } else if (scheme == "ws") {
-                        ws_url.replace(0, 2, "http");
-                    }
-                }
-                std::wstring wurl = frdx::subprocess::widen(ws_url);
-                bool is_ssl       = false;
-                URL_COMPONENTS uc{};
-                uc.dwStructSize = sizeof(uc);
 
-                wchar_t host[256]   = {};
-                wchar_t path[1024]  = {};
-                uc.lpszHostName     = host;
-                uc.dwHostNameLength = 255;
-                uc.lpszUrlPath      = path;
-                uc.dwUrlPathLength  = 1023;
-
-                if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
-                    log::warn("[shoutcast] ws: failed to parse URL '{}'", url);
-                    break;
-                }
-
-                is_ssl     = (uc.nScheme == INTERNET_SCHEME_HTTPS);
-                DWORD port = uc.nPort ? uc.nPort : (is_ssl ? 443 : 80);
-
-                HINTERNET hSession =
-                    winhttp_session_ ? static_cast<HINTERNET>(winhttp_session_) : nullptr;
-                bool local_session = false;
-                if (!hSession) {
-                    hSession = WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-                    if (!hSession) {
-                        log::warn("[shoutcast] ws: WinHttpOpen failed ({})", GetLastError());
-                        std::this_thread::sleep_for(std::chrono::seconds(5));
-                        continue;
-                    }
-                    local_session = true;
-                }
-
-                if (local_session) {
-                    DWORD to_ms = 5000;
-                    WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &to_ms, sizeof(to_ms));
-                    WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &to_ms, sizeof(to_ms));
-                    WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &to_ms, sizeof(to_ms));
-                }
-
-                HINTERNET hConnect =
-                    WinHttpConnect(hSession, host, static_cast<INTERNET_PORT>(port), 0);
-                if (!hConnect) {
-                    log::warn("[shoutcast] ws: WinHttpConnect failed ({})", GetLastError());
-                    if (local_session) WinHttpCloseHandle(hSession);
+                auto conn = winhttp_connect(winhttp_session_, *parsed);
+                if (!conn) {
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
-
-                HINTERNET hRequest = WinHttpOpenRequest(
-                    hConnect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-                    WINHTTP_DEFAULT_ACCEPT_TYPES, is_ssl ? WINHTTP_FLAG_SECURE : 0);
-                if (!hRequest) {
-                    log::warn("[shoutcast] ws: WinHttpOpenRequest failed ({})", GetLastError());
-                    WinHttpCloseHandle(hConnect);
-                    if (local_session) WinHttpCloseHandle(hSession);
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    continue;
-                }
-
-                // Ignore SSL certificate errors (same as REST poller).
-                {
-                    DWORD sec = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                                SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                                SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-                    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &sec, sizeof(sec));
-                }
+                HINTERNET hRequest = conn.request.get();
 
                 if (!WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
                     log::warn("[shoutcast] ws: upgrade failed ({})", GetLastError());
-                    WinHttpCloseHandle(hRequest);
-                    WinHttpCloseHandle(hConnect);
-                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
 
                 if (!WinHttpSendRequest(hRequest, nullptr, 0, nullptr, 0, 0, 0)) {
                     log::warn("[shoutcast] ws: SendRequest failed ({})", GetLastError());
-                    WinHttpCloseHandle(hRequest);
-                    WinHttpCloseHandle(hConnect);
-                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
 
                 if (!WinHttpReceiveResponse(hRequest, nullptr)) {
                     log::warn("[shoutcast] ws: ReceiveResponse failed ({})", GetLastError());
-                    WinHttpCloseHandle(hRequest);
-                    WinHttpCloseHandle(hConnect);
-                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
@@ -953,15 +918,17 @@ void ShoutcastSource::restart_metadata_for_current() {
                 HINTERNET hWebSocket = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
                 if (!hWebSocket) {
                     log::warn("[shoutcast] ws: upgrade complete failed ({})", GetLastError());
-                    WinHttpCloseHandle(hRequest);
-                    WinHttpCloseHandle(hConnect);
-                    if (local_session) WinHttpCloseHandle(hSession);
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     continue;
                 }
+                // Release the request handle from RAII — it has been upgraded to
+                // a WebSocket handle (hWebSocket, closed manually below). The connect
+                // handle stays in ScopedWinHttp and auto-closes when conn goes out of
+                // scope at the end of this loop iteration.
+                (void)conn.request.release();
 
                 {
-                    std::scoped_lock lk{ws_mu_};
+                    frdx::ScopedLock lk{ws_mu_};
                     ws_handle_ = hWebSocket;
                 }
                 log::info("[shoutcast] ws: connected to {}", url);
@@ -1075,7 +1042,7 @@ void ShoutcastSource::restart_metadata_for_current() {
                     bool icy_active = (last_icy > 0);
 
                     if (!title.empty() || !artist.empty()) {
-                        std::scoped_lock lk{mu_};
+                        frdx::ScopedLock lk{mu_};
                         // Skip write if a new station was selected while
                         // we were processing — stop is requested early in
                         // select_station() via stop_metadata_poller().
@@ -1093,7 +1060,7 @@ void ShoutcastSource::restart_metadata_for_current() {
 
                 // Cleanup connection.
                 {
-                    std::scoped_lock lk{ws_mu_};
+                    frdx::ScopedLock lk{ws_mu_};
                     if (ws_handle_ == hWebSocket) ws_handle_ = nullptr;
                 }
                 if (!stop.stop_requested()) {
@@ -1101,8 +1068,8 @@ void ShoutcastSource::restart_metadata_for_current() {
                                           nullptr, 0);
                 }
                 WinHttpCloseHandle(hWebSocket);
-                WinHttpCloseHandle(hConnect);
-                if (local_session) WinHttpCloseHandle(hSession);
+                // conn.connect auto-closed by ScopedWinHttp when conn exits scope;
+                // conn.localSession likewise auto-closed on scope exit.
 
                 if (stop.stop_requested()) break;
                 std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -1117,7 +1084,7 @@ void ShoutcastSource::stop_metadata_poller() {
     // Only send the close frame — do NOT WinHttpCloseHandle here; the thread
     // owns the handle and will close it in its cleanup path.
     {
-        std::scoped_lock lk{ws_mu_};
+        frdx::ScopedLock lk{ws_mu_};
         if (ws_handle_) {
             WinHttpWebSocketClose(ws_handle_, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
             ws_handle_ = nullptr;
@@ -1160,59 +1127,19 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    auto parsed = ParsedUrl::parse(stream_url);
+    if (!parsed) {
+        log::warn("[shoutcast] icy: failed to parse URL '{}'", stream_url);
+        return;
+    }
+
     while (!stop.stop_requested()) {
-        std::wstring wurl = frdx::subprocess::widen(stream_url);
-
-        URL_COMPONENTS uc{};
-        uc.dwStructSize = sizeof(uc);
-        wchar_t host[256]  = {};
-        wchar_t path[2048] = {};
-        uc.lpszHostName     = host;
-        uc.dwHostNameLength = 255;
-        uc.lpszUrlPath      = path;
-        uc.dwUrlPathLength  = 2047;
-
-        if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-            continue;
-        }
-
-        bool is_ssl        = (uc.nScheme == INTERNET_SCHEME_HTTPS);
-        INTERNET_PORT port = uc.nPort ? uc.nPort : (is_ssl ? 443 : 80);
-
-        HINTERNET hSession =
-            winhttp_session_ ? static_cast<HINTERNET>(winhttp_session_) : nullptr;
-        bool local_session = false;
-        if (!hSession) {
-            hSession = WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                   WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-            if (!hSession) {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-            local_session = true;
-        }
-
-        HINTERNET hConnect = WinHttpConnect(hSession, host, port, 0);
-        if (!hConnect) {
-            if (local_session) WinHttpCloseHandle(hSession);
+        auto conn = winhttp_connect(winhttp_session_, *parsed);
+        if (!conn) {
             std::this_thread::sleep_for(std::chrono::seconds(5));
             continue;
         }
-
-        HINTERNET hRequest =
-            WinHttpOpenRequest(hConnect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-                               WINHTTP_DEFAULT_ACCEPT_TYPES, is_ssl ? WINHTTP_FLAG_SECURE : 0);
-        if (!hRequest) {
-            WinHttpCloseHandle(hConnect);
-            if (local_session) WinHttpCloseHandle(hSession);
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-
-        DWORD sec = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &sec, sizeof(sec));
+        HINTERNET hRequest = conn.request.get();
 
         // Inject headers via AddRequestHeaders with REPLACE to override any
         // WinHTTP session-level defaults (e.g. User-Agent).
@@ -1223,17 +1150,11 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
 
         if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            WinHttpCloseHandle(hRequest);
-            WinHttpCloseHandle(hConnect);
-            if (local_session) WinHttpCloseHandle(hSession);
             std::this_thread::sleep_for(std::chrono::seconds(5));
             continue;
         }
 
         if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-            WinHttpCloseHandle(hRequest);
-            WinHttpCloseHandle(hConnect);
-            if (local_session) WinHttpCloseHandle(hSession);
             std::this_thread::sleep_for(std::chrono::seconds(5));
             continue;
         }
@@ -1283,9 +1204,6 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
         if (metaint <= 0) {
             log::warn("[shoutcast] icy: server did not provide icy-metaint for '{}'",
                       stream_url);
-            WinHttpCloseHandle(hRequest);
-            WinHttpCloseHandle(hConnect);
-            if (local_session) WinHttpCloseHandle(hSession);
             break; // No ICY support — do not retry
         }
 
@@ -1377,7 +1295,7 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
 
             auto dash = val.find(" - ");
             {
-                std::scoped_lock lk{mu_};
+                frdx::ScopedLock lk{mu_};
                 if (!stop.stop_requested()) {
                     if (dash != std::string::npos) {
                         info_.artist = val.substr(0, dash);
@@ -1401,15 +1319,15 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
             }
         }
 
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        if (local_session) WinHttpCloseHandle(hSession);
-
         if (!stop.stop_requested()) {
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
     }
 }
+
+// ---- spawn_icy_poller ----
+
+
 
 // ---- PCM pump ----
 
@@ -1424,7 +1342,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     HANDLE read_pipe = nullptr;
     bool ended = false;
     {
-        std::unique_lock lk{mu_};
+        frdx::UniqueLock lk{mu_};
         p = pipe_.get();
         if (!p) return;
         stderr_pipe = p->stderr_pipe;
@@ -1448,7 +1366,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             if (!PeekNamedPipe(stderr_pipe, nullptr, 0, nullptr, &eavail, nullptr)) {
                 CloseHandle(stderr_pipe);
                 {
-                    std::unique_lock lk{mu_};
+                    frdx::UniqueLock lk{mu_};
                     if (p && pipe_.get() == p) p->stderr_pipe = nullptr;
                 }
                 break;
@@ -1459,18 +1377,18 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             if (!ReadFile(stderr_pipe, ebuf, sizeof(ebuf) - 1, &egot, nullptr) || egot == 0) {
                 CloseHandle(stderr_pipe);
                 {
-                    std::unique_lock lk{mu_};
+                    frdx::UniqueLock lk{mu_};
                     if (p && pipe_.get() == p) p->stderr_pipe = nullptr;
                 }
                 break;
             }
             {
-                std::unique_lock lk{mu_};
+                frdx::UniqueLock lk{mu_};
                 if (p && pipe_.get() == p) p->stderr_buf.append(ebuf, egot);
             }
             std::string local_buf;
             {
-                std::unique_lock lk{mu_};
+                frdx::UniqueLock lk{mu_};
                 if (p && pipe_.get() == p) {
                     if (p->stderr_buf.size() > 65536)
                         p->stderr_buf.erase(0, p->stderr_buf.size() - 32768);
@@ -1497,7 +1415,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     if (ended) {
         update_position();
         if (ring.readable() == 0) {
-            std::unique_lock lk{mu_};
+            frdx::UniqueLock lk{mu_};
             if (reconnect_attempts_ < 3) {
                 reconnect_attempts_++;
                 log::info("[shoutcast] stream disconnected; attempting reconnect {}/3",
@@ -1543,7 +1461,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     if (!read_pipe) return;
 
     auto on_eof = [&] {
-        std::unique_lock lk{mu_};
+        frdx::UniqueLock lk{mu_};
         if (p && pipe_.get() == p) {
             if (p->bytes_written == 0) {
                 log::warn("[shoutcast] stream produced 0 bytes; stopping");
@@ -1582,12 +1500,12 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             return;
         }
         if (got > 0) {
-            std::unique_lock lk{mu_};
+            frdx::UniqueLock lk{mu_};
             if (reconnect_attempts_ > 0) reconnect_attempts_ = 0;
         }
         ring.write(reinterpret_cast<std::byte*>(buf), got);
         {
-            std::unique_lock lk{mu_};
+            frdx::UniqueLock lk{mu_};
             if (p && pipe_.get() == p) p->bytes_written += got;
         }
         update_position();

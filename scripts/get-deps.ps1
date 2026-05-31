@@ -66,11 +66,26 @@ foreach ($file in $minhook_files) {
 
 # ── ImGui Animated ────────────────────────────────────────────────────────
 Write-Host "-> ImGui Animated" -ForegroundColor Green
+$ia_cpp = Join-Path $tp "imgui-animated/imgui_animated.cpp"
+$ia_h   = Join-Path $tp "imgui-animated/imgui_animated.h"
 Fetch-File `
     "https://raw.githubusercontent.com/interception-team/imgui-animated/master/src/imgui_animated.h" `
-    (Join-Path $tp "imgui-animated/imgui_animated.h")
+    $ia_h
 Fetch-File `
     "https://raw.githubusercontent.com/interception-team/imgui-animated/master/src/imgui_animated.cpp" `
-    (Join-Path $tp "imgui-animated/imgui_animated.cpp")
+    $ia_cpp
+
+# Patch for Dear ImGui v1.92.9 compatibility:
+#   1) g.LastItemData.InFlags -> g.LastItemData.ItemFlags  (field renamed)
+#   2) Remove vestigial ImGuiButtonFlags_Repeat propagation (handled internally)
+#   3) Slower scroll animation: 60 -> 30 px/s
+Write-Host "  ~ patching imgui_animated.cpp for v1.92.9 compat" -ForegroundColor Yellow
+$patch = Get-Content -Raw $ia_cpp
+# Replace the old InFlags/ButtonFlags_Repeat block with a comment
+$patch = $patch -replace [regex]::Escape("`tif (g.LastItemData.InFlags & ImGuiItemFlags_ButtonRepeat)`r`n`t`tflags |= ImGuiButtonFlags_Repeat;") `
+    , "`t// Note: modern imgui (v1.92.9) handles ButtonRepeat internally`r`n`t// via g.LastItemData.ItemFlags inside ButtonBehavior."
+# Slow scroll speed from 60 -> 30 px/s
+$patch = $patch -replace 'g\.Time \* 60\.f', 'g.Time * 30.f'
+[System.IO.File]::WriteAllText($ia_cpp, $patch)
 
 Write-Host "`nAll dependencies fetched into $tp." -ForegroundColor Green

@@ -9,11 +9,20 @@
 
 namespace frdx::fmod_bridge {
 
-enum class ProbeError { not_resolved, radio_state_read_failed, setter_unavailable };
+enum class ProbeError { not_resolved, radio_state_read_failed };
 
 class GameStateProbe {
 public:
+    GameStateProbe() = default;
     explicit GameStateProbe(const PEImage& img) noexcept;
+
+    // Non-copyable and non-movable — holds raw pointers into the game
+    // process (singleton_slot_, set_station_fn_) that are meaningful
+    // only in the context of the original target image.
+    GameStateProbe(const GameStateProbe&)            = delete;
+    GameStateProbe& operator=(const GameStateProbe&) = delete;
+    GameStateProbe(GameStateProbe&&)                 = delete;
+    GameStateProbe& operator=(GameStateProbe&&)      = delete;
 
     bool resolved() const noexcept { return singleton_slot_ != nullptr; }
 

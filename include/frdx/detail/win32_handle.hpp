@@ -16,15 +16,6 @@ namespace frdx::detail {
 // Used for pipes, files, jobs, processes, threads, etc.
 using unique_handle = wil::unique_handle;
 
-// HLOCAL handle, auto-freed via LocalFree.
-// Used for FormatMessage-allocated buffers and similar.
-using unique_hlocal = wil::unique_hlocal;
-
-// WinHTTP HINTERNET handle, auto-closed via WinHttpCloseHandle.
-// Used for both plain HTTP requests and WebSocket connections.
-using unique_hinternet =
-    wil::unique_any<HINTERNET, decltype(&WinHttpCloseHandle), WinHttpCloseHandle>;
-
 // VirtualAlloc-allocated memory, auto-freed via VirtualFree(MEM_RELEASE).
 // Used for temporary allocations (e.g. swapping buffers into foreign heaps)
 // that must be freed through VirtualFree rather than the C++ free().

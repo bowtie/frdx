@@ -16,7 +16,6 @@ RingBuffer::RingBuffer(std::size_t capacity_bytes)
       capacity_{round_pow2(capacity_bytes)}, mask_{capacity_ - 1} {}
 
 std::size_t RingBuffer::readable() const noexcept {
-    if (hold_.load(std::memory_order_acquire)) return 0;
     return write_pos_.load(std::memory_order_acquire) - read_pos_.load(std::memory_order_acquire);
 }
 
@@ -43,7 +42,6 @@ std::size_t RingBuffer::write(const void* src, std::size_t n) noexcept {
 
 std::size_t RingBuffer::read(void* dst, std::size_t n) noexcept {
     if (!dst || n == 0) return 0;
-    if (hold_.load(std::memory_order_acquire)) return 0;
 
     const auto r     = read_pos_.load(std::memory_order_relaxed);
     const auto w     = write_pos_.load(std::memory_order_acquire);
