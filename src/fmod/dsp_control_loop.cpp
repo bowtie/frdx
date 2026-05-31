@@ -95,7 +95,7 @@ void ControlLoop::run(const std::stop_token& tok) {
                     if (now - last_retune_ >= kRetuneCooldown &&
                         game_state_.retune_streamer_station()) {
                         last_retune_ = now;
-                        (void)acquire_target();
+                        [[maybe_unused]] auto _acq = acquire_target();
                     }
                 }
             }
@@ -128,9 +128,10 @@ std::expected<void, ControlLoopError> ControlLoop::acquire_target() noexcept {
     auto disc                   = discover_radio_instances(img_);
     const RadioInstance* chosen = select_instance(disc);
     if (!chosen) return std::unexpected{ControlLoopError::discover_failed};
-    if (chosen->sound_name != kTargetSoundName)
+    if (chosen->sound_name != kTargetSoundName) {
         log::warn(R"([ctrl] no instance matches target "{}"; falling back to "{}")",
                   kTargetSoundName, chosen->sound_name);
+    }
 
     void* fmod_system = resolve_fmod_system(img_, chosen->radio_stream);
     if (!fmod_system) {
@@ -148,7 +149,7 @@ std::expected<void, ControlLoopError> ControlLoop::acquire_target() noexcept {
 const RadioInstance* ControlLoop::select_instance(const DiscoveryResult& disc) const noexcept {
     const RadioInstance* target   = nullptr; // first placeholder-named match, any handle state
     const RadioInstance* fallback = nullptr; // first instance of any name
-    for (auto& i : disc.instances) {
+    for (const auto& i : disc.instances) {
         const bool is_target = i.sound_name == kTargetSoundName;
         // Prefer the instance whose channel is actually live so we attach
         // to the stream carrying audio (not an idle secondary mix).
@@ -163,7 +164,7 @@ FRDX_NO_THREAD_SAFETY_ANALYSIS
 void ControlLoop::push_metadata() noexcept {
     auto* a = bridge_.manager().active();
     if (!a) {
-        (void)meta_.update("Forza Radio DX", "Idle");
+        [[maybe_unused]] auto _meta = meta_.update("Forza Radio DX", "Idle");
         return;
     }
     TrackInfo info;
@@ -176,10 +177,10 @@ void ControlLoop::push_metadata() noexcept {
     std::string artist = info.artist;
     if (artist.empty()) {
         // No state labels — just show the title/station name.
-        (void)meta_.update(title, "");
+        [[maybe_unused]] auto _meta = meta_.update(title, "");
         return;
     }
-    (void)meta_.update(title, artist);
+    [[maybe_unused]] auto _meta = meta_.update(title, artist);
 }
 
 } // namespace frdx::fmod_bridge

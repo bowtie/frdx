@@ -110,9 +110,19 @@ public:
     }
 
     std::string_view name() const noexcept override { return "shoutcast"; }
+    FRDX_NO_THREAD_SAFETY_ANALYSIS
     std::string display_name() const override FRDX_EXCLUDES(mu_) {
+        thread_local uint64_t cached_gen = 0;
+        thread_local std::string cached_name;
+        const uint64_t gen = display_name_gen_.load(std::memory_order_acquire);
+        if (gen == cached_gen) [[likely]] {
+            return cached_name;
+        }
+        // Generation changed — re-read under lock.
         frdx::ScopedLock lk{mu_};
-        return display_name_;
+        cached_name = display_name_;
+        cached_gen  = display_name_gen_.load(std::memory_order_relaxed);
+        return cached_name;
     }
 
     bool initialize() override FRDX_EXCLUDES(mu_);
@@ -127,6 +137,7 @@ public:
     // Set the stream URL and restart playback.
     // Station preset management.
     void load_stations(const std::filesystem::path& path) FRDX_EXCLUDES(mu_);
+    FRDX_NO_THREAD_SAFETY_ANALYSIS
     std::vector<StationPreset> stations() const FRDX_EXCLUDES(mu_) {
         frdx::ScopedLock lk{mu_};
         return stations_;
@@ -157,10 +168,10 @@ private:
     void stop_icy_poller();               // join ICY metadata thread
     void run_icy_poller(const std::string& stream_url,
                         const std::stop_token& stop); // ICY metadata loop body
-    void run_ws_poller(std::string url, StationMetadataMapping mapping,
-                       StationMetadataWebSocketFilter filter,
+    void run_ws_poller(std::string url, const StationMetadataMapping& mapping,
+                       const StationMetadataWebSocketFilter& filter,
                        StationMetadataWebSocketHeartbeat hb,
-                       std::stop_token stop); // WebSocket metadata loop body
+                       const std::stop_token& stop); // WebSocket metadata loop body
 
     // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
     static std::expected<std::unique_ptr<Pipe>, ShoutcastError>
@@ -182,6 +193,9 @@ private:
 
     // Dynamic display name (includes station name when active).
     std::string display_name_ FRDX_GUARDED_BY(mu_){"Online Radio"};
+    // Atomic generation counter bumped whenever display_name_ changes under mu_.
+    // display_name() uses this + a thread_local cache to avoid locking mu_ on every call.
+    mutable std::atomic<uint64_t> display_name_gen_{1};
 
     // Station presets.
     std::vector<StationPreset> stations_ FRDX_GUARDED_BY(mu_);

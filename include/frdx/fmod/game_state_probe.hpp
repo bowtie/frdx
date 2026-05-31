@@ -24,15 +24,6 @@ public:
     GameStateProbe(GameStateProbe&&)                 = delete;
     GameStateProbe& operator=(GameStateProbe&&)      = delete;
 
-    bool resolved() const noexcept { return singleton_slot_ != nullptr; }
-
-    struct Snapshot {
-        bool on_target_station = false;
-        bool race_active       = false;
-        bool race_restart      = false;
-    };
-    Snapshot read() const noexcept;
-
     // Toggle the in-game station off and back on. The game only allocates a
     // fresh radio FMOD channel on a station change, so this is the only way
     // back once it has torn the old one down. Blocks ~300 ms.

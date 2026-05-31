@@ -71,7 +71,7 @@ private:
     // to express the GUARDED_BY / REQUIRES / EXCLUDES contract.  Writers
     // conceptually "acquire" this via exchange(acq_rel); readers 
     // conceptually "acquire-shared" via load(acquire).
-    mutable std::mutex active_mu_;
+    mutable frdx::Mutex active_mu_;
 };
 
 } // namespace frdx

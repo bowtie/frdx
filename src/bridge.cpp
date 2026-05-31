@@ -20,10 +20,6 @@
 
 namespace frdx {
 
-namespace {
-
-} // namespace
-
 FRDX_NO_THREAD_SAFETY_ANALYSIS
 void run_bridge(HMODULE self) noexcept {
     const auto dir      = module_directory(self);
@@ -66,7 +62,7 @@ void run_bridge(HMODULE self) noexcept {
         } else {
             if (shoutcast) {
                 mgr.shutdown();
-                (void)shoutcast.release(); // mgr already shut it down
+                [[maybe_unused]] auto* _rel = shoutcast.release(); // mgr already shut it down
             }
         }
     };

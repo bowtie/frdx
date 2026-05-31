@@ -29,16 +29,7 @@ constexpr const char* kSetStationPattern =
 // kTargetStation1 ("Streamer Mode") re-engages the station carrying our DSP.
 constexpr const char* kStationOff = "StationOff";
 
-// Offsets within *radio_state.
-constexpr std::ptrdiff_t kRaceRunningA   = 0x68;
-constexpr std::ptrdiff_t kRaceRunningB   = 0x69;
-constexpr std::ptrdiff_t kRaceRestartDw  = 0x80;
-
-constexpr std::ptrdiff_t kStationChain1Off = 0x40;
-constexpr std::ptrdiff_t kStationChain2Off = 0x50;
-constexpr std::ptrdiff_t kStationNameOff   = 0x200;
 constexpr const char* kTargetStation1 = "Streamer Mode";
-constexpr const char* kTargetStation2 = "Universal Radio";
 
 } // namespace
 
@@ -46,12 +37,13 @@ GameStateProbe::GameStateProbe(const PEImage& img) noexcept {
     auto set_stn_result = find_by_pattern(img, kSetStationPattern);
     set_station_fn_ =
         set_stn_result ? reinterpret_cast<SetStationFn>(*set_stn_result) : nullptr;
-    if (set_station_fn_)
+    if (set_station_fn_) {
         log::info("[gstate] station setter @ RVA 0x{:X}",
                   static_cast<uint32_t>(reinterpret_cast<std::byte*>(set_station_fn_) - img.base));
-    else
+    } else {
         log::warn("[gstate] station setter pattern not found -- "
                   "stall recovery (radio off/on) will be unavailable");
+    }
 
     auto match_result = find_by_pattern(img, kProloguePattern);
     if (!match_result) {
@@ -74,35 +66,6 @@ GameStateProbe::GameStateProbe(const PEImage& img) noexcept {
               static_cast<uint32_t>(reinterpret_cast<const std::byte*>(slot) - img.base));
 }
 
-GameStateProbe::Snapshot GameStateProbe::read() const noexcept {
-    Snapshot out{};
-    if (!singleton_slot_) return out;
-
-    // Re-deref every tick: FH6 reallocates the radio_state across world
-    // loads, so the slot's value isn't stable.
-    const std::byte* radio_state = nullptr;
-    if (!safe_read(singleton_slot_, radio_state) || !radio_state) return out;
-
-    uint8_t a = 0, b = 0;
-    int32_t restart = 0;
-    if (safe_read(radio_state + kRaceRunningA, a) &&
-        safe_read(radio_state + kRaceRunningB, b))
-        out.race_active = a != 0 && b != 0;
-    if (safe_read(radio_state + kRaceRestartDw, restart))
-        out.race_restart = restart == -1;
-
-    // Walk to the station-name std::string. Every link can be re-allocated
-    // by FH6 (world load, scene swap) so we deref through each step.
-    const std::byte* chain1 = nullptr;
-    const std::byte* chain2 = nullptr;
-    if (safe_read(radio_state + kStationChain1Off, chain1) && chain1 &&
-        safe_read(chain1 + kStationChain2Off, chain2) && chain2) {
-        if (auto name = safe_read_msvc_string(chain2 + kStationNameOff))
-            out.on_target_station = (*name == kTargetStation1) || (*name == kTargetStation2);
-    }
-    return out;
-}
-
 void GameStateProbe::set_station(const std::byte* radio_state,
                                  std::string_view name) const noexcept {
     // The setter reads the name as an MSVC std::string by const-ref. We build
@@ -118,7 +81,7 @@ void GameStateProbe::set_station(const std::byte* radio_state,
     s.size   = n;
     s.cap    = sizeof(s.buf) - 1;
     auto* fn = set_station_fn_;
-    (void)seh_call([&] { fn(const_cast<std::byte*>(radio_state), &s); });
+    [[maybe_unused]] auto _gr = seh_call([&] { fn(const_cast<std::byte*>(radio_state), &s); });
 }
 
 std::expected<void, ProbeError> GameStateProbe::retune_streamer_station() noexcept {

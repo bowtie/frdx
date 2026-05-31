@@ -88,6 +88,14 @@ public:
             // WASAPI COM objects require COM initialization on the calling thread
             CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+            // RAII COM initializer — ensures CoUninitialize is called on any exit path.
+            struct ComGuard {
+                ComGuard()  { CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
+                ~ComGuard() { CoUninitialize(); }
+                ComGuard(const ComGuard&) = delete;
+                ComGuard& operator=(const ComGuard&) = delete;
+            } com_guard;
+
             bool logged_first = false;
             while (!stop.stop_requested()) {
                 DWORD wait = WaitForSingleObject(hEvent_, 1000);
@@ -105,13 +113,14 @@ public:
                     auto& ring = mgr_->ring();
                     const std::size_t need = static_cast<std::size_t>(avail) * 2 * sizeof(int16_t);
                     const std::size_t readable = ring.readable();
-                    float* out = reinterpret_cast<float*>(data);
-                    float g = bridge_->gain();
+                    auto* out                  = reinterpret_cast<float*>(data);
+                    const float g     = bridge_->gain();
+                    const float scale = g * (1.0f / 32768.0f);
 
                     if (readable >= need) {
                         ring.read(tmp_buf_.data(), need);
                         for (UINT32 i = 0; i < avail * 2; i++)
-                            out[i] = (tmp_buf_[i] / 32768.0f) * g;
+                            out[i] = tmp_buf_[i] * scale;
                         if (!logged_first) {
                             frdx::log::info("[wasapi] first audio: {} frames, gain={:.2f}, ring_readable={}",
                                             avail, g, readable);
@@ -123,8 +132,6 @@ public:
                     render_->ReleaseBuffer(avail, 0);
                 }
             }
-
-            CoUninitialize();
         });
         return true;
     }
@@ -179,8 +186,12 @@ struct DxContext {
 static void destroy_dx(DxContext& dx) {
     if (dx.fence) { dx.fence->Release(); dx.fence = nullptr; }
     if (dx.fence_evt) { CloseHandle(dx.fence_evt); dx.fence_evt = nullptr; }
-    for (UINT i = 0; i < DxContext::kBufferCount; ++i)
-        if (dx.backbuffers[i]) { dx.backbuffers[i]->Release(); dx.backbuffers[i] = nullptr; }
+    for (auto& backbuffer : dx.backbuffers) {
+        if (backbuffer) {
+            backbuffer->Release();
+            backbuffer = nullptr;
+        }
+    }
     if (dx.cmd) { dx.cmd->Release(); dx.cmd = nullptr; }
     if (dx.alloc) { dx.alloc->Release(); dx.alloc = nullptr; }
     if (dx.rtv_heap) { dx.rtv_heap->Release(); dx.rtv_heap = nullptr; }
@@ -269,10 +280,17 @@ static LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             // Wait for GPU idle before resizing
             if (g_dx->fence && g_dx->fence->GetCompletedValue() < g_dx->fence_val) {
                 g_dx->fence->SetEventOnCompletion(g_dx->fence_val, g_dx->fence_evt);
-                WaitForSingleObject(g_dx->fence_evt, INFINITE);
+                DWORD wr = WaitForSingleObject(g_dx->fence_evt, 2000);
+                if (wr != WAIT_OBJECT_0) {
+                    frdx::log::warn("[sandbox] WM_SIZE fence wait timed out");
+                }
             }
-            for (UINT i = 0; i < DxContext::kBufferCount; ++i)
-                if (g_dx->backbuffers[i]) { g_dx->backbuffers[i]->Release(); g_dx->backbuffers[i] = nullptr; }
+            for (auto& backbuffer : g_dx->backbuffers) {
+                if (backbuffer) {
+                    backbuffer->Release();
+                    backbuffer = nullptr;
+                }
+            }
             // The overlay's ResizeBuffers hook fires here and cleans up ImGui resources.
             g_dx->swapchain->ResizeBuffers(DxContext::kBufferCount, w, h,
                                             DXGI_FORMAT_R8G8B8A8_UNORM, 0);
@@ -749,7 +767,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
         if (dx.fence->GetCompletedValue() < dx.fence_val) {
             dx.fence->SetEventOnCompletion(dx.fence_val, dx.fence_evt);
-            WaitForSingleObject(dx.fence_evt, INFINITE);
+            DWORD wr = WaitForSingleObject(dx.fence_evt, 2000);
+            if (wr != WAIT_OBJECT_0) {
+                frdx::log::warn("[sandbox] render loop fence wait timed out");
+            }
         }
 
         UINT bb = dx.swapchain->GetCurrentBackBufferIndex();

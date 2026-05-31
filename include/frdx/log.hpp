@@ -7,7 +7,7 @@
 
 namespace frdx::log {
 
-enum class Level { trace, info, warn, error };
+enum class Level { info, warn, error };
 
 void init(const std::filesystem::path& log_file) noexcept;
 void shutdown() noexcept;

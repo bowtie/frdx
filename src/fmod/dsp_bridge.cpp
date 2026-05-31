@@ -160,7 +160,7 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
         return false;
     }
     if (fns_.handle_unlock && lock_state) {
-        (void)seh_call([&] { fns_.handle_unlock(lock_state); });
+        [[maybe_unused]] auto _unlock_result = seh_call([&] { fns_.handle_unlock(lock_state); });
     }
     if (rc != 0) {
         if (last_bad_handle_ != handle) {
@@ -339,6 +339,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     // misconfigured config.toml could push gain above 1 -- clamp defensively.
     constexpr float kAmp = 1.0f / 32768.0f;
     const float scale    = gain * kAmp;
+    const bool  do_clip  = gain > 1.0f;
 
     // Pull the ring in chunks: one ring.read() per chunk amortises the
     // ring's two atomic loads over many frames. 1024 frames = 4 KiB stack,
@@ -352,26 +353,31 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         const std::size_t got      = ring.read(scratch, want_frames * 4);
         const auto got_frames      = static_cast<uint32_t>(got / 4);
 
-        for (uint32_t f = 0; f < got_frames; ++f) {
-            const float fl = scratch[f * 2 + 0] * scale;
-            const float fr = scratch[f * 2 + 1] * scale;
-
-            float L;
-            float R;
-            if (gain > 1.0f) {
-                L = soft_clip(fl);
-                R = soft_clip(fr);
-            } else {
-                L = fl;
-                R = fr;
+        if (do_clip) {
+            for (uint32_t f = 0; f < got_frames; ++f) {
+                const float fl = scratch[f * 2 + 0] * scale;
+                const float fr = scratch[f * 2 + 1] * scale;
+                const float L  = soft_clip(fl);
+                const float R  = soft_clip(fr);
+                float* o = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
+                if (out_ch == 1) {
+                    o[0] = (L + R) * 0.5f;
+                } else {
+                    o[0] = L;
+                    o[1] = R;
+                }
             }
-
-            float* o = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
-            if (out_ch == 1) {
-                o[0] = (L + R) * 0.5f;
-            } else {
-                o[0] = L;
-                o[1] = R;
+        } else {
+            for (uint32_t f = 0; f < got_frames; ++f) {
+                const float L = scratch[f * 2 + 0] * scale;
+                const float R = scratch[f * 2 + 1] * scale;
+                float* o = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
+                if (out_ch == 1) {
+                    o[0] = (L + R) * 0.5f;
+                } else {
+                    o[0] = L;
+                    o[1] = R;
+                }
             }
         }
 

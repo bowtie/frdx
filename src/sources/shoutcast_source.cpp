@@ -13,6 +13,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
@@ -57,38 +58,40 @@ std::wstring resolve_ffmpeg_path(const std::filesystem::path& configured) {
 
 // Resolve a JSON path to a const json* node (returns nullptr if not found).
 // Supports both object traversal and array indexing.
-const json* resolve_json_node(const json& root, const std::string& dot_path) {
+// Accepts string_view to avoid heap-allocated key copies.
+const json* resolve_json_node(const json& root, std::string_view dot_path) {
     if (dot_path.empty()) return &root;
     const json* node = &root;
     std::size_t pos  = 0;
     while (pos < dot_path.size()) {
         auto dot = dot_path.find('.', pos);
-        auto key =
-            (dot == std::string::npos) ? dot_path.substr(pos) : dot_path.substr(pos, dot - pos);
-        if (key.empty()) return nullptr;
+        auto key_sv = (dot == std::string_view::npos)
+                          ? dot_path.substr(pos)
+                          : dot_path.substr(pos, dot - pos);
+        if (key_sv.empty()) return nullptr;
         if (node->is_array()) {
             try {
-                auto idx = static_cast<std::size_t>(std::stoul(key));
+                auto idx = static_cast<std::size_t>(std::stoul(std::string{key_sv}));
                 if (idx >= node->size()) return nullptr;
                 node = &(*node)[idx];
             } catch (...) {
                 return nullptr;
             }
         } else if (node->is_object()) {
-            auto it = node->find(key);
+            auto it = node->find(key_sv);
             if (it == node->end()) return nullptr;
             node = &*it;
         } else {
             return nullptr;
         }
-        pos = (dot == std::string::npos) ? dot_path.size() : dot + 1;
+        pos = (dot == std::string_view::npos) ? dot_path.size() : dot + 1;
     }
     return node;
 }
 
 // Resolve a dot-notation JSON path (e.g. "data.track_title") to a value in a nlohmann::json tree.
 // Returns the value if found, otherwise an empty string.
-std::string resolve_json_path(const json& root, const std::string& dot_path) {
+std::string resolve_json_path(const json& root, std::string_view dot_path) {
     if (dot_path.empty()) return {};
     const json* node = resolve_json_node(root, dot_path);
     if (!node) return {};
@@ -262,10 +265,11 @@ struct ParsedUrl {
         auto ws_pos      = tmp.find("://");
         if (ws_pos != std::string::npos) {
             std::string scheme = tmp.substr(0, ws_pos);
-            if (scheme == "wss")
+            if (scheme == "wss") {
                 tmp.replace(0, 3, "https");
-            else if (scheme == "ws")
+            } else if (scheme == "ws") {
                 tmp.replace(0, 2, "http");
+            }
         }
         p.wurl             = frdx::subprocess::widen(tmp);
         p.uc.dwStructSize  = sizeof(p.uc);
@@ -275,8 +279,7 @@ struct ParsedUrl {
         p.uc.dwUrlPathLength  = 2047;
         if (!WinHttpCrackUrl(p.wurl.c_str(), 0, 0, &p.uc)) return std::nullopt;
         p.is_ssl = (p.uc.nScheme == INTERNET_SCHEME_HTTPS);
-        p.port   = p.uc.nPort ? static_cast<INTERNET_PORT>(p.uc.nPort)
-                              : (p.is_ssl ? 443 : 80);
+        p.port   = p.uc.nPort ? p.uc.nPort : (p.is_ssl ? 443 : 80);
         return p;
     }
 };
@@ -339,23 +342,42 @@ WinHttpConn winhttp_connect(void* shared_session, const ParsedUrl& parsed) {
 // Double angle:    \xE3\x80\x8A / \xE3\x80\x8B
 // Square brackets: \xE3\x80\x90 / \xE3\x80\x91
 std::string sanitize_brackets(std::string s) {
-    // Opening brackets → [, closing brackets → ]
-    static constexpr struct {
-        const char* bytes;
-        char replace;
-    } kReplace[] = {
-        {"\xE3\x80\x8C", '['}, // 「
-        {"\xE3\x80\x8D", ']'}, // 」
-        {"\xE3\x80\x8A", '['}, // 《
-        {"\xE3\x80\x8B", ']'}, // 》
-        {"\xE3\x80\x90", '['}, // 【
-        {"\xE3\x80\x91", ']'}, // 】
-    };
-    for (const auto& rep : kReplace) {
-        for (auto pos = s.find(rep.bytes); pos != std::string::npos;
-             pos      = s.find(rep.bytes, pos + 1))
-            s.replace(pos, 3, 1, rep.replace);
+    // Single-pass character-by-character scan using a small UTF-8 state
+    // machine. Replaces CJK bracket codepoints (3 bytes each) with ASCII
+    // [] in one traversal instead of 6 separate find/replace passes.
+    //
+    // Mapping: U+300C/U+300A/U+3010 → '['  (「, 《, 【)
+    //          U+300D/U+300B/U+3011 → ']'  (」, 》 , 】)
+    auto*       dst  = s.data();
+    const auto* src  = s.data();
+    const auto* end  = src + s.size();
+    // Thread-local lookup table indexed by the first byte of a 3-byte UTF-8
+    // CJK sequence.  Initialized once with 0 for non-matching first bytes.
+    static thread_local char cjk_replace[256] = {};
+    if (cjk_replace[0x8C] == 0) {
+        cjk_replace[0x8C] = '[';  // U+300C 「
+        cjk_replace[0x8D] = ']';  // U+300D 」
+        cjk_replace[0x8A] = '[';  // U+300A 《
+        cjk_replace[0x8B] = ']';  // U+300B 》
+        cjk_replace[0x90] = '[';  // U+3010 【
+        cjk_replace[0x91] = ']';  // U+3011 】
     }
+
+    while (src < end) {
+        const auto c = static_cast<unsigned char>(*src);
+        if (c == 0xE3 && src + 3 <= end) {
+            // Potential 3-byte CJK bracket
+            const auto b2 = static_cast<unsigned char>(*(src + 1));
+            const char r  = cjk_replace[b2];
+            if (r != 0) {
+                *dst++ = r;
+                src   += 3;
+                continue;
+            }
+        }
+        *dst++ = *src++;
+    }
+    s.resize(static_cast<std::size_t>(dst - s.data()));
     return s;
 }
 
@@ -369,6 +391,7 @@ struct ShoutcastSource::Pipe {
     std::string stderr_buf;
     std::uint64_t bytes_written = 0;
     bool ended                  = false;
+    bool stderr_empty           = false;
 
     ~Pipe() {
         if (read_pipe) CloseHandle(read_pipe);
@@ -427,7 +450,7 @@ void ShoutcastSource::shutdown() noexcept {
         stop_pipe_locked();
     }
     if (winhttp_session_) {
-        ScopedWinHttp(static_cast<HINTERNET>(winhttp_session_));
+        ScopedWinHttp give_me_a_name(static_cast<HINTERNET>(winhttp_session_));
         winhttp_session_ = nullptr;
     }
 }
@@ -438,9 +461,10 @@ void ShoutcastSource::load_stations(const std::filesystem::path& path) {
     stations_ = std::move(loaded);
     // Rebuild flat preset cache for cycle_preset().
     flat_presets_.clear();
-    for (std::size_t i = 0; i < stations_.size(); ++i)
+    for (std::size_t i = 0; i < stations_.size(); ++i) {
         for (std::size_t j = 0; j < stations_[i].streams.size(); ++j)
             flat_presets_.emplace_back(i, j);
+    }
     log::info("[shoutcast] {} station(s) available", stations_.size());
 }
 
@@ -617,6 +641,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
             }
             info_gen_.fetch_add(1, std::memory_order_release);
             display_name_ = station_name;
+            display_name_gen_.fetch_add(1, std::memory_order_release);
             position_ms_.store(0, std::memory_order_release);
             state_.store(PlaybackState::buffering, std::memory_order_release);
         }
@@ -686,6 +711,7 @@ void ShoutcastSource::start_pipe_locked() {
     info_.artist  = "Select a station";
     info_gen_.fetch_add(1, std::memory_order_release);
     display_name_ = "Online Radio";
+    display_name_gen_.fetch_add(1, std::memory_order_release);
     if (target_url_.empty()) return;
 
     // Delegate the heavy pipe creation to the shared static helper.
@@ -702,6 +728,7 @@ void ShoutcastSource::start_pipe_locked() {
             if (st.id == active_station_id_) {
                 info_.title   = st.name;
                 display_name_ = st.name;
+                display_name_gen_.fetch_add(1, std::memory_order_release);
                 for (const auto& str : st.streams) {
                     if (str.id == active_stream_id_) {
                         info_.artist = str.name;
@@ -749,6 +776,7 @@ void ShoutcastSource::pause() {
         info_.artist  = "Nothing playing";
         info_gen_.fetch_add(1, std::memory_order_release);
         display_name_ = "Online Radio";
+        display_name_gen_.fetch_add(1, std::memory_order_release);
     }
     state_.store(PlaybackState::paused, std::memory_order_release);
 }
@@ -882,22 +910,18 @@ void ShoutcastSource::restart_metadata_for_current() {
 
     // ---- WebSocket metadata poller ----
     if (md_type == "websocket") {
-        metadata_thread_ = std::jthread([this, url = std::move(url),
-                                         mapping = std::move(mapping),
-                                         filter = std::move(ws_filter),
-                                         hb = std::move(ws_heartbeat)](
-                                            const std::stop_token& stop) {
-            run_ws_poller(std::move(url), std::move(mapping), std::move(filter),
-                          std::move(hb), stop);
-        });
+        metadata_thread_ = std::jthread(
+            [this, url = std::move(url), mapping = std::move(mapping),
+             filter = std::move(ws_filter), hb = std::move(ws_heartbeat)](
+                const std::stop_token& stop) { run_ws_poller(url, mapping, filter, hb, stop); });
         return;
     }
 }
 
-void ShoutcastSource::run_ws_poller(std::string url, StationMetadataMapping mapping,
-                                   StationMetadataWebSocketFilter filter,
-                                   StationMetadataWebSocketHeartbeat hb,
-                                   std::stop_token stop) {
+void ShoutcastSource::run_ws_poller(std::string url, const StationMetadataMapping& mapping,
+                                    const StationMetadataWebSocketFilter& filter,
+                                    StationMetadataWebSocketHeartbeat hb,
+                                    const std::stop_token& stop) {
     auto parsed = ParsedUrl::parse(url);
     if (!parsed) {
         log::warn("[shoutcast] ws: failed to parse URL '{}'", url);
@@ -1211,9 +1235,10 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
                     while (ve < raw_headers.size() && raw_headers[ve] != L'\r' &&
                            raw_headers[ve] != L'\n')
                         ve++;
-                    if (ve > vs)
+                    if (ve > vs) {
                         metaint = static_cast<int>(
                             std::wcstol(raw_headers.substr(vs, ve - vs).c_str(), nullptr, 10));
+                    }
                 }
             }
         }
@@ -1237,7 +1262,7 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
             // Read metaint audio bytes (discard)
             DWORD audio_read = 0;
             bool error       = false;
-            while (audio_read < static_cast<DWORD>(metaint) && !stop.stop_requested()) {
+            while (std::cmp_less(audio_read, metaint) && !stop.stop_requested()) {
                 DWORD chunk = 0;
                 if (!WinHttpReadData(hRequest, buf + audio_read,
                                      static_cast<DWORD>(metaint) - audio_read, &chunk)) {
@@ -1264,7 +1289,7 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
 
             // Read metadata block
             DWORD meta_read = 0;
-            while (meta_read < static_cast<DWORD>(meta_len) && !stop.stop_requested()) {
+            while (std::cmp_less(meta_read, meta_len) && !stop.stop_requested()) {
                 DWORD chunk = 0;
                 if (!WinHttpReadData(hRequest, buf + meta_read,
                                      static_cast<DWORD>(meta_len) - meta_read, &chunk)) {
@@ -1369,7 +1394,8 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     // ICY metadata is now fetched via a direct HTTP connection (run_icy_poller),
     // so we no longer parse [icy] StreamTitle from ffmpeg's stderr.
     // The stderr pipe is kept to capture actual ffmpeg errors.
-    if (stderr_pipe) {
+    // Once empty, the stderr_empty flag avoids the PeekNamedPipe syscall entirely.
+    if (stderr_pipe && !p->stderr_empty) {
         for (int safety = 0; safety < 3; ++safety) {
             DWORD eavail = 0;
             if (!PeekNamedPipe(stderr_pipe, nullptr, 0, nullptr, &eavail, nullptr)) {
@@ -1377,7 +1403,10 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 p->stderr_pipe = nullptr;
                 break;
             }
-            if (eavail == 0) break;
+            if (eavail == 0) {
+                p->stderr_empty = true;
+                break;
+            }
             char ebuf[512];
             DWORD egot = 0;
             if (!ReadFile(stderr_pipe, ebuf, sizeof(ebuf) - 1, &egot, nullptr) || egot == 0) {

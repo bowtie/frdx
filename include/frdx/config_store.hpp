@@ -31,7 +31,7 @@ public:
     void on_change(Observer obs) FRDX_EXCLUDES(mu_);
 
 private:
-    mutable std::mutex mu_;
+    mutable frdx::Mutex mu_;
     std::filesystem::path path_  FRDX_GUARDED_BY(mu_);
     Config cfg_                  FRDX_GUARDED_BY(mu_);
     std::vector<Observer> observers_ FRDX_GUARDED_BY(mu_);

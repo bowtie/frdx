@@ -145,14 +145,55 @@ struct UiState {
     int  combo_sel   = 0;
     bool combo_dirty = true;
 };
+// NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 static UiState g_ui;
 
-// ── Remaining independent globals ──────────────────────────────────────
+// ── Swapchain map (mutex-guarded) ──────────────────────────────────────
+struct SwapchainMap {
+    frdx::Mutex mutex;
+    std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> queues
+        FRDX_GUARDED_BY(mutex);
+    std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*> cache3
+        FRDX_GUARDED_BY(mutex);
 
-AudioSourceManager* g_mgr        = nullptr;
-fmod_bridge::DSPBridge* g_bridge = nullptr;
-ConfigStore* g_store             = nullptr;
-std::function<void()> g_flush_audio_fn;
+    FRDX_REQUIRES(mutex)
+    std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*>& queues_ref() {
+        return queues;
+    }
+
+    FRDX_REQUIRES(mutex)
+    std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*>& cache3_ref() {
+        return cache3;
+    }
+};
+// NOLINTNEXTLINE(bugprone-throwing-static-initialization)
+static SwapchainMap g_sc;
+
+// ── Action queue (mutex + CV + pending deque + worker thread) ──────────
+struct ActionQueue {
+    frdx::Mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::function<void()>> pending FRDX_GUARDED_BY(mutex);
+
+    FRDX_REQUIRES(mutex)
+    std::deque<std::function<void()>>& pending_ref() { return pending; }
+
+    std::thread thread;
+    bool stop = false;
+    std::atomic<bool> busy{false};
+};
+// NOLINTNEXTLINE(bugprone-throwing-static-initialization)
+static ActionQueue g_aq;
+
+// ── External context (pointers set by initialize()) ─────────────────────
+
+struct ExternalCtx {
+    AudioSourceManager* mgr        = nullptr;
+    fmod_bridge::DSPBridge* bridge = nullptr;
+    ConfigStore* store             = nullptr;
+    std::function<void()> flush_audio;
+};
+static ExternalCtx g_ctx;
 
 // NOTE: g_dx.device is the same COM object as the sandbox/game's dx.device.
 // It is acquired via IDXGISwapChain::GetDevice() in hook_Present() (which
@@ -160,47 +201,6 @@ std::function<void()> g_flush_audio_fn;
 // zero by the sandbox's destroy_dx().  Both pointers refer to the same
 // ID3D12Device; COM refcounting ensures the object stays alive until both
 // owners drop their reference.
-
-// Swapchain → command-queue map.  Guarded by swapchain_map_mutex.
-// Lifted to namespace scope (from function-local statics) so the
-// clang thread-safety analyser can see the GUARDED_BY annotation.
-// Maps store raw pointers (not ComPtr) because std::unordered_map
-// requires copyable values for some operations.
-std::mutex swapchain_map_mutex;
-std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> swapchain_queues_data
-    FRDX_GUARDED_BY(swapchain_map_mutex);
-std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*> swapchain3_cache_data
-    FRDX_GUARDED_BY(swapchain_map_mutex);
-
-// Returns a reference to the swapchain→queue map.  Caller must hold
-// swapchain_map_mutex before accessing the returned reference.
-FRDX_REQUIRES(swapchain_map_mutex)
-std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*>& get_swapchain_queues() {
-    return swapchain_queues_data;
-}
-FRDX_REQUIRES(swapchain_map_mutex)
-std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*>& get_swapchain3_cache() {
-    return swapchain3_cache_data;
-}
-
-
-
-std::mutex action_mutex;
-std::condition_variable action_cv;
-// Pending overlay actions (station change, play/pause, etc.).
-// Guarded by action_mutex.
-std::deque<std::function<void()>> pending_actions_data FRDX_GUARDED_BY(action_mutex);
-
-FRDX_REQUIRES(action_mutex)
-std::deque<std::function<void()>>& get_pending_actions() {
-    return pending_actions_data;
-}
-
-std::thread action_thread;
-bool action_thread_stop = false;
-std::atomic<bool> action_busy{false};
-
-
 
 void wait_for_all_overlay_work();
 void enqueue_action(std::function<void()> action);
@@ -211,7 +211,7 @@ void enqueue_action(std::function<void()> action);
 struct PlayerBarLayout {
     ImVec2 pos;
     ImVec2 size;
-    float  gear_right;
+    float gear_right{};
 };
 static void draw_hud(IAudioSource* active, const TrackInfo& track);
 static void draw_settings_window(const PlayerBarLayout& layout);
@@ -520,10 +520,10 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
         ImGui::Separator();
         ImGui::Spacing();
 
-        bool stereo = g_bridge->force_stereo_audio();
+        bool stereo = g_ctx.bridge->force_stereo_audio();
         if (ImGui::Checkbox("Force Stereo Audio", &stereo)) {
-            g_bridge->set_force_stereo_audio(stereo);
-            g_store->patch(
+            g_ctx.bridge->set_force_stereo_audio(stereo);
+            g_ctx.store->patch(
                 [&](Config& c) { c.audio.force_stereo_audio = stereo; });
         }
         if (ImGui::IsItemHovered()) {
@@ -597,7 +597,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
         }
 
         static bool s_prev_busy = false;
-        bool busy               = action_busy.load(std::memory_order_acquire);
+        bool busy               = g_aq.busy.load(std::memory_order_acquire);
         if (s_prev_busy && !busy) g_ui.combo_dirty = true;
         s_prev_busy = busy;
 
@@ -635,6 +635,31 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
 
     // Shared helper for icon buttons: InvisibleButton + rounded rect background + centered glyph.
     // active_col / hover_col override the resting/hover colors (0 = use default theme colors).
+    // Pre-computed glyph text sizes for the 4 icon buttons (prev, play, next, gear).
+    // The glyph strings are compile-time constants, so we can store their sizes in
+    // a simple static array indexed by a small enum for O(1) lookup.
+    static const char* s_glyph_strs[4] = {"\u23EE", "\u23F8", "\u23F5", "\u23ED"};
+    static ImVec2 s_glyph_sz[4] = {};
+    static bool  s_glyph_init  = false;
+    if (!s_glyph_init) {
+        for (int i = 0; i < 4; ++i)
+            s_glyph_sz[i] = ImGui::CalcTextSize(s_glyph_strs[i]);
+        s_glyph_init = true;
+    }
+    // Helper: returns index into the glyph cache for a known glyph, or -1.
+    auto glyph_idx = [](const char* g) -> int {
+        if (g == s_glyph_strs[0]) return 0;
+        if (g == s_glyph_strs[1] || g == s_glyph_strs[2]) return 1; // play/pause share "\u23F8"/"\u23F5" — separate calc
+        if (g == s_glyph_strs[3]) return 3;
+        return -1;
+    };
+
+    const float frame_rounding = ImGui::GetStyle().FrameRounding;
+    const ImU32 col_btn        = ImGui::GetColorU32(ImGuiCol_Button);
+    const ImU32 col_btn_hov    = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
+    const ImU32 col_btn_act    = ImGui::GetColorU32(ImGuiCol_ButtonActive);
+    const ImU32 col_text       = ImGui::GetColorU32(ImGuiCol_Text);
+
     auto draw_icon_btn = [&](const char* id, const char* glyph,
                              ImU32 active_col = 0, ImU32 hover_col = 0) -> bool {
         ImGui::InvisibleButton(id, ImVec2(btn_w, btn_h));
@@ -644,25 +669,43 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
 
         ImU32 bg_col;
         if (active_col) {
-            bg_col = held && hovered ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
+            bg_col = held && hovered ? col_btn_act
                      : hovered       ? hover_col
                                      : active_col;
         } else {
-            bg_col = held && hovered ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
-                     : hovered       ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
-                                    : ImGui::GetColorU32(ImGuiCol_Button);
+            bg_col = held && hovered ? col_btn_act
+                     : hovered       ? col_btn_hov
+                                     : col_btn;
         }
 
         auto* dl   = ImGui::GetWindowDrawList();
         ImVec2 min = ImGui::GetItemRectMin();
         ImVec2 max = ImGui::GetItemRectMax();
-        dl->AddRectFilled(min, max, bg_col, ImGui::GetStyle().FrameRounding);
-        ImVec2 gsz = ImGui::CalcTextSize(glyph);
-        float gx   = min.x + (btn_w - gsz.x) * 0.5f + 0.5f;
-        float gy   = min.y + (btn_h - gsz.y) * 0.5f;
-        dl->AddText(ImVec2(gx, gy), ImGui::GetColorU32(ImGuiCol_Text), glyph);
+        dl->AddRectFilled(min, max, bg_col, frame_rounding);
+        // O(1) glyph size lookup via pointer identity
+        ImVec2 gsz;
+        int idx = glyph_idx(glyph);
+        if (idx >= 0) {
+            gsz = s_glyph_sz[idx];
+            // Special case: play/pause use different glyphs — compute on first use.
+            if (glyph == s_glyph_strs[1] && gsz.x == 0) {
+                gsz = ImGui::CalcTextSize(glyph);
+                s_glyph_sz[1] = gsz;
+            }
+        } else {
+            gsz = ImGui::CalcTextSize(glyph);
+        }
+        float gx = min.x + (btn_w - gsz.x) * 0.5f + 0.5f;
+        float gy = min.y + (btn_h - gsz.y) * 0.5f;
+        dl->AddText(ImVec2(gx, gy), col_text, glyph);
         return pressed;
     };
+
+    // Pre-compute play/pause glyph size now that the cache is warm.
+    if (s_glyph_sz[1].x == 0) {
+        s_glyph_sz[1] = ImGui::CalcTextSize(s_glyph_strs[1]);
+        s_glyph_sz[2] = ImGui::CalcTextSize(s_glyph_strs[2]);
+    }
 
     ImGui::SameLine(0, 20);
 
@@ -670,7 +713,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     if (draw_icon_btn("##prev", "\u23EE") && active) {
         enqueue_action([active] {
             active->previous();
-            g_mgr->ring().drain();
+            g_ctx.mgr->ring().drain();
         });
     }
     ImGui::SameLine(0, 3);
@@ -678,8 +721,8 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
         enqueue_action([active, is_playing] {
             if (is_playing) {
                 active->pause();
-                if (g_mgr) g_mgr->ring().drain();
-                if (g_flush_audio_fn) g_flush_audio_fn();
+                if (g_ctx.mgr) g_ctx.mgr->ring().drain();
+                if (g_ctx.flush_audio) g_ctx.flush_audio();
             } else {
                 active->play();
             }
@@ -689,7 +732,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     if (draw_icon_btn("##next", "\u23ED") && active) {
         enqueue_action([active] {
             active->next();
-            g_mgr->ring().drain();
+            g_ctx.mgr->ring().drain();
         });
     }
 
@@ -698,7 +741,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // ── Volume progress bar (clickable + scroll) ──
     {
         static bool vol_active = false;
-        float       gain_pct   = g_bridge->gain() * 100.0f;
+        float       gain_pct   = g_ctx.bridge->gain() * 100.0f;
         char        label[16];
         std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
         ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(100.0f, btn_h), label);
@@ -706,9 +749,9 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
         if (ImGui::IsItemHovered()) {
             float wheel = ImGui::GetIO().MouseWheel;
             if (wheel != 0.0f) {
-                float new_gain = std::clamp(g_bridge->gain() + wheel * 0.05f, 0.0f, 1.0f);
-                g_bridge->set_gain(new_gain);
-                g_store->patch([&](Config& c) { c.audio.output_gain = new_gain; });
+                float new_gain = std::clamp(g_ctx.bridge->gain() + wheel * 0.05f, 0.0f, 1.0f);
+                g_ctx.bridge->set_gain(new_gain);
+                g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_gain; });
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 vol_active = true;
@@ -720,10 +763,10 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
             float bar_w   = ImGui::GetItemRectSize().x;
             float mouse_x = ImGui::GetMousePos().x;
             float new_val = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
-            g_bridge->set_gain(new_val);
+            g_ctx.bridge->set_gain(new_val);
         } else if (vol_active) {
             vol_active = false;
-            g_store->patch([&](Config& c) { c.audio.output_gain = g_bridge->gain(); });
+            g_ctx.store->patch([&](Config& c) { c.audio.output_gain = g_ctx.bridge->gain(); });
         }
     }
 
@@ -818,13 +861,15 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
         const ImVec2 clip_max    = ImGui::GetWindowDrawList()->GetClipRectMax();
 
         auto [active_st, active_str] = sc_st->active_station_stream();
+        int stream_idx = 0;
         for (const auto& st : sc_st->stations_nolock()) {
             ImGui::Text("%s", st.name.c_str());
             ImGui::Indent(12.0f);
             for (const auto& str : st.streams) {
                 bool is_act = (st.id == active_st && str.id == active_str);
                 const float item_h = text_height + ImGui::GetStyle().FramePadding.y * 2;
-                ImGui::InvisibleButton(str.name.c_str(), ImVec2(-1.0f, item_h));
+                ImGui::PushID(stream_idx++);
+                ImGui::InvisibleButton("##str", ImVec2(-1.0f, item_h));
                 bool hovered = ImGui::IsItemHovered();
                 bool pressed = ImGui::IsItemClicked();
 
@@ -853,13 +898,13 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
                     if (!is_act) {
                         enqueue_action([sid = st.id, strid = str.id] {
                             if (auto* s = dynamic_cast<sources::ShoutcastSource*>(
-                                    g_mgr->active())) {
+                                    g_ctx.mgr->active())) {
                                 s->select_station(sid, strid);
-                                g_mgr->ring().drain();
+                                g_ctx.mgr->ring().drain();
                                 s->play();
                             }
-                            if (g_store) {
-                                g_store->patch([&](Config& c) {
+                            if (g_ctx.store) {
+                                g_ctx.store->patch([&](Config& c) {
                                     c.shoutcast.last_station_id = sid;
                                     c.shoutcast.last_stream_id  = strid;
                                 });
@@ -867,6 +912,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
                         });
                     }
                 }
+                ImGui::PopID();
             }
             ImGui::Unindent(12.0f);
             ImGui::Spacing();
@@ -894,7 +940,7 @@ void draw_imgui_ui_impl() {
                      ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y));
     }
 
-    auto* active = g_mgr->active();
+    auto* active = g_ctx.mgr->active();
 
     // Track info cache – only calls current_track() when generation changes
     static uint64_t  s_track_gen   = 0;
@@ -975,9 +1021,9 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
         }
     }
 
-    int w = 0, h = 0, channels = 0;
+    int w = 0, h = 0;
     unsigned char* pixels =
-        stbi_load(bg_path.string().c_str(), &w, &h, &channels, 4);
+        stbi_load(bg_path.string().c_str(), &w, &h, nullptr, 4);
     if (!pixels) {
         log::warn("[overlay] stbi_load failed for {}: {}", bg_path.string(),
                    stbi_failure_reason());
@@ -995,8 +1041,13 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     texDesc.SampleDesc       = {1, 0};
     texDesc.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
-    D3D12_HEAP_PROPERTIES defHeap = {};
-    defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_HEAP_PROPERTIES defHeap = {
+        D3D12_HEAP_TYPE_DEFAULT,
+        D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN,
+        1,
+        1
+    };
 
     ComPtr<ID3D12Resource> tex;
     if (FAILED(g_dx.device->CreateCommittedResource(
@@ -1023,8 +1074,13 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     uploadDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     uploadDesc.SampleDesc       = {1, 0};
 
-    D3D12_HEAP_PROPERTIES uploadHeap = {};
-    uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_HEAP_PROPERTIES uploadHeap = {
+        D3D12_HEAP_TYPE_UPLOAD,
+        D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        D3D12_MEMORY_POOL_UNKNOWN,
+        1,
+        1
+    };
 
     ComPtr<ID3D12Resource> uploadBuf;
     if (FAILED(g_dx.device->CreateCommittedResource(
@@ -1041,9 +1097,9 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     D3D12_RANGE readRange = {0, 0};
     uploadBuf->Map(0, &readRange, &mapped);
     auto* dst = static_cast<uint8_t*>(mapped);
-    for (int y = 0; y < h; ++y)
-        std::memcpy(dst + y * rowPitch, pixels + y * w * 4,
-                    static_cast<size_t>(w) * 4);
+    for (int y = 0; y < h; ++y) {
+        std::memcpy(dst + y * rowPitch, pixels + y * w * 4, static_cast<size_t>(w) * 4);
+    }
     uploadBuf->Unmap(0, nullptr);
     stbi_image_free(pixels);
 
@@ -1084,10 +1140,7 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
         // Wait for GPU to finish before creating SRV
         const UINT64 fenceVal = ++g_dx.fence_value;
         queue->Signal(g_dx.fence.get(), fenceVal);
-        if (g_dx.fence->GetCompletedValue() < fenceVal) {
-            g_dx.fence->SetEventOnCompletion(fenceVal, g_dx.fence_event);
-            WaitForSingleObject(g_dx.fence_event, 2000);
-        }
+        wait_for_fence(fenceVal);
     }
 
     // ── Create SRV at descriptor slot 1 (slot 0 is ImGui font) ──────────
@@ -1114,52 +1167,60 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
 }
 
 void enqueue_action(std::function<void()> action) {
-    bool expected = false;
-    if (!action_busy.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        log::warn("[overlay] dropped action while another overlay action is still running");
-        return;
-    }
+    g_aq.busy.store(true, std::memory_order_release);
     {
-        std::scoped_lock lk{action_mutex};
-        get_pending_actions().push_back(std::move(action));
+        frdx::ScopedLock lk{g_aq.mutex};
+        if (g_aq.pending_ref().size() >= 8) [[unlikely]] {
+            log::warn("[overlay] action queue full, dropping oldest action");
+            g_aq.pending_ref().pop_front();
+        }
+        g_aq.pending_ref().push_back(std::move(action));
     }
-    action_cv.notify_one();
+    g_aq.cv.notify_one();
+}
+
+FRDX_NO_THREAD_SAFETY_ANALYSIS
+static bool pending_work_predicate() {
+    return g_aq.stop || !g_aq.pending_ref().empty();
+}
+
+FRDX_NO_THREAD_SAFETY_ANALYSIS
+static void action_worker_loop() {
+    for (;;) {
+        std::function<void()> action;
+        {
+            std::unique_lock<std::mutex> lk{g_aq.mutex};
+            g_aq.cv.wait(lk, pending_work_predicate);
+            if (g_aq.stop && g_aq.pending_ref().empty()) break;
+            action = std::move(g_aq.pending_ref().front());
+            g_aq.pending_ref().pop_front();
+        }
+
+        try {
+            log::info("[overlay] running queued radio action");
+            action();
+            log::info("[overlay] queued radio action finished");
+        } catch (...) {
+            log::warn("[overlay] queued action threw an exception");
+        }
+        g_aq.busy.store(false, std::memory_order_release);
+    }
 }
 
 void start_action_worker() {
-    action_thread_stop = false;
-    action_thread      = std::thread([] {
-        for (;;) {
-            std::function<void()> action;
-            {
-                std::unique_lock lk{action_mutex};
-                action_cv.wait(lk, [] { return action_thread_stop || !get_pending_actions().empty(); });
-                if (action_thread_stop && get_pending_actions().empty()) break;
-                action = std::move(get_pending_actions().front());
-                get_pending_actions().pop_front();
-            }
-
-            try {
-                log::info("[overlay] running queued radio action");
-                action();
-                log::info("[overlay] queued radio action finished");
-            } catch (...) {
-                log::warn("[overlay] queued action threw an exception");
-            }
-            action_busy.store(false, std::memory_order_release);
-        }
-    });
+    g_aq.stop = false;
+    g_aq.thread      = std::thread(action_worker_loop);
 }
 
 void stop_action_worker() {
     {
-        std::scoped_lock lk{action_mutex};
-        action_thread_stop = true;
-        get_pending_actions().clear();
-        action_busy.store(false, std::memory_order_release);
+        frdx::ScopedLock lk{g_aq.mutex};
+        g_aq.stop = true;
+        g_aq.pending_ref().clear();
+        g_aq.busy.store(false, std::memory_order_release);
     }
-    action_cv.notify_all();
-    if (action_thread.joinable()) action_thread.join();
+    g_aq.cv.notify_all();
+    if (g_aq.thread.joinable()) g_aq.thread.join();
 }
 
 ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
@@ -1169,9 +1230,9 @@ ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
     auto* q = cached_queue.load(std::memory_order_acquire);
     if (q && cached_chain.load(std::memory_order_relaxed) == swapChain) return q;
 
-    std::scoped_lock lk{swapchain_map_mutex};
-    auto it = get_swapchain_queues().find(swapChain);
-    q = (it != get_swapchain_queues().end()) ? it->second : nullptr;
+    frdx::ScopedLock lk{g_sc.mutex};
+    auto it = g_sc.queues_ref().find(swapChain);
+    q = (it != g_sc.queues_ref().end()) ? it->second : nullptr;
     cached_queue.store(q, std::memory_order_release);
     cached_chain.store(q ? swapChain : nullptr, std::memory_order_release);
     return q;
@@ -1189,14 +1250,14 @@ hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWn
         ID3D12CommandQueue* queue = nullptr;
         if (SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), (void**)&queue)) &&
             queue) {
-            std::scoped_lock lk{swapchain_map_mutex};
+            frdx::ScopedLock lk{g_sc.mutex};
             // Release existing if already mapped
-            auto it = get_swapchain_queues().find(*ppSwapChain);
-            if (it != get_swapchain_queues().end()) {
+            auto it = g_sc.queues_ref().find(*ppSwapChain);
+            if (it != g_sc.queues_ref().end()) {
                 if (it->second) it->second->Release();
             }
             // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
-            get_swapchain_queues()[*ppSwapChain] = queue;
+            g_sc.queues_ref()[*ppSwapChain] = queue;
             log::info("[overlay] intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to "
                       "command queue 0x{:X}",
                       reinterpret_cast<uintptr_t>(*ppSwapChain),
@@ -1333,10 +1394,13 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
 
 // Releases all partially-initialized overlay resources on init failure.
 static void cleanup_imgui_resources() {
-    for (auto& [sc, sc3] : get_swapchain3_cache()) {
-        if (sc3) sc3->Release();
+    {
+        frdx::ScopedLock lk{g_sc.mutex};
+        for (auto& [sc, sc3] : g_sc.cache3_ref()) {
+            if (sc3) sc3->Release();
+        }
+        g_sc.cache3_ref().clear();
     }
-    get_swapchain3_cache().clear();
     g_dx.fb_bufs.clear();
     g_dx.fb_rtvs.clear();
 
@@ -1395,12 +1459,12 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         }
         UINT backBufferIdx = 0;
         {
-            std::scoped_lock lk{swapchain_map_mutex};
-            auto it = get_swapchain3_cache().find(pSwapChain);
-            if (it == get_swapchain3_cache().end()) {
+            frdx::ScopedLock lk{g_sc.mutex};
+            auto it = g_sc.cache3_ref().find(pSwapChain);
+            if (it == g_sc.cache3_ref().end()) {
                 IDXGISwapChain3* sc3 = nullptr;
                 if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
-                    get_swapchain3_cache()[pSwapChain] = sc3;
+                    g_sc.cache3_ref()[pSwapChain] = sc3;
                     backBufferIdx = sc3->GetCurrentBackBufferIndex();
                 }
             } else {
@@ -1486,7 +1550,7 @@ HRESULT __stdcall hook_ResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCoun
 } // namespace
 
 void set_flush_audio(std::function<void()> fn) noexcept {
-    g_flush_audio_fn = std::move(fn);
+    g_ctx.flush_audio = std::move(fn);
     log::info("[overlay] registered audio flush callback");
 }
 
@@ -1494,9 +1558,9 @@ void set_flush_audio(std::function<void()> fn) noexcept {
 
 bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
                 ConfigStore& store) noexcept {
-    g_mgr    = &mgr;
-    g_bridge = &bridge;
-    g_store  = &store;
+    g_ctx.mgr    = &mgr;
+    g_ctx.bridge = &bridge;
+    g_ctx.store  = &store;
     start_action_worker();
 
     log::info("[overlay] starting dummy Direct3D 12 device context resolver...");
@@ -1630,11 +1694,11 @@ void shutdown() noexcept {
         g_dx.fence_value = 0;
 
         {
-            std::scoped_lock lk{swapchain_map_mutex};
-            for (auto& [chain, queue] : get_swapchain_queues()) {
+            frdx::ScopedLock lk{g_sc.mutex};
+            for (auto& [chain, queue] : g_sc.queues_ref()) {
                 if (queue) queue->Release();
             }
-            get_swapchain_queues().clear();
+            g_sc.queues_ref().clear();
         }
 
         g_ui.is_init = false;
