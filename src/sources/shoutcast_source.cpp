@@ -400,16 +400,17 @@ bool ShoutcastSource::initialize() {
     }
 
     // Create a persistent shared WinHTTP session with default timeouts.
-    winhttp_session_ = WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                   WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (winhttp_session_) {
+    ScopedWinHttp session(WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    if (session) {
         DWORD to = 3000; // 3 seconds timeout
-        WinHttpSetOption(static_cast<HINTERNET>(winhttp_session_), WINHTTP_OPTION_CONNECT_TIMEOUT,
+        WinHttpSetOption(session.get(), WINHTTP_OPTION_CONNECT_TIMEOUT,
                          &to, sizeof(to));
-        WinHttpSetOption(static_cast<HINTERNET>(winhttp_session_), WINHTTP_OPTION_SEND_TIMEOUT, &to,
+        WinHttpSetOption(session.get(), WINHTTP_OPTION_SEND_TIMEOUT, &to,
                          sizeof(to));
-        WinHttpSetOption(static_cast<HINTERNET>(winhttp_session_), WINHTTP_OPTION_RECEIVE_TIMEOUT,
+        WinHttpSetOption(session.get(), WINHTTP_OPTION_RECEIVE_TIMEOUT,
                          &to, sizeof(to));
+        winhttp_session_ = session.release();
     } else {
         log::warn("[shoutcast] failed to initialize shared WinHTTP session; falling back to local "
                   "sessions");
@@ -426,7 +427,7 @@ void ShoutcastSource::shutdown() noexcept {
         stop_pipe_locked();
     }
     if (winhttp_session_) {
-        WinHttpCloseHandle(static_cast<HINTERNET>(winhttp_session_));
+        ScopedWinHttp(static_cast<HINTERNET>(winhttp_session_));
         winhttp_session_ = nullptr;
     }
 }
@@ -879,203 +880,212 @@ void ShoutcastSource::restart_metadata_for_current() {
 
     // ---- WebSocket metadata poller ----
     if (md_type == "websocket") {
-        metadata_thread_ = std::jthread([this, url = std::move(url), mapping = std::move(mapping),
+        metadata_thread_ = std::jthread([this, url = std::move(url),
+                                         mapping = std::move(mapping),
                                          filter = std::move(ws_filter),
-                                         hb =
-                                             std::move(ws_heartbeat)](const std::stop_token& stop) {
-            auto parsed = ParsedUrl::parse(url);
-            if (!parsed) {
-                log::warn("[shoutcast] ws: failed to parse URL '{}'", url);
-                return;
-            }
-            while (!stop.stop_requested()) {
-
-                auto conn = winhttp_connect(winhttp_session_, *parsed);
-                if (!conn) {
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    continue;
-                }
-                HINTERNET hRequest = conn.request.get();
-
-                if (!WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
-                    log::warn("[shoutcast] ws: upgrade failed ({})", GetLastError());
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    continue;
-                }
-
-                if (!WinHttpSendRequest(hRequest, nullptr, 0, nullptr, 0, 0, 0)) {
-                    log::warn("[shoutcast] ws: SendRequest failed ({})", GetLastError());
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    continue;
-                }
-
-                if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-                    log::warn("[shoutcast] ws: ReceiveResponse failed ({})", GetLastError());
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    continue;
-                }
-
-                HINTERNET hWebSocket = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
-                if (!hWebSocket) {
-                    log::warn("[shoutcast] ws: upgrade complete failed ({})", GetLastError());
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    continue;
-                }
-                // Release the request handle from RAII — it has been upgraded to
-                // a WebSocket handle (hWebSocket, closed manually below). The connect
-                // handle stays in ScopedWinHttp and auto-closes when conn goes out of
-                // scope at the end of this loop iteration.
-                (void)conn.request.release();
-
-                {
-                    frdx::ScopedLock lk{ws_mu_};
-                    ws_handle_ = hWebSocket;
-                }
-                log::info("[shoutcast] ws: connected to {}", url);
-
-                // Brief settle so the station name is visible in-game
-                // before song metadata overwrites it.
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-
-                int heartbeat_ms    = hb.default_interval_ms;
-                auto last_heartbeat = std::chrono::steady_clock::now();
-
-                if (!hb.message.empty()) {
-                    DWORD err = WinHttpWebSocketSend(hWebSocket,
-                                                     WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                                     const_cast<char*>(hb.message.data()),
-                                                     static_cast<DWORD>(hb.message.size()));
-                    if (err != ERROR_SUCCESS)
-                        log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
-                    last_heartbeat = std::chrono::steady_clock::now();
-                }
-
-                // ---- Receive loop ----
-                while (!stop.stop_requested()) {
-                    if (!hb.message.empty()) {
-                        auto now     = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           now - last_heartbeat)
-                                           .count();
-                        if (elapsed >= heartbeat_ms) {
-                            DWORD err = WinHttpWebSocketSend(
-                                hWebSocket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                const_cast<char*>(hb.message.data()),
-                                static_cast<DWORD>(hb.message.size()));
-                            if (err != ERROR_SUCCESS) {
-                                log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
-                                break;
-                            }
-                            last_heartbeat = now;
-                        }
-                    }
-
-                    DWORD bytesRead = 0;
-                    WINHTTP_WEB_SOCKET_BUFFER_TYPE bufType;
-                    char recvBuf[8192];
-
-                    DWORD err = WinHttpWebSocketReceive(hWebSocket, recvBuf, sizeof(recvBuf) - 1,
-                                                        &bytesRead, &bufType);
-                    if (err != ERROR_SUCCESS) {
-                        if (err == ERROR_WINHTTP_OPERATION_CANCELLED) break;
-                        if (err == ERROR_WINHTTP_TIMEOUT) continue;
-                        log::warn("[shoutcast] ws: receive error ({}), reconnecting...", err);
-                        break;
-                    }
-
-                    if (bytesRead == 0) continue;
-                    recvBuf[bytesRead] = '\0';
-
-                    json msg;
-                    try {
-                        msg = json::parse(recvBuf, recvBuf + bytesRead);
-                    } catch (...) {
-                        continue;
-                    }
-
-                    // Update heartbeat interval from any message (including
-                    // the op:0 welcome message which has d.heartbeat but
-                    // doesn't pass the track-update filter below). Resolve
-                    // against raw msg since welcome fields are top-level.
-                    if (!hb.interval_field.empty()) {
-                        std::string ival = resolve_json_path(msg, hb.interval_field);
-                        if (!ival.empty()) {
-                            try {
-                                int new_interval = std::stoi(ival);
-                                if (new_interval > 0) heartbeat_ms = new_interval;
-                            } catch (...) {}
-                        }
-                    }
-
-                    // Apply message filter.
-                    if (!filter.op_field.empty()) {
-                        const json* op_node = resolve_json_node(msg, filter.op_field);
-                        if (!op_node) continue;
-                        int op_val = op_node->is_number_integer()
-                                       ? static_cast<int>(op_node->get<int64_t>())
-                                       : 0;
-                        if (op_val != filter.op_value) continue;
-                    }
-                    if (!filter.type_field.empty() && !filter.type_value.empty()) {
-                        std::string t = resolve_json_path(msg, filter.type_field);
-                        if (t != filter.type_value) continue;
-                    }
-
-                    const json* data_root = &msg;
-                    if (!filter.data_field.empty()) {
-                        const json* data = resolve_json_node(msg, filter.data_field);
-                        if (!data) continue;
-                        data_root = data;
-                    }
-
-                    std::string title = resolve_mapped_value(*data_root, mapping.title, "", "");
-                    std::string artist =
-                        resolve_mapped_value(*data_root, mapping.artist, mapping.artist_array_field,
-                                             mapping.artist_separator);
-
-                    // If ICY metadata has ever been received for this stream
-                    // (since the last reset in restart_metadata_for_current),
-                    // only let the WS poller update artwork — ICY provides
-                    // perfectly-synced title/artist at the audio transition point
-                    // and never goes stale (the flag is reset on station change).
-                    auto last_icy   = last_icy_ms_.load(std::memory_order_acquire);
-                    bool icy_active = (last_icy > 0);
-
-                    if (!title.empty() || !artist.empty()) {
-                        frdx::ScopedLock lk{mu_};
-                        // Skip write if a new station was selected while
-                        // we were processing — stop is requested early in
-                        // select_station() via stop_metadata_poller().
-                        if (!stop.stop_requested()) {
-                            if (!title.empty() && !icy_active)
-                                info_.title = sanitize_brackets(std::move(title));
-                            if (!artist.empty() && !icy_active)
-                                info_.artist = sanitize_brackets(std::move(artist));
-                            info_gen_.fetch_add(1, std::memory_order_release);
-                            log::info("[shoutcast] ws metadata: {} - {} (icy={})", info_.artist,
-                                      info_.title, icy_active);
-                        }
-                    }
-                }
-
-                // Cleanup connection.
-                {
-                    frdx::ScopedLock lk{ws_mu_};
-                    if (ws_handle_ == hWebSocket) ws_handle_ = nullptr;
-                }
-                if (!stop.stop_requested()) {
-                    WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
-                                          nullptr, 0);
-                }
-                WinHttpCloseHandle(hWebSocket);
-                // conn.connect auto-closed by ScopedWinHttp when conn exits scope;
-                // conn.localSession likewise auto-closed on scope exit.
-
-                if (stop.stop_requested()) break;
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-            }
+                                         hb = std::move(ws_heartbeat)](
+                                            const std::stop_token& stop) {
+            run_ws_poller(std::move(url), std::move(mapping), std::move(filter),
+                          std::move(hb), stop);
         });
         return;
+    }
+}
+
+void ShoutcastSource::run_ws_poller(std::string url, StationMetadataMapping mapping,
+                                   StationMetadataWebSocketFilter filter,
+                                   StationMetadataWebSocketHeartbeat hb,
+                                   std::stop_token stop) {
+    auto parsed = ParsedUrl::parse(url);
+    if (!parsed) {
+        log::warn("[shoutcast] ws: failed to parse URL '{}'", url);
+        return;
+    }
+    while (!stop.stop_requested()) {
+
+        auto conn = winhttp_connect(winhttp_session_, *parsed);
+        if (!conn) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        HINTERNET hRequest = conn.request.get();
+
+        if (!WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
+            log::warn("[shoutcast] ws: upgrade failed ({})", GetLastError());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        if (!WinHttpSendRequest(hRequest, nullptr, 0, nullptr, 0, 0, 0)) {
+            log::warn("[shoutcast] ws: SendRequest failed ({})", GetLastError());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        if (!WinHttpReceiveResponse(hRequest, nullptr)) {
+            log::warn("[shoutcast] ws: ReceiveResponse failed ({})", GetLastError());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        HINTERNET hWebSocket = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
+        if (!hWebSocket) {
+            log::warn("[shoutcast] ws: upgrade complete failed ({})", GetLastError());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        // Release the request handle from RAII — it has been upgraded to
+        // a WebSocket handle (hWebSocket, closed manually below). The connect
+        // handle stays in ScopedWinHttp and auto-closes when conn goes out of
+        // scope at the end of this loop iteration.
+        (void)conn.request.release();
+
+        {
+            frdx::ScopedLock lk{ws_mu_};
+            ws_handle_ = hWebSocket;
+        }
+        log::info("[shoutcast] ws: connected to {}", url);
+
+        // Brief settle so the station name is visible in-game
+        // before song metadata overwrites it.
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        int heartbeat_ms    = hb.default_interval_ms;
+        auto last_heartbeat = std::chrono::steady_clock::now();
+
+        if (!hb.message.empty()) {
+            DWORD err = WinHttpWebSocketSend(hWebSocket,
+                                             WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                             const_cast<char*>(hb.message.data()),
+                                             static_cast<DWORD>(hb.message.size()));
+            if (err != ERROR_SUCCESS)
+                log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
+            last_heartbeat = std::chrono::steady_clock::now();
+        }
+
+        // ---- Receive loop ----
+        while (!stop.stop_requested()) {
+            if (!hb.message.empty()) {
+                auto now     = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   now - last_heartbeat)
+                                   .count();
+                if (elapsed >= heartbeat_ms) {
+                    DWORD err = WinHttpWebSocketSend(
+                        hWebSocket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                        const_cast<char*>(hb.message.data()),
+                        static_cast<DWORD>(hb.message.size()));
+                    if (err != ERROR_SUCCESS) {
+                        log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
+                        break;
+                    }
+                    last_heartbeat = now;
+                }
+            }
+
+            DWORD bytesRead = 0;
+            WINHTTP_WEB_SOCKET_BUFFER_TYPE bufType;
+            char recvBuf[8192];
+
+            DWORD err = WinHttpWebSocketReceive(hWebSocket, recvBuf, sizeof(recvBuf) - 1,
+                                                &bytesRead, &bufType);
+            if (err != ERROR_SUCCESS) {
+                if (err == ERROR_WINHTTP_OPERATION_CANCELLED) break;
+                if (err == ERROR_WINHTTP_TIMEOUT) continue;
+                log::warn("[shoutcast] ws: receive error ({}), reconnecting...", err);
+                break;
+            }
+
+            if (bytesRead == 0) continue;
+            recvBuf[bytesRead] = '\0';
+
+            json msg;
+            try {
+                msg = json::parse(recvBuf, recvBuf + bytesRead);
+            } catch (...) {
+                continue;
+            }
+
+            // Update heartbeat interval from any message (including
+            // the op:0 welcome message which has d.heartbeat but
+            // doesn't pass the track-update filter below). Resolve
+            // against raw msg since welcome fields are top-level.
+            if (!hb.interval_field.empty()) {
+                std::string ival = resolve_json_path(msg, hb.interval_field);
+                if (!ival.empty()) {
+                    try {
+                        int new_interval = std::stoi(ival);
+                        if (new_interval > 0) heartbeat_ms = new_interval;
+                    } catch (...) {}
+                }
+            }
+
+            // Apply message filter.
+            if (!filter.op_field.empty()) {
+                const json* op_node = resolve_json_node(msg, filter.op_field);
+                if (!op_node) continue;
+                int op_val = op_node->is_number_integer()
+                               ? static_cast<int>(op_node->get<int64_t>())
+                               : 0;
+                if (op_val != filter.op_value) continue;
+            }
+            if (!filter.type_field.empty() && !filter.type_value.empty()) {
+                std::string t = resolve_json_path(msg, filter.type_field);
+                if (t != filter.type_value) continue;
+            }
+
+            const json* data_root = &msg;
+            if (!filter.data_field.empty()) {
+                const json* data = resolve_json_node(msg, filter.data_field);
+                if (!data) continue;
+                data_root = data;
+            }
+
+            std::string title = resolve_mapped_value(*data_root, mapping.title, "", "");
+            std::string artist =
+                resolve_mapped_value(*data_root, mapping.artist, mapping.artist_array_field,
+                                     mapping.artist_separator);
+
+            // If ICY metadata has ever been received for this stream
+            // (since the last reset in restart_metadata_for_current),
+            // only let the WS poller update artwork — ICY provides
+            // perfectly-synced title/artist at the audio transition point
+            // and never goes stale (the flag is reset on station change).
+            auto last_icy   = last_icy_ms_.load(std::memory_order_acquire);
+            bool icy_active = (last_icy > 0);
+
+            if (!title.empty() || !artist.empty()) {
+                frdx::ScopedLock lk{mu_};
+                // Skip write if a new station was selected while
+                // we were processing — stop is requested early in
+                // select_station() via stop_metadata_poller().
+                if (!stop.stop_requested()) {
+                    if (!title.empty() && !icy_active)
+                        info_.title = sanitize_brackets(std::move(title));
+                    if (!artist.empty() && !icy_active)
+                        info_.artist = sanitize_brackets(std::move(artist));
+                    info_gen_.fetch_add(1, std::memory_order_release);
+                    log::info("[shoutcast] ws metadata: {} - {} (icy={})", info_.artist,
+                              info_.title, icy_active);
+                }
+            }
+        }
+
+        // Cleanup connection.
+        {
+            frdx::ScopedLock lk{ws_mu_};
+            if (ws_handle_ == hWebSocket) ws_handle_ = nullptr;
+        }
+        if (!stop.stop_requested()) {
+            WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
+                                  nullptr, 0);
+        }
+        WinHttpCloseHandle(hWebSocket);
+        // conn.connect auto-closed by ScopedWinHttp when conn exits scope;
+        // conn.localSession likewise auto-closed on scope exit.
+
+        if (stop.stop_requested()) break;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 }
 

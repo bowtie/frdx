@@ -159,8 +159,10 @@ private:
     void stop_icy_poller();               // join ICY metadata thread
     void run_icy_poller(const std::string& stream_url,
                         const std::stop_token& stop); // ICY metadata loop body
-
-
+    void run_ws_poller(std::string url, StationMetadataMapping mapping,
+                       StationMetadataWebSocketFilter filter,
+                       StationMetadataWebSocketHeartbeat hb,
+                       std::stop_token stop); // WebSocket metadata loop body
 
     // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
     static std::expected<std::unique_ptr<Pipe>, ShoutcastError>
