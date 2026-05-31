@@ -42,6 +42,51 @@ namespace frdx::dx12_overlay {
 
 namespace {
 
+// ── Lightweight COM pointer RAII wrapper ────────────────────────────────
+// Move-only, compatible with IID_PPV_ARGS via GetAddressOf().
+template <typename T>
+class ComPtr {
+public:
+    ComPtr() noexcept = default;
+    explicit ComPtr(T* p) noexcept : ptr_(p) {}
+    ~ComPtr() noexcept { reset(); }
+
+    ComPtr(const ComPtr&)            = delete;
+    ComPtr& operator=(const ComPtr&) = delete;
+
+    ComPtr(ComPtr&& other) noexcept : ptr_(other.ptr_) { other.ptr_ = nullptr; }
+    ComPtr& operator=(ComPtr&& other) noexcept {
+        if (this != &other) {
+            reset();
+            ptr_       = other.ptr_;
+            other.ptr_ = nullptr;
+        }
+        return *this;
+    }
+
+    void reset(T* p = nullptr) noexcept {
+        if (ptr_) ptr_->Release();
+        ptr_ = p;
+    }
+    [[nodiscard]] T* release() noexcept {
+        T* p = ptr_;
+        ptr_ = nullptr;
+        return p;
+    }
+    [[nodiscard]] T* get() const noexcept { return ptr_; }
+    [[nodiscard]] T** GetAddressOf() noexcept {
+        reset();
+        return &ptr_;
+    }
+
+    T* operator->() const noexcept { return ptr_; }
+    explicit operator bool() const noexcept { return ptr_ != nullptr; }
+    operator T*() const noexcept { return ptr_; } // implicit conversion for API calls
+
+private:
+    T* ptr_ = nullptr;
+};
+
 // Hook signatures and originals
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 using ResizeBuffers_t          = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT BufferCount,
@@ -74,11 +119,13 @@ std::function<void()> g_flush_audio_fn;
 // zero by the sandbox's destroy_dx().  Both pointers refer to the same
 // ID3D12Device; COM refcounting ensures the object stays alive until both
 // owners drop their reference.
-ID3D12Device* d3d12_device = nullptr;
+ComPtr<ID3D12Device> d3d12_device;
 
 // Swapchain → command-queue map.  Guarded by swapchain_map_mutex.
 // Lifted to namespace scope (from function-local statics) so the
 // clang thread-safety analyser can see the GUARDED_BY annotation.
+// Maps store raw pointers (not ComPtr) because std::unordered_map
+// requires copyable values for some operations.
 std::mutex swapchain_map_mutex;
 std::unordered_map<IDXGISwapChain*, ID3D12CommandQueue*> swapchain_queues_data
     FRDX_GUARDED_BY(swapchain_map_mutex);
@@ -97,16 +144,16 @@ std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*>& get_swapchain3_cache() {
 }
 #define swapchain_queues   get_swapchain_queues()
 #define swapchain3_cache    get_swapchain3_cache()
-ID3D12DescriptorHeap* srv_descriptor_heap     = nullptr;
-ID3D12DescriptorHeap* rtv_descriptor_heap     = nullptr;
-ID3D12GraphicsCommandList* imgui_command_list = nullptr;
-ID3D12Fence* imgui_fence                      = nullptr;
-HANDLE imgui_fence_event                      = nullptr;
-UINT64 imgui_fence_value                      = 0;
+ComPtr<ID3D12DescriptorHeap> srv_descriptor_heap;
+ComPtr<ID3D12DescriptorHeap> rtv_descriptor_heap;
+ComPtr<ID3D12GraphicsCommandList> imgui_command_list;
+ComPtr<ID3D12Fence> imgui_fence;
+HANDLE imgui_fence_event = nullptr;
+UINT64 imgui_fence_value = 0;
 
-std::vector<ID3D12CommandAllocator*> command_allocators;
+std::vector<ComPtr<ID3D12CommandAllocator>> command_allocators;
 std::vector<UINT64> command_allocator_fence_values;
-std::vector<ID3D12Resource*> backbuffers;
+std::vector<ComPtr<ID3D12Resource>> backbuffers;
 std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> backbuffer_rtvs;
 
 std::mutex action_mutex;
@@ -133,7 +180,7 @@ static std::atomic<bool> show_hud{true};
 
 
 // Optional background image for sandbox visual testing
-static ID3D12Resource* g_bg_texture = nullptr;
+static ComPtr<ID3D12Resource> g_bg_texture;
 static ImTextureID g_bg_texture_id  = 0;
 
 // Anchor for stations browser placement
@@ -205,12 +252,6 @@ void pre_resize() {
     wait_for_all_overlay_work();
     ImGui_ImplDX12_InvalidateDeviceObjects();
 
-    for (auto& buf : backbuffers) {
-        if (buf) {
-            buf->Release();
-            buf = nullptr;
-        }
-    }
     backbuffers.clear();
     backbuffer_rtvs.clear();
 
@@ -229,12 +270,14 @@ void post_resize(IDXGISwapChain* swapChain) {
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
         rtv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
 
-    backbuffers.resize(desc.BufferCount, nullptr);
+    backbuffers.resize(desc.BufferCount);
     backbuffer_rtvs.resize(desc.BufferCount);
 
     for (UINT i = 0; i < desc.BufferCount; i++) {
-        if (SUCCEEDED(swapChain->GetBuffer(i, IID_PPV_ARGS(&backbuffers[i])))) {
-            d3d12_device->CreateRenderTargetView(backbuffers[i], nullptr, rtvHandle);
+        ComPtr<ID3D12Resource> tmp;
+        if (SUCCEEDED(swapChain->GetBuffer(i, IID_PPV_ARGS(tmp.GetAddressOf()))) && tmp) {
+            backbuffers[i] = std::move(tmp);
+            d3d12_device->CreateRenderTargetView(backbuffers[i].get(), nullptr, rtvHandle);
             backbuffer_rtvs[i]  = rtvHandle;
             rtvHandle.ptr      += rtvDescriptorSize;
         }
@@ -950,10 +993,10 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     D3D12_HEAP_PROPERTIES defHeap = {};
     defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-    ID3D12Resource* tex = nullptr;
+    ComPtr<ID3D12Resource> tex;
     if (FAILED(d3d12_device->CreateCommittedResource(
             &defHeap, D3D12_HEAP_FLAG_NONE, &texDesc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)))) {
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(tex.GetAddressOf())))) {
         log::error("[overlay] failed to create background texture ({}x{})", w, h);
         stbi_image_free(pixels);
         return;
@@ -978,13 +1021,12 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     D3D12_HEAP_PROPERTIES uploadHeap = {};
     uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
 
-    ID3D12Resource* uploadBuf = nullptr;
+    ComPtr<ID3D12Resource> uploadBuf;
     if (FAILED(d3d12_device->CreateCommittedResource(
             &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-            IID_PPV_ARGS(&uploadBuf)))) {
+            IID_PPV_ARGS(uploadBuf.GetAddressOf())))) {
         log::error("[overlay] failed to create background upload buffer");
-        tex->Release();
         stbi_image_free(pixels);
         return;
     }
@@ -1003,15 +1045,15 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     // ── GPU copy: upload → default texture ──────────────────────────────
     {
         command_allocators[0]->Reset();
-        imgui_command_list->Reset(command_allocators[0], nullptr);
+        imgui_command_list->Reset(command_allocators[0].get(), nullptr);
 
         D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
-        dstLoc.pResource        = tex;
+        dstLoc.pResource        = tex.get();
         dstLoc.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         dstLoc.SubresourceIndex = 0;
 
         D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
-        srcLoc.pResource = uploadBuf;
+        srcLoc.pResource = uploadBuf.get();
         srcLoc.Type      = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         srcLoc.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
         srcLoc.PlacedFootprint.Footprint.Width    = static_cast<UINT>(w);
@@ -1024,26 +1066,24 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
 
         D3D12_RESOURCE_BARRIER barrier = {};
         barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource   = tex;
+        barrier.Transition.pResource   = tex.get();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         imgui_command_list->ResourceBarrier(1, &barrier);
 
         imgui_command_list->Close();
-        ID3D12CommandList* lists[] = {imgui_command_list};
+        ID3D12CommandList* lists[] = {imgui_command_list.get()};
         queue->ExecuteCommandLists(1, lists);
 
         // Wait for GPU to finish before creating SRV
         const UINT64 fenceVal = ++imgui_fence_value;
-        queue->Signal(imgui_fence, fenceVal);
+        queue->Signal(imgui_fence.get(), fenceVal);
         if (imgui_fence->GetCompletedValue() < fenceVal) {
             imgui_fence->SetEventOnCompletion(fenceVal, imgui_fence_event);
             WaitForSingleObject(imgui_fence_event, 2000);
         }
     }
-
-    uploadBuf->Release();
 
     // ── Create SRV at descriptor slot 1 (slot 0 is ImGui font) ──────────
     const SIZE_T inc = d3d12_device->GetDescriptorHandleIncrementSize(
@@ -1060,9 +1100,9 @@ static void load_background_texture(ID3D12CommandQueue* queue) {
     srvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Texture2D.MipLevels     = 1;
-    d3d12_device->CreateShaderResourceView(tex, &srvDesc, cpuHandle);
+    d3d12_device->CreateShaderResourceView(tex.get(), &srvDesc, cpuHandle);
 
-    g_bg_texture    = tex;
+    g_bg_texture    = std::move(tex);
     g_bg_texture_id = reinterpret_cast<ImTextureID>(gpuHandle.ptr);
     log::info("[overlay] loaded sandbox background ({}x{}) from {}", w, h,
               bg_path.string());
@@ -1186,7 +1226,7 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     srvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     srvHeapDesc.NumDescriptors             = 2;
     srvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(d3d12_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&srv_descriptor_heap))) ||
+    if (FAILED(d3d12_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(srv_descriptor_heap.GetAddressOf()))) ||
         !srv_descriptor_heap) {
         log::error("[overlay] failed to create SRV descriptor heap!");
         return false;
@@ -1197,18 +1237,18 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     rtvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtvHeapDesc.NumDescriptors             = desc.BufferCount;
     rtvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    if (FAILED(d3d12_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&rtv_descriptor_heap))) ||
+    if (FAILED(d3d12_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(rtv_descriptor_heap.GetAddressOf()))) ||
         !rtv_descriptor_heap) {
         log::error("[overlay] failed to create RTV descriptor heap!");
         return false;
     }
 
     // Command allocators
-    command_allocators.resize(desc.BufferCount, nullptr);
+    command_allocators.resize(desc.BufferCount);
     command_allocator_fence_values.resize(desc.BufferCount, 0);
     for (UINT i = 0; i < desc.BufferCount; i++) {
         if (FAILED(d3d12_device->CreateCommandAllocator(
-                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&command_allocators[i]))) ||
+                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(command_allocators[i].GetAddressOf()))) ||
             !command_allocators[i]) {
             log::error("[overlay] failed to create command allocator {}!", i);
             return false;
@@ -1217,8 +1257,8 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
 
     // Command list
     if (FAILED(d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                command_allocators[0], nullptr,
-                                                IID_PPV_ARGS(&imgui_command_list))) ||
+                                                command_allocators[0].get(), nullptr,
+                                                IID_PPV_ARGS(imgui_command_list.GetAddressOf()))) ||
         !imgui_command_list) {
         log::error("[overlay] failed to create ImGui graphics command list!");
         return false;
@@ -1226,7 +1266,7 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     imgui_command_list->Close();
 
     // GPU fence
-    if (FAILED(d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&imgui_fence))) ||
+    if (FAILED(d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(imgui_fence.GetAddressOf()))) ||
         !imgui_fence) {
         log::error("[overlay] failed to create ImGui GPU fence!");
         return false;
@@ -1243,15 +1283,17 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
         d3d12_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
         rtv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-    backbuffers.resize(desc.BufferCount, nullptr);
+    backbuffers.resize(desc.BufferCount);
     backbuffer_rtvs.resize(desc.BufferCount);
 
     for (UINT i = 0; i < desc.BufferCount; i++) {
-        if (FAILED(pSwapChain->GetBuffer(i, IID_PPV_ARGS(&backbuffers[i]))) || !backbuffers[i]) {
+        ComPtr<ID3D12Resource> tmp;
+        if (FAILED(pSwapChain->GetBuffer(i, IID_PPV_ARGS(tmp.GetAddressOf()))) || !tmp) {
             log::error("[overlay] failed to query swapchain backbuffer {}!", i);
             return false;
         }
-        d3d12_device->CreateRenderTargetView(backbuffers[i], nullptr, rtvHandle);
+        backbuffers[i] = std::move(tmp);
+        d3d12_device->CreateRenderTargetView(backbuffers[i].get(), nullptr, rtvHandle);
         backbuffer_rtvs[i]  = rtvHandle;
         rtvHandle.ptr      += rtvDescriptorSize;
     }
@@ -1262,11 +1304,11 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
     ImGui_ImplWin32_Init(desc.OutputWindow);
 
     ImGui_ImplDX12_InitInfo init_info;
-    init_info.Device            = d3d12_device;
+    init_info.Device            = d3d12_device.get();
     init_info.CommandQueue      = active_queue;
     init_info.NumFramesInFlight = desc.BufferCount;
     init_info.RTVFormat         = desc.BufferDesc.Format;
-    init_info.SrvDescriptorHeap = srv_descriptor_heap;
+    init_info.SrvDescriptorHeap = srv_descriptor_heap.get();
     init_info.LegacySingleSrvCpuDescriptor =
         srv_descriptor_heap->GetCPUDescriptorHandleForHeapStart();
     init_info.LegacySingleSrvGpuDescriptor =
@@ -1290,51 +1332,27 @@ static void cleanup_imgui_resources() {
         if (sc3) sc3->Release();
     }
     swapchain3_cache.clear();
-    for (auto* buf : backbuffers) {
-        if (buf) buf->Release();
-    }
     backbuffers.clear();
     backbuffer_rtvs.clear();
 
-    if (imgui_command_list) {
-        imgui_command_list->Release();
-        imgui_command_list = nullptr;
-    }
+    imgui_command_list.reset();
     if (imgui_fence_event) {
         CloseHandle(imgui_fence_event);
         imgui_fence_event = nullptr;
     }
-    if (imgui_fence) {
-        imgui_fence->Release();
-        imgui_fence = nullptr;
-    }
-    for (auto* alloc : command_allocators) {
-        if (alloc) alloc->Release();
-    }
+    imgui_fence.reset();
     command_allocators.clear();
     command_allocator_fence_values.clear();
-    if (g_bg_texture) {
-        g_bg_texture->Release();
-        g_bg_texture    = nullptr;
-        g_bg_texture_id = 0;
-    }
-    if (srv_descriptor_heap) {
-        srv_descriptor_heap->Release();
-        srv_descriptor_heap = nullptr;
-    }
-    if (rtv_descriptor_heap) {
-        rtv_descriptor_heap->Release();
-        rtv_descriptor_heap = nullptr;
-    }
+    g_bg_texture.reset();
+    g_bg_texture_id = 0;
+    srv_descriptor_heap.reset();
+    rtv_descriptor_heap.reset();
     // Release the overlay's reference to the shared device.
     // This device is the same COM object as the sandbox/game's dx.device
     // (acquired via pSwapChain->GetDevice in hook_Present).  The sandbox's
     // destroy_dx() still holds the final reference and will drop it to zero
     // during host teardown — see sandbox_main.cpp cleanup step 7e.
-    if (d3d12_device) {
-        d3d12_device->Release();
-        d3d12_device = nullptr;
-    }
+    d3d12_device.reset();
 }
 
 // Hooked DXGI Swap Chain Present callback
@@ -1351,9 +1369,10 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         // as the sandbox/game's dx.device pointer.  The overlay releases
         // its reference in cleanup_imgui_resources(); the host drops the
         // final reference in destroy_dx().
-        if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), (void**)&d3d12_device)) &&
-            d3d12_device) {
-            if (init_imgui(pSwapChain, active_queue)) {
+        ID3D12Device* rawDev = nullptr;
+        if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&rawDev))) &&
+            rawDev) {
+            d3d12_device.reset(rawDev);            if (init_imgui(pSwapChain, active_queue)) {
                 ApplyTheme(g_theme_idx);
                 initialized                    = true;
             ImGui::GetIO().MouseDrawCursor = show_player || show_settings || show_stations;
@@ -1391,7 +1410,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
                        backBufferIdx, command_allocators.size(), backbuffers.size());
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
-        ID3D12CommandAllocator* allocator = command_allocators[backBufferIdx];
+        ID3D12CommandAllocator* allocator = command_allocators[backBufferIdx].get();
 
         if (!wait_for_fence(command_allocator_fence_values[backBufferIdx])) {
             log::warn("[overlay] skipped frame because GPU did not release command allocator {}",
@@ -1405,7 +1424,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         // Transition backbuffer state to RENDER_TARGET
         D3D12_RESOURCE_BARRIER barrier = {};
         barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource   = backbuffers[backBufferIdx];
+        barrier.Transition.pResource   = backbuffers[backBufferIdx].get();
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
@@ -1413,7 +1432,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
 
         imgui_command_list->OMSetRenderTargets(1, &backbuffer_rtvs[backBufferIdx], FALSE, nullptr);
 
-        ID3D12DescriptorHeap* heaps[] = {srv_descriptor_heap};
+        ID3D12DescriptorHeap* heaps[] = {srv_descriptor_heap.get()};
         imgui_command_list->SetDescriptorHeaps(1, heaps);
 
         // Render custom dashboard panel UI
@@ -1424,7 +1443,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         draw_imgui_ui_impl();
 
         ImGui::Render();
-        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), imgui_command_list);
+        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), imgui_command_list.get());
 
         // Transition backbuffer back to PRESENT state
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -1433,11 +1452,13 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
 
         imgui_command_list->Close();
 
-        active_queue->ExecuteCommandLists(
-            1, reinterpret_cast<ID3D12CommandList**>(&imgui_command_list));
+        {
+            ID3D12CommandList* cmdList = imgui_command_list.get();
+            active_queue->ExecuteCommandLists(1, &cmdList);
+        }
 
         const UINT64 fence_value = ++imgui_fence_value;
-        if (SUCCEEDED(active_queue->Signal(imgui_fence, fence_value))) {
+        if (SUCCEEDED(active_queue->Signal(imgui_fence.get(), fence_value))) {
             command_allocator_fence_values[backBufferIdx] = fence_value;
         } else {
             log::warn("[overlay] failed to signal ImGui GPU fence");
@@ -1493,9 +1514,9 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
                               100, 100, nullptr, nullptr, windowClass.hInstance, nullptr);
 
     // 2. Create D3D12 Device
-    ID3D12Device* device = nullptr;
+    ComPtr<ID3D12Device> device;
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
-                                 (void**)&device))) {
+                                 reinterpret_cast<void**>(device.GetAddressOf())))) {
         log::error("[overlay] failed to create dummy D3D12 Device context");
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
@@ -1505,22 +1526,19 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
     // 3. Create Direct Command Queue
     D3D12_COMMAND_QUEUE_DESC queueDesc = {};
     queueDesc.Type                     = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    ID3D12CommandQueue* commandQueue   = nullptr;
+    ComPtr<ID3D12CommandQueue> commandQueue;
     if (FAILED(device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue),
-                                          (void**)&commandQueue))) {
+                                          reinterpret_cast<void**>(commandQueue.GetAddressOf())))) {
         log::error("[overlay] failed to create dummy Direct Command Queue");
-        device->Release();
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         return false;
     }
 
     // 4. Create DXGI Factory
-    IDXGIFactory4* factory = nullptr;
-    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), (void**)&factory))) {
+    ComPtr<IDXGIFactory4> factory;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(factory.GetAddressOf())))) {
         log::error("[overlay] failed to create dummy DXGI Factory context");
-        commandQueue->Release();
-        device->Release();
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         return false;
@@ -1536,13 +1554,10 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
     swapChainDesc.SwapEffect            = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     swapChainDesc.SampleDesc.Count      = 1;
 
-    IDXGISwapChain1* swapChain = nullptr;
-    if (FAILED(factory->CreateSwapChainForHwnd(commandQueue, hwnd, &swapChainDesc, nullptr, nullptr,
-                                               &swapChain))) {
+    ComPtr<IDXGISwapChain1> swapChain;
+    if (FAILED(factory->CreateSwapChainForHwnd(commandQueue.get(), hwnd, &swapChainDesc, nullptr, nullptr,
+                                               reinterpret_cast<IDXGISwapChain1**>(swapChain.GetAddressOf())))) {
         log::error("[overlay] failed to create dummy DXGI Swap Chain context");
-        factory->Release();
-        commandQueue->Release();
-        device->Release();
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         return false;
@@ -1550,19 +1565,15 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
 
     // Retrieve function vtable pointers from the active dummy swapchain and factory
     // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
-    void** swapChainVtable = *reinterpret_cast<void***>(swapChain);
+    void** swapChainVtable = *reinterpret_cast<void***>(swapChain.get());
     // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
-    void** factoryVtable = *reinterpret_cast<void***>(factory);
+    void** factoryVtable = *reinterpret_cast<void***>(factory.get());
 
     void* target_Present                = swapChainVtable[8];
     void* target_ResizeBuffers          = swapChainVtable[13];
     void* target_CreateSwapChainForHwnd = factoryVtable[15];
 
-    // Clean up temporary dummy resolution targets
-    swapChain->Release();
-    factory->Release();
-    commandQueue->Release();
-    device->Release();
+    // Clean up temporary dummy resolution targets (ComPtr destructors handle Release)
     DestroyWindow(hwnd);
     UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
 
@@ -1615,12 +1626,8 @@ void shutdown() noexcept {
 
         {
             std::scoped_lock lk{swapchain_map_mutex};
-            std::vector<IDXGISwapChain*> chains;
-            chains.reserve(swapchain_queues.size());
-            for (auto& pair : swapchain_queues) chains.push_back(pair.first);
-            for (auto* chain : chains) {
-                auto it = swapchain_queues.find(chain);
-                if (it != swapchain_queues.end() && it->second) it->second->Release();
+            for (auto& [chain, queue] : swapchain_queues) {
+                if (queue) queue->Release();
             }
             swapchain_queues.clear();
         }
