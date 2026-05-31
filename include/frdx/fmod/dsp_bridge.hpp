@@ -18,8 +18,6 @@ namespace frdx::fmod_bridge {
 
 enum class DSPError {
     image_not_valid,
-    create_dsp_not_found,
-    resolver_not_found,
 };
 
 enum class DSPMode : uint32_t { off = 0, passthrough = 1, silence = 2, pcm = 3 };
@@ -115,7 +113,6 @@ public:
         force_stereo_audio_.store(v, std::memory_order_release);
     }
 
-    uint64_t underruns() const noexcept { return underruns_.load(std::memory_order_relaxed); }
     uint64_t call_count() const noexcept { return calls_.load(std::memory_order_relaxed); }
 
     AudioSourceManager& manager() noexcept { return mgr_; }
@@ -150,10 +147,7 @@ private:
     std::atomic<float> gain_{1.0f};
     std::atomic<bool> force_stereo_audio_{true};
 
-    std::atomic<uint64_t> underruns_{0};
     std::atomic<uint64_t> calls_{0};
-    std::atomic<uint32_t> last_len_{0};
-    std::atomic<uint32_t> last_out_ch_{0};
 };
 
 } // namespace frdx::fmod_bridge

@@ -142,8 +142,7 @@ FRDX_REQUIRES(swapchain_map_mutex)
 std::unordered_map<IDXGISwapChain*, IDXGISwapChain3*>& get_swapchain3_cache() {
     return swapchain3_cache_data;
 }
-#define swapchain_queues   get_swapchain_queues()
-#define swapchain3_cache    get_swapchain3_cache()
+
 ComPtr<ID3D12DescriptorHeap> srv_descriptor_heap;
 ComPtr<ID3D12DescriptorHeap> rtv_descriptor_heap;
 ComPtr<ID3D12GraphicsCommandList> imgui_command_list;
@@ -166,7 +165,7 @@ FRDX_REQUIRES(action_mutex)
 std::deque<std::function<void()>>& get_pending_actions() {
     return pending_actions_data;
 }
-#define pending_actions get_pending_actions()
+
 std::thread action_thread;
 bool action_thread_stop = false;
 std::atomic<bool> action_busy{false};
@@ -1116,7 +1115,7 @@ void enqueue_action(std::function<void()> action) {
     }
     {
         std::scoped_lock lk{action_mutex};
-        pending_actions.push_back(std::move(action));
+        get_pending_actions().push_back(std::move(action));
     }
     action_cv.notify_one();
 }
@@ -1128,10 +1127,10 @@ void start_action_worker() {
             std::function<void()> action;
             {
                 std::unique_lock lk{action_mutex};
-                action_cv.wait(lk, [] { return action_thread_stop || !pending_actions.empty(); });
-                if (action_thread_stop && pending_actions.empty()) break;
-                action = std::move(pending_actions.front());
-                pending_actions.pop_front();
+                action_cv.wait(lk, [] { return action_thread_stop || !get_pending_actions().empty(); });
+                if (action_thread_stop && get_pending_actions().empty()) break;
+                action = std::move(get_pending_actions().front());
+                get_pending_actions().pop_front();
             }
 
             try {
@@ -1150,7 +1149,7 @@ void stop_action_worker() {
     {
         std::scoped_lock lk{action_mutex};
         action_thread_stop = true;
-        pending_actions.clear();
+        get_pending_actions().clear();
         action_busy.store(false, std::memory_order_release);
     }
     action_cv.notify_all();
@@ -1165,8 +1164,8 @@ ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
     if (q && cached_chain.load(std::memory_order_relaxed) == swapChain) return q;
 
     std::scoped_lock lk{swapchain_map_mutex};
-    auto it = swapchain_queues.find(swapChain);
-    q = (it != swapchain_queues.end()) ? it->second : nullptr;
+    auto it = get_swapchain_queues().find(swapChain);
+    q = (it != get_swapchain_queues().end()) ? it->second : nullptr;
     cached_queue.store(q, std::memory_order_release);
     cached_chain.store(q ? swapChain : nullptr, std::memory_order_release);
     return q;
@@ -1186,12 +1185,12 @@ hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWn
             queue) {
             std::scoped_lock lk{swapchain_map_mutex};
             // Release existing if already mapped
-            auto it = swapchain_queues.find(*ppSwapChain);
-            if (it != swapchain_queues.end()) {
+            auto it = get_swapchain_queues().find(*ppSwapChain);
+            if (it != get_swapchain_queues().end()) {
                 if (it->second) it->second->Release();
             }
             // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
-            swapchain_queues[*ppSwapChain] = queue;
+            get_swapchain_queues()[*ppSwapChain] = queue;
             log::info("[overlay] intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to "
                       "command queue 0x{:X}",
                       reinterpret_cast<uintptr_t>(*ppSwapChain),
@@ -1328,10 +1327,10 @@ static bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_qu
 
 // Releases all partially-initialized overlay resources on init failure.
 static void cleanup_imgui_resources() {
-    for (auto& [sc, sc3] : swapchain3_cache) {
+    for (auto& [sc, sc3] : get_swapchain3_cache()) {
         if (sc3) sc3->Release();
     }
-    swapchain3_cache.clear();
+    get_swapchain3_cache().clear();
     backbuffers.clear();
     backbuffer_rtvs.clear();
 
@@ -1391,11 +1390,11 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         UINT backBufferIdx = 0;
         {
             std::scoped_lock lk{swapchain_map_mutex};
-            auto it = swapchain3_cache.find(pSwapChain);
-            if (it == swapchain3_cache.end()) {
+            auto it = get_swapchain3_cache().find(pSwapChain);
+            if (it == get_swapchain3_cache().end()) {
                 IDXGISwapChain3* sc3 = nullptr;
                 if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
-                    swapchain3_cache[pSwapChain] = sc3;
+                    get_swapchain3_cache()[pSwapChain] = sc3;
                     backBufferIdx = sc3->GetCurrentBackBufferIndex();
                 }
             } else {
@@ -1626,10 +1625,10 @@ void shutdown() noexcept {
 
         {
             std::scoped_lock lk{swapchain_map_mutex};
-            for (auto& [chain, queue] : swapchain_queues) {
+            for (auto& [chain, queue] : get_swapchain_queues()) {
                 if (queue) queue->Release();
             }
-            swapchain_queues.clear();
+            get_swapchain_queues().clear();
         }
 
         initialized = false;

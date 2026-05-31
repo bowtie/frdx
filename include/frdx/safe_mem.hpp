@@ -15,11 +15,8 @@ namespace frdx {
 enum class SafeMemError {
     invalid_address,
     size_overflow,
-    not_committed,
-    guard_page,
     not_readable,
     seh_exception,
-    string_corrupt,
 };
 
 // True iff [addr, addr+size) lies in committed pages with read access and

@@ -17,7 +17,7 @@
 
 namespace frdx::fmod_bridge {
 
-enum class ControlLoopError { no_target, discover_failed, fmod_system_resolution_failed };
+enum class ControlLoopError { discover_failed, fmod_system_resolution_failed };
 
 // 50 Hz tick: keeps the DSP installed on the current radio channel and
 // drives the AudioSourceManager pump.

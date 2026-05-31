@@ -19,8 +19,6 @@
 namespace frdx::sources {
 
 enum class ShoutcastError {
-    not_enabled,
-    ffmpeg_not_found,
     pipe_creation_failed,
     spawn_failed,
 };
@@ -223,6 +221,9 @@ private:
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
     // metadata, they skip overwriting title/artist.
     std::atomic<int64_t> last_icy_ms_{0};
+
+    // ICY read buffer — reused across run_icy_poller() invocations.
+    std::vector<char> icy_buf_;
 
     // Generation counter bumped on every info_ write so the overlay can
     // avoid calling current_track() (which locks mu_) every frame.

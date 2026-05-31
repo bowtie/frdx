@@ -936,6 +936,11 @@ void ShoutcastSource::run_ws_poller(std::string url, StationMetadataMapping mapp
             std::this_thread::sleep_for(std::chrono::seconds(5));
             continue;
         }
+        // Wrap the WebSocket in RAII so WinHttpCloseHandle is called even on
+        // early exits (break, stop_requested, etc.).  stop_metadata_poller()
+        // may call WinHttpWebSocketClose on ws_handle_ before we get here;
+        // double-closing is harmless.
+        ScopedWinHttp ws(hWebSocket);
         // Release the request handle from RAII — it has been upgraded to
         // a WebSocket handle (hWebSocket, closed manually below). The connect
         // handle stays in ScopedWinHttp and auto-closes when conn goes out of
@@ -1082,7 +1087,7 @@ void ShoutcastSource::run_ws_poller(std::string url, StationMetadataMapping mapp
             WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
                                   nullptr, 0);
         }
-        WinHttpCloseHandle(hWebSocket);
+        // ws (ScopedWinHttp) auto-closes hWebSocket when it goes out of scope.
         // conn.connect auto-closed by ScopedWinHttp when conn exits scope;
         // conn.localSession likewise auto-closed on scope exit.
 
@@ -1221,11 +1226,11 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
 
         log::info("[shoutcast] icy: connected, metaint={}", metaint);
 
-        // Buffer: metaint + 1 (metadata length byte) + 4096 (max metadata block)
-        static std::vector<char> s_icy_buf;
+        // Per-instance ICY read buffer — persists across poller restarts,
+        // avoiding repeated heap allocations.
         std::size_t buf_needed = static_cast<std::size_t>(metaint) + 1 + 4096;
-        if (s_icy_buf.size() < buf_needed) s_icy_buf.resize(buf_needed);
-        char* buf = s_icy_buf.data();
+        if (icy_buf_.size() < buf_needed) icy_buf_.resize(buf_needed);
+        char* buf = icy_buf_.data();
         bool first_title = true;
 
         while (!stop.stop_requested()) {
@@ -1336,10 +1341,6 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
         }
     }
 }
-
-// ---- spawn_icy_poller ----
-
-
 
 // ---- PCM pump ----
 

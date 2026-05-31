@@ -87,9 +87,7 @@ void ControlLoop::run(const std::stop_token& tok) {
         if (busy && c == prev_calls_) {
             if (++stale_ticks_ >= kStaleTickThreshold) {
                 stale_ticks_ = 0;
-                if (bridge_.current_handle_alive()) {
-                    // false alarm; channel still live
-                } else {
+                if (!bridge_.current_handle_alive()) {
                     // Game tore the radio channel down. Toggle the in-game
                     // station off/on to force a fresh channel allocation,
                     // then re-discover the live instance.

@@ -308,8 +308,6 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
 
     auto stats = [&] {
         b->calls_.fetch_add(1, std::memory_order_relaxed);
-        b->last_len_.store(length, std::memory_order_relaxed);
-        b->last_out_ch_.store(out_ch, std::memory_order_relaxed);
     };
 
     if (m == DSPMode::silence || m == DSPMode::off) {
@@ -379,7 +377,6 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
 
         produced += got_frames;
         if (got_frames < want_frames) {
-            b->underruns_.fetch_add(1, std::memory_order_relaxed);
             break;
         }
     }
