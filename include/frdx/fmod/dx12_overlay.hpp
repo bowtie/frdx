@@ -8,13 +8,16 @@ class ConfigStore;
 namespace fmod_bridge {
 class DSPBridge;
 } // namespace fmod_bridge
+namespace dualsense {
+class DualSenseService;
+} // namespace dualsense
 
 namespace dx12_overlay {
 
 // Starts the DX12 Present, ResizeBuffers, and WndProc hooks, linking ImGui to
 // FMOD and the AudioSourceManager. Returns true if hooks are initialized.
 bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
-                ConfigStore& store) noexcept;
+                ConfigStore& store, dualsense::DualSenseService* dualsense = nullptr) noexcept;
 
 // Disables hooks and cleans up Dear ImGui resources safely.
 void shutdown() noexcept;

@@ -38,9 +38,9 @@ public:
 private:
     static std::size_t round_pow2(std::size_t n) noexcept;
 
-    std::unique_ptr<std::byte[]> data_;
     std::size_t capacity_; // power of 2
     std::size_t mask_;     // capacity_ - 1
+    std::unique_ptr<std::byte[]> data_;
     alignas(64) std::atomic<std::size_t> write_pos_{0};
     alignas(64) std::atomic<std::size_t> read_pos_{0};
 };

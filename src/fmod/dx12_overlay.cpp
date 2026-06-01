@@ -1,6 +1,7 @@
 #include "frdx/fmod/dx12_overlay.hpp"
 #include "frdx/audio_source_manager.hpp"
 #include "frdx/config_store.hpp"
+#include "frdx/dualsense.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/log.hpp"
@@ -130,6 +131,7 @@ struct StationComboCache {
 struct UiState {
     std::atomic<bool> player_visible{true};
     std::atomic<bool> settings_visible{false};
+    std::atomic<bool> dualsense_visible{false};
     std::atomic<bool> stations_visible{false};
     std::atomic<bool> hud_visible{true};
     bool is_init = false;
@@ -144,6 +146,9 @@ struct UiState {
     StationComboCache combo_cache;
     int  combo_sel   = 0;
     bool combo_dirty = true;
+
+    std::vector<dualsense::ControllerDevice> dualsense_devices;
+    bool dualsense_devices_dirty = true;
 };
 // NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 static UiState g_ui;
@@ -191,6 +196,7 @@ struct ExternalCtx {
     AudioSourceManager* mgr        = nullptr;
     fmod_bridge::DSPBridge* bridge = nullptr;
     ConfigStore* store             = nullptr;
+    dualsense::DualSenseService* dualsense = nullptr;
     std::function<void()> flush_audio;
 };
 static ExternalCtx g_ctx;
@@ -212,14 +218,17 @@ struct PlayerBarLayout {
     ImVec2 pos;
     ImVec2 size;
     float gear_right{};
+    float dualsense_right{};
 };
 static void draw_hud(IAudioSource* active, const TrackInfo& track);
 static void draw_settings_window(const PlayerBarLayout& layout);
+static void draw_dualsense_window(const PlayerBarLayout& layout);
 static PlayerBarLayout draw_player_bar(IAudioSource* active);
 static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout);
 
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    const bool intercept = g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible;
+    const bool intercept = g_ui.player_visible || g_ui.settings_visible ||
+                           g_ui.dualsense_visible || g_ui.stations_visible;
     if (intercept) {
         if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam)) {
             return true;
@@ -239,7 +248,8 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ui.player_visible = !g_ui.player_visible;
         if (g_ui.is_init) {
-            ImGui::GetIO().MouseDrawCursor = g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible;
+            ImGui::GetIO().MouseDrawCursor = g_ui.player_visible || g_ui.settings_visible ||
+                                             g_ui.dualsense_visible || g_ui.stations_visible;
         }
         return 0;
     }
@@ -472,6 +482,297 @@ static void draw_bordered_background(float rounding = 6.0f) {
     fdl->PopClipRect();
 }
 
+template <class Fn>
+void patch_dualsense(Fn&& fn) {
+    g_ctx.store->patch([&](Config& c) { fn(c.dualsense); });
+}
+
+bool dualsense_toggle(const char* label, bool value, bool DualSenseConfig::*field) {
+    if (ImGui::Toggle(label, &value)) {
+        patch_dualsense([=](DualSenseConfig& c) { c.*field = value; });
+        return true;
+    }
+    return false;
+}
+
+bool dualsense_slider_int(const char* label, int value, int min, int max,
+                          int DualSenseConfig::*field) {
+    if (ImGui::SliderInt(label, &value, min, max)) {
+        patch_dualsense([=](DualSenseConfig& c) { c.*field = value; });
+        return true;
+    }
+    return false;
+}
+
+bool dualsense_slider_float(const char* label, float value, float min, float max,
+                            float DualSenseConfig::*field, const char* fmt = "%.2f") {
+    if (ImGui::SliderFloat(label, &value, min, max, fmt)) {
+        patch_dualsense([=](DualSenseConfig& c) { c.*field = value; });
+        return true;
+    }
+    return false;
+}
+
+static void refresh_dualsense_devices() {
+    g_ui.dualsense_devices = dualsense::enumerate_devices();
+    g_ui.dualsense_devices_dirty = false;
+}
+
+static void draw_dualsense_controller_picker(const DualSenseConfig& ds) {
+    if (g_ui.dualsense_devices_dirty) refresh_dualsense_devices();
+
+    int selected = 0;
+    for (size_t i = 0; i < g_ui.dualsense_devices.size(); ++i) {
+        if (!g_ui.dualsense_devices[i].serial.empty() &&
+            g_ui.dualsense_devices[i].serial == ds.controller_lock_serial) {
+            selected = static_cast<int>(i + 1);
+            break;
+        }
+    }
+
+    const char* preview =
+        selected == 0 ? "Auto (first found)"
+                      : g_ui.dualsense_devices[static_cast<size_t>(selected - 1)].name.c_str();
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::BeginCombo("Controller", preview)) {
+        const bool auto_selected = selected == 0;
+        if (ImGui::Selectable("Auto (first found)", auto_selected)) {
+            patch_dualsense([](DualSenseConfig& c) { c.controller_lock_serial.clear(); });
+        }
+        if (auto_selected) ImGui::SetItemDefaultFocus();
+
+        for (size_t i = 0; i < g_ui.dualsense_devices.size(); ++i) {
+            const auto& dev = g_ui.dualsense_devices[i];
+            const bool disabled = dev.serial.empty();
+            if (disabled) ImGui::BeginDisabled();
+            const bool is_selected = selected == static_cast<int>(i + 1);
+            const std::string label = disabled ? dev.name + " (no serial)" : dev.name;
+            if (ImGui::Selectable(label.c_str(), is_selected) && !disabled) {
+                patch_dualsense([serial = dev.serial](DualSenseConfig& c) {
+                    c.controller_lock_serial = serial;
+                });
+            }
+            if (is_selected) ImGui::SetItemDefaultFocus();
+            if (disabled) ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+
+    if (ImGui::Button("Rescan Controllers")) {
+        refresh_dualsense_devices();
+    }
+    ImGui::SameLine();
+    if (ds.controller_lock_serial.empty()) ImGui::BeginDisabled();
+    if (ImGui::Button("Identify")) {
+        enqueue_action([serial = ds.controller_lock_serial, force = ds.startup_pulse_force] {
+            (void)dualsense::identify_controller(serial, force);
+        });
+    }
+    if (ds.controller_lock_serial.empty()) ImGui::EndDisabled();
+}
+
+static void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
+    ImGui::Columns(2, "##dualsense_controls", false);
+    ImGui::TextDisabled("L2");
+    dualsense_toggle("L2 Shift Thump", ds.enable_gear_shift_brake,
+                     &DualSenseConfig::enable_gear_shift_brake);
+    dualsense_toggle("ABS Rumble", ds.enable_abs, &DualSenseConfig::enable_abs);
+    dualsense_toggle("Static Brake Wall", ds.enable_brake_static_wall,
+                     &DualSenseConfig::enable_brake_static_wall);
+    dualsense_toggle("Brake Stiffness", ds.enable_brake_resistance,
+                     &DualSenseConfig::enable_brake_resistance);
+    dualsense_toggle("Handbrake Bonus", ds.enable_handbrake_bonus,
+                     &DualSenseConfig::enable_handbrake_bonus);
+
+    ImGui::NextColumn();
+    ImGui::TextDisabled("R2");
+    dualsense_toggle("R2 Shift Thump", ds.enable_gear_shift,
+                     &DualSenseConfig::enable_gear_shift);
+    dualsense_toggle("Redline Buzz", ds.enable_rev_limiter,
+                     &DualSenseConfig::enable_rev_limiter);
+    dualsense_toggle("Wheelspin Buzz", ds.enable_wheelspin_buzz,
+                     &DualSenseConfig::enable_wheelspin_buzz);
+    dualsense_toggle("Idle Buzz", ds.enable_idle_buzz, &DualSenseConfig::enable_idle_buzz);
+    dualsense_toggle("Throttle Stiffness", ds.enable_throttle_resistance,
+                     &DualSenseConfig::enable_throttle_resistance);
+    ImGui::Columns(1);
+}
+
+static void draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
+    dualsense_slider_int("Wall Zones", ds.wall_zones, 1, 9, &DualSenseConfig::wall_zones);
+
+    if (ImGui::TreeNodeEx("Pedal Dead Zones", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_int("Gas Trigger Dead Zone", ds.accel_deadzone, 0, 255,
+                             &DualSenseConfig::accel_deadzone);
+        dualsense_slider_int("Brake Trigger Dead Zone", ds.brake_deadzone, 0, 255,
+                             &DualSenseConfig::brake_deadzone);
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNodeEx("Left Trigger - Brake Force", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_int("Resting Stiffness", ds.brake_baseline_force, 0, 255,
+                             &DualSenseConfig::brake_baseline_force);
+        dualsense_slider_int("Hard-Press Stiffness", ds.brake_max_force, 0, 255,
+                             &DualSenseConfig::brake_max_force);
+        dualsense_slider_float("Stiffness Curve Shape", ds.brake_curve, 0.1f, 20.0f,
+                               &DualSenseConfig::brake_curve);
+        dualsense_slider_int("Handbrake Extra Stiffness", ds.handbrake_bonus, 0, 255,
+                             &DualSenseConfig::handbrake_bonus);
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Left Trigger - Static Wall")) {
+        dualsense_slider_int("Wall Position", ds.brake_static_wall_at, 0, 255,
+                             &DualSenseConfig::brake_static_wall_at);
+        dualsense_slider_int("Wall Hardness", ds.brake_static_wall_force, 0, 255,
+                             &DualSenseConfig::brake_static_wall_force);
+        dualsense_slider_int("Brake Wall On", ds.brake_wall_engage_at, 0, 255,
+                             &DualSenseConfig::brake_wall_engage_at);
+        dualsense_slider_int("Brake Wall Off", ds.brake_wall_release_at, 0, 255,
+                             &DualSenseConfig::brake_wall_release_at);
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNodeEx("Right Trigger - Gas Force", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_int("Resting Stiffness", ds.throttle_baseline_force, 0, 255,
+                             &DualSenseConfig::throttle_baseline_force);
+        dualsense_slider_int("Hard-Press Stiffness", ds.throttle_max_force, 0, 255,
+                             &DualSenseConfig::throttle_max_force);
+        dualsense_slider_float("Stiffness Curve Shape", ds.throttle_curve, 0.1f, 20.0f,
+                               &DualSenseConfig::throttle_curve);
+        dualsense_slider_int("Throttle Wall On", ds.throttle_wall_engage_at, 0, 255,
+                             &DualSenseConfig::throttle_wall_engage_at);
+        dualsense_slider_int("Throttle Wall Off", ds.throttle_wall_release_at, 0, 255,
+                             &DualSenseConfig::throttle_wall_release_at);
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNodeEx("ABS Rumble", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_int("Only When Braking Harder Than", ds.abs_brake_threshold, 0, 255,
+                             &DualSenseConfig::abs_brake_threshold);
+        dualsense_slider_float("Only When Faster Than", ds.abs_min_speed_kmh, 0.0f, 500.0f,
+                               &DualSenseConfig::abs_min_speed_kmh, "%.0f km/h");
+        dualsense_slider_float("Wheel Slip Sensitivity", ds.abs_slip_ratio_threshold, 0.0f,
+                               10.0f, &DualSenseConfig::abs_slip_ratio_threshold);
+        dualsense_slider_float("Tire Grip Sensitivity", ds.abs_combined_slip_threshold, 0.0f,
+                               10.0f, &DualSenseConfig::abs_combined_slip_threshold);
+        dualsense_slider_int("Rumble Speed", ds.abs_freq, 0, 255, &DualSenseConfig::abs_freq);
+        dualsense_slider_int("Rumble Strength", ds.abs_amp, 0, 255, &DualSenseConfig::abs_amp);
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNodeEx("Redline Buzz", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_float("Fire Near Redline At", ds.rev_limit_ratio, 0.0f, 1.0f,
+                               &DualSenseConfig::rev_limit_ratio);
+        dualsense_slider_int("Buzz Speed", ds.rev_limit_freq, 0, 255,
+                             &DualSenseConfig::rev_limit_freq);
+        dualsense_slider_int("Buzz Strength", ds.rev_limit_amp, 0, 255,
+                             &DualSenseConfig::rev_limit_amp);
+        dualsense_slider_float("Buzz Hold Time", ds.rev_limit_hold_ms, 0.0f, 1000.0f,
+                               &DualSenseConfig::rev_limit_hold_ms, "%.0f ms");
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNodeEx("Wheelspin Buzz", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_int("Buzz Strength", ds.wheelspin_amp, 0, 255,
+                             &DualSenseConfig::wheelspin_amp);
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNodeEx("Idle Buzz", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_float("Idle Max Speed", ds.idle_max_speed_kmh, 0.0f, 100.0f,
+                               &DualSenseConfig::idle_max_speed_kmh, "%.0f km/h");
+        dualsense_slider_int("Idle Accel Max", ds.idle_accel_max, 0, 255,
+                             &DualSenseConfig::idle_accel_max);
+        dualsense_slider_int("Idle Frequency", ds.idle_freq, 0, 255,
+                             &DualSenseConfig::idle_freq);
+        dualsense_slider_int("Idle Low Amp", ds.idle_amp_low, 0, 255,
+                             &DualSenseConfig::idle_amp_low);
+        dualsense_slider_int("Idle Strength", ds.idle_amp_high, 0, 255,
+                             &DualSenseConfig::idle_amp_high);
+        dualsense_slider_float("Idle Period", ds.idle_period_s, 0.05f, 5.0f,
+                               &DualSenseConfig::idle_period_s, "%.2f s");
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNodeEx("Gear Shift Thump", ImGuiTreeNodeFlags_DefaultOpen)) {
+        dualsense_slider_int("Thump Speed", ds.gear_shift_freq, 0, 255,
+                             &DualSenseConfig::gear_shift_freq);
+        dualsense_slider_int("Thump Strength", ds.gear_shift_amp, 0, 255,
+                             &DualSenseConfig::gear_shift_amp);
+        dualsense_slider_float("Thump Length", ds.gear_shift_duration_ms, 0.0f, 2000.0f,
+                               &DualSenseConfig::gear_shift_duration_ms, "%.0f ms");
+        ImGui::TreePop();
+    }
+}
+
+static void draw_dualsense_controller_tab(const DualSenseConfig& ds) {
+    if (g_ctx.dualsense) {
+        const auto status = g_ctx.dualsense->status();
+        ImGui::TextDisabled("Controller: %s",
+                            status.controller_connected ? status.controller_name.c_str()
+                                                        : "not connected");
+        ImGui::TextDisabled("Telemetry: %s", status.telemetry_seen ? "seen" : "waiting");
+        if (!status.last_error.empty()) ImGui::TextWrapped("%s", status.last_error.c_str());
+    }
+
+    int udp_port = ds.udp_port;
+    ImGui::SetNextItemWidth(120.0f);
+    if (ImGui::InputInt("UDP Port", &udp_port, 0, 0)) {
+        udp_port = std::clamp(udp_port, 1, 65535);
+        patch_dualsense([=](DualSenseConfig& c) { c.udp_port = udp_port; });
+    }
+    ImGui::SameLine();
+    if (!ds.enabled) ImGui::BeginDisabled();
+    if (ImGui::Button("Send Test")) {
+        (void)dualsense::send_test_telemetry(ds.udp_port);
+    }
+    if (!ds.enabled) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Sends one synthetic Forza UDP packet to exercise trigger effects.");
+    }
+
+    dualsense_toggle("Startup Pulse", ds.enable_startup_pulse,
+                     &DualSenseConfig::enable_startup_pulse);
+    dualsense_slider_int("Startup Force", ds.startup_pulse_force, 0, 255,
+                         &DualSenseConfig::startup_pulse_force);
+    dualsense_toggle("Auto Reconnect", ds.enable_reconnect, &DualSenseConfig::enable_reconnect);
+    dualsense_slider_float("Reconnect Delay", ds.reconnect_interval_s, 0.1f, 60.0f,
+                           &DualSenseConfig::reconnect_interval_s, "%.1f s");
+    draw_dualsense_controller_picker(ds);
+}
+
+static void draw_dualsense_settings(const DualSenseConfig& ds) {
+    dualsense_toggle("Enable Triggers", ds.enabled, &DualSenseConfig::enabled);
+    ImGui::Separator();
+
+    if (ImGui::BeginTabBar("##dualsense_tabs")) {
+        if (ImGui::BeginTabItem("Controls")) {
+            draw_dualsense_controls_tab(ds);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Settings")) {
+            draw_dualsense_tuning_tab(ds);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Controller")) {
+            draw_dualsense_controller_tab(ds);
+            ImGui::Separator();
+            if (ImGui::Button("Reset DualSense Defaults")) {
+                patch_dualsense([](DualSenseConfig& c) {
+                    DualSenseConfig defaults;
+                    defaults.enabled = c.enabled;
+                    defaults.udp_port = c.udp_port;
+                    defaults.controller_lock_serial = c.controller_lock_serial;
+                    c = defaults;
+                });
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+}
+
 // ── UI section: settings window ────────────────────────────────────────
 
 static void draw_settings_window(const PlayerBarLayout& layout) {
@@ -480,15 +781,13 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
     const float set_tb  = ImGui::GetFrameHeight();
     ImGui::SetNextWindowPos(ImVec2(layout.gear_right, layout.pos.y + layout.size.y - set_tb),
                             ImGuiCond_Always, ImVec2(1.0f, 0));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(100.0f, 0), ImVec2(280.0f, 400.0f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f, 0), ImVec2(520.0f, 700.0f));
     ImGui::SetNextWindowBgAlpha(0.94f);
 
     ImGuiWindowFlags setFlags = ImGuiWindowFlags_AlwaysAutoResize |
                                 ImGuiWindowFlags_NoCollapse |
                                 ImGuiWindowFlags_NoResize |
                                 ImGuiWindowFlags_NoMove |
-                                ImGuiWindowFlags_NoScrollbar |
-                                ImGuiWindowFlags_NoScrollWithMouse |
                                 ImGuiWindowFlags_NoFocusOnAppearing |
                                 ImGuiWindowFlags_NoSavedSettings |
                                 ImGuiWindowFlags_NoBringToFrontOnFocus;
@@ -540,6 +839,50 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
             !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
             !ImGui::GetIO().WantCaptureMouse) {
             g_ui.settings_visible = false;
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
+}
+
+static void draw_dualsense_window(const PlayerBarLayout& layout) {
+    if (!g_ui.dualsense_visible) return;
+
+    const float set_tb = ImGui::GetFrameHeight();
+    ImGui::SetNextWindowPos(ImVec2(layout.dualsense_right, layout.pos.y + layout.size.y - set_tb),
+                            ImGuiCond_Always, ImVec2(1.0f, 0));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 0), ImVec2(620.0f, 760.0f));
+    ImGui::SetNextWindowBgAlpha(0.94f);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoCollapse |
+                             ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
+
+    if (ImGui::Begin("##DualSenseSettings", nullptr, flags)) {
+        draw_bordered_background();
+        ImGui::PushItemWidth(230.0f);
+        const auto cfg = g_ctx.store->snapshot();
+        draw_dualsense_settings(cfg.dualsense);
+        ImGui::PopItemWidth();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::IsMouseClicked(0) &&
+            !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
+            !ImGui::GetIO().WantCaptureMouse) {
+            g_ui.dualsense_visible = false;
         }
     }
     ImGui::End();
@@ -622,7 +965,10 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
             const char* preview = g_ui.combo_cache.names[g_ui.combo_sel].c_str();
             if (ImGui::ButtonScrollable(preview, ImVec2(130.0f, btn_h))) {
                 g_ui.stations_visible = !g_ui.stations_visible;
-                if (g_ui.stations_visible) g_ui.settings_visible = false;
+                if (g_ui.stations_visible) {
+                    g_ui.settings_visible = false;
+                    g_ui.dualsense_visible = false;
+                }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse stations");
             g_ui.btn_min = ImGui::GetItemRectMin();
@@ -779,14 +1125,37 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
         const ImU32 gear_rest = g_ui.settings_visible ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
         if (draw_icon_btn("##gear", "\uF8F0", gear_rest, hl_u32)) {
             g_ui.settings_visible = !g_ui.settings_visible;
-            if (g_ui.settings_visible) g_ui.stations_visible = false;
+            if (g_ui.settings_visible) {
+                g_ui.stations_visible = false;
+                g_ui.dualsense_visible = false;
+            }
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
+    }
+    const float gear_right = ImGui::GetItemRectMax().x;
+
+    ImGui::SameLine(0, 3);
+
+    // ── DualSense settings button ──
+    {
+        const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
+        const ImU32 hl_u32 = ImGui::GetColorU32(hl_col);
+        const ImU32 ds_rest =
+            g_ui.dualsense_visible ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
+        if (draw_icon_btn("##dualsense", "DS", ds_rest, hl_u32)) {
+            g_ui.dualsense_visible = !g_ui.dualsense_visible;
+            if (g_ui.dualsense_visible) {
+                g_ui.settings_visible = false;
+                g_ui.stations_visible = false;
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("DualSense");
     }
 
     // Capture layout data for the stations browser and settings before closing the window.
     PlayerBarLayout layout;
-    layout.gear_right = ImGui::GetItemRectMax().x;
+    layout.gear_right = gear_right;
+    layout.dualsense_right = ImGui::GetItemRectMax().x;
     layout.pos        = ImGui::GetWindowPos();
     layout.size       = ImGui::GetWindowSize();
 
@@ -959,6 +1328,7 @@ void draw_imgui_ui_impl() {
 
     auto layout = draw_player_bar(active);
     draw_settings_window(layout);
+    draw_dualsense_window(layout);
     draw_stations_browser(active, layout);
 }
 
@@ -1444,7 +1814,8 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             g_dx.device.reset(rawDev);            if (init_imgui(pSwapChain, active_queue)) {
                 ApplyTheme(g_ui.theme_idx);
                 g_ui.is_init                    = true;
-            ImGui::GetIO().MouseDrawCursor = g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible;
+            ImGui::GetIO().MouseDrawCursor = g_ui.player_visible || g_ui.settings_visible ||
+                                             g_ui.dualsense_visible || g_ui.stations_visible;
                 log::info("[overlay] Direct3D 12 Dear ImGui Overlay context initialized successfully!");
             } else {
                 cleanup_imgui_resources();
@@ -1454,7 +1825,8 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
 
     if (g_ui.is_init && active_queue) {
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
-        if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible && !g_ui.hud_visible) {
+        if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.dualsense_visible &&
+            !g_ui.stations_visible && !g_ui.hud_visible) {
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
         UINT backBufferIdx = 0;
@@ -1557,10 +1929,11 @@ void set_flush_audio(std::function<void()> fn) noexcept {
 // ── Full hook-based init (used by the game) ──────────────────────────────
 
 bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
-                ConfigStore& store) noexcept {
+                ConfigStore& store, dualsense::DualSenseService* dualsense) noexcept {
     g_ctx.mgr    = &mgr;
     g_ctx.bridge = &bridge;
     g_ctx.store  = &store;
+    g_ctx.dualsense = dualsense;
     start_action_worker();
 
     log::info("[overlay] starting dummy Direct3D 12 device context resolver...");

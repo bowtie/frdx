@@ -416,7 +416,6 @@ ShoutcastSource::~ShoutcastSource() {
 }
 
 bool ShoutcastSource::initialize() {
-    if (!cfg_.enabled) return false;
     if (!cfg_.default_url.empty()) {
         frdx::ScopedLock lk{mu_};
         target_url_ = cfg_.default_url;
@@ -544,6 +543,12 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
 // ---- select_station ----
 
 void ShoutcastSource::select_station(const std::string& station_id, const std::string& stream_id) {
+    // Stop old metadata producers before publishing the new active station.
+    // Otherwise a late WS/ICY write can briefly overwrite the freshly selected
+    // station metadata.
+    stop_icy_poller();
+    stop_metadata_poller();
+
     // Phase 1: configure under lock — fast path, no ffmpeg launch.
     std::string launch_url;
     std::string md_type;
@@ -605,11 +610,6 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
             static_info.artist = sanitize_brackets(station->metadata.static_artist);
         }
 
-        // Signal the old metadata thread to stop before restarting the
-        // pipe, so even if it's about to write a stale poll result to
-        // info_ it sees the flag and skips the write.
-        // (stop_metadata_poller() will request_stop on the jthread)
-
         // Stop old pipe (fast — no ffmpeg launch here).
         stop_pipe_locked();
     } // mu_ released — ffmpeg launch happens outside the lock
@@ -647,8 +647,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         }
     }
 
-    // Stop old poller and start the appropriate new one.
-    stop_metadata_poller();
+    // Start the appropriate new poller.
     restart_metadata_for_current();
 
     if (has_pipe) {
@@ -782,6 +781,9 @@ void ShoutcastSource::pause() {
 }
 
 void ShoutcastSource::cycle_and_restart(int direction) {
+    stop_icy_poller();
+    stop_metadata_poller();
+
     bool has_pipe = false;
     {
         frdx::ScopedLock lk{mu_};

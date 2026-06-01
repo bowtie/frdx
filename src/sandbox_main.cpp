@@ -6,6 +6,7 @@
 
 #include "frdx/audio_source_manager.hpp"
 #include "frdx/config_store.hpp"
+#include "frdx/dualsense.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/fmod/dx12_overlay.hpp"
 #include "frdx/log.hpp"
@@ -661,11 +662,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     frdx::ConfigStore store(cfg_path, cfg);
 
     frdx::AudioSourceManager mgr(4ull << 20);
+    frdx::dualsense::DualSenseService dualsense{cfg.dualsense};
+    dualsense.start();
 
     frdx::fmod_bridge::FMODFns fns{};
     frdx::fmod_bridge::DSPBridge bridge(mgr, fns);
     bridge.set_gain(cfg.audio.output_gain);
     bridge.set_force_stereo_audio(cfg.audio.force_stereo_audio);
+    store.on_change([&bridge, &dualsense](const frdx::Config& c) {
+        bridge.set_gain(c.audio.output_gain);
+        bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
+        dualsense.update_config(c.dualsense);
+    });
 
     // WASAPI audio output (replaces FMOD for the sandbox)
     WasapiOutput wasapi;
@@ -677,7 +685,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     auto stations_path = resolve_path("mods/frdx/stations.json");
 
     frdx::ShoutcastConfig sc_cfg{};
-    sc_cfg.enabled    = true;
     sc_cfg.ffmpeg_path = ffmpeg_path;
 
     auto src = std::make_unique<frdx::sources::ShoutcastSource>(sc_cfg);
@@ -720,7 +727,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     src->play();
 
     // ── 3. Install overlay hooks ─────────────────────────────────────────
-    if (!frdx::dx12_overlay::initialize(mgr, bridge, store)) {
+    if (!frdx::dx12_overlay::initialize(mgr, bridge, store, &dualsense)) {
         frdx::log::error("[sandbox] overlay initialize() failed");
         mgr.shutdown();
         return 1;

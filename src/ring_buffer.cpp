@@ -3,17 +3,20 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <limits>
 
 namespace frdx {
 
 std::size_t RingBuffer::round_pow2(std::size_t n) noexcept {
     if (n < 4096) n = 4096;
+    constexpr auto kMaxPow2 = std::size_t{1} << (std::numeric_limits<std::size_t>::digits - 1);
+    if (n > kMaxPow2) return kMaxPow2;
     return std::bit_ceil(n);
 }
 
 RingBuffer::RingBuffer(std::size_t capacity_bytes)
-    : data_{std::make_unique<std::byte[]>(round_pow2(capacity_bytes))},
-      capacity_{round_pow2(capacity_bytes)}, mask_{capacity_ - 1} {}
+    : capacity_{round_pow2(capacity_bytes)}, mask_{capacity_ - 1},
+      data_{std::make_unique<std::byte[]>(capacity_)} {}
 
 std::size_t RingBuffer::readable() const noexcept {
     return write_pos_.load(std::memory_order_acquire) - read_pos_.load(std::memory_order_acquire);

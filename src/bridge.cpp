@@ -4,6 +4,7 @@
 #include "frdx/log.hpp"
 #include "frdx/config.hpp"
 #include "frdx/config_store.hpp"
+#include "frdx/dualsense.hpp"
 #include "frdx/audio_source_manager.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/fmod/dsp_control_loop.hpp"
@@ -45,29 +46,16 @@ void run_bridge(HMODULE self) noexcept {
 
     const std::size_t ring_bytes = static_cast<std::size_t>(cfg.general.ring_buffer_mb) << 20;
     AudioSourceManager mgr{ring_bytes};
+    dualsense::DualSenseService dualsense{cfg.dualsense};
+    dualsense.start();
 
     // Own the sole audio source and hand a raw pointer to the manager.
-    std::unique_ptr<sources::ShoutcastSource> shoutcast;
-
-    auto sync_sources = [&](const Config& c) {
-        if (c.shoutcast.enabled) {
-            if (!shoutcast) {
-                shoutcast = std::make_unique<sources::ShoutcastSource>(c.shoutcast);
-                if (!shoutcast->initialize()) {
-                    shoutcast.reset();
-                    return;
-                }
-                mgr.set_source(shoutcast.get());
-            }
-        } else {
-            if (shoutcast) {
-                mgr.shutdown();
-                [[maybe_unused]] auto* _rel = shoutcast.release(); // mgr already shut it down
-            }
-        }
-    };
-
-    sync_sources(cfg);
+    auto shoutcast = std::make_unique<sources::ShoutcastSource>(cfg.shoutcast);
+    if (shoutcast->initialize()) {
+        mgr.set_source(shoutcast.get());
+    } else {
+        shoutcast.reset();
+    }
 
     // Load station presets catalog if present.
     if (shoutcast) {
@@ -85,19 +73,17 @@ void run_bridge(HMODULE self) noexcept {
     if (fns.ready())
         ctrl = std::make_unique<fmod_bridge::ControlLoop>(bridge, img, cfg.audio.output_gain);
 
-    store.on_change(
-        [&bridge, &mgr, &shoutcast, sync_sources, ctrl_ptr = ctrl.get()](const Config& c) {
-            sync_sources(c);
+    store.on_change([&bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get()](const Config& c) {
+        if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
 
-            if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
-
-            bridge.set_gain(c.audio.output_gain);
-            bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
-            if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
-        });
+        bridge.set_gain(c.audio.output_gain);
+        bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
+        dualsense.update_config(c.dualsense);
+        if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
+    });
 
     // Start the Direct3D 12 ImGui overlay detours
-    dx12_overlay::initialize(mgr, bridge, store);
+    dx12_overlay::initialize(mgr, bridge, store, &dualsense);
 
     for (;;) Sleep(60'000);
 }
