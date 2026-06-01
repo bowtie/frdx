@@ -8,6 +8,7 @@
 #include "frdx/subprocess.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -149,6 +150,12 @@ struct UiState {
 
     std::vector<dualsense::ControllerDevice> dualsense_devices;
     bool dualsense_devices_dirty = true;
+    bool dualsense_reset_armed = false;
+    float dualsense_anim = 0.0f;
+    int dualsense_tab = 0;
+    bool dualsense_settings_expanded = false;
+    float dualsense_tab_height[3] = {300.0f, 300.0f, 320.0f};
+    bool dualsense_tab_overflow[3] = {false, false, false};
 };
 // NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 static UiState g_ui;
@@ -220,6 +227,7 @@ struct PlayerBarLayout {
     float gear_right{};
     float dualsense_right{};
 };
+
 static void draw_hud(IAudioSource* active, const TrackInfo& track);
 static void draw_settings_window(const PlayerBarLayout& layout);
 static void draw_dualsense_window(const PlayerBarLayout& layout);
@@ -495,10 +503,66 @@ bool dualsense_toggle(const char* label, bool value, bool DualSenseConfig::*fiel
     return false;
 }
 
+void dualsense_numeric_layout(float& row_x, float& label_w, float& slider_w, float& input_w) {
+    const auto& style = ImGui::GetStyle();
+    row_x             = ImGui::GetCursorPosX() + 18.0f;
+    const float row_r = ImGui::GetWindowContentRegionMax().x - 4.0f;
+    const float avail = std::max(96.0f, row_r - row_x);
+    input_w           = 62.0f;
+    label_w           = std::min(210.0f, std::max(175.0f, avail * 0.52f));
+    slider_w          = std::max(72.0f, avail - label_w - input_w - style.ItemSpacing.x * 2.0f);
+}
+
+void dualsense_draw_centered_value(const char* text) {
+    if (ImGui::IsItemActive()) return;
+
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    const ImVec2 sz = ImGui::CalcTextSize(text);
+    const float x = min.x + (max.x - min.x - sz.x) * 0.5f;
+    const float y = min.y + (max.y - min.y - sz.y) * 0.5f;
+    ImGui::GetWindowDrawList()->AddText(ImVec2(x, y), ImGui::GetColorU32(ImGuiCol_Text),
+                                        text);
+}
+
 bool dualsense_slider_int(const char* label, int value, int min, int max,
                           int DualSenseConfig::*field) {
-    if (ImGui::SliderInt(label, &value, min, max)) {
-        patch_dualsense([=](DualSenseConfig& c) { c.*field = value; });
+    float row_x = 0.0f;
+    float label_w = 0.0f;
+    float slider_w = 0.0f;
+    float input_w = 0.0f;
+    dualsense_numeric_layout(row_x, label_w, slider_w, input_w);
+
+    int edited = value;
+    bool changed = false;
+    ImGui::PushID(label);
+    ImGui::SetCursorPosX(row_x);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(row_x + label_w);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGui::GetColorU32(ImGuiCol_FrameBg, 0.72f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImGui::GetColorU32(ImGuiCol_SliderGrab, 0.82f));
+    ImGui::SetNextItemWidth(slider_w);
+    changed |= ImGui::SliderInt("##slider", &edited, min, max, "");
+    ImGui::PopStyleColor(2);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(input_w);
+    const ImGuiID value_id = ImGui::GetID("##value");
+    const bool value_active = ImGui::GetStateStorage()->GetBool(value_id, false);
+    if (!value_active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+    changed |= ImGui::InputInt("##value", &edited, 0, 0);
+    ImGui::GetStateStorage()->SetBool(value_id, ImGui::IsItemActive());
+    if (!value_active) {
+        ImGui::PopStyleColor();
+        char value_buf[32];
+        std::snprintf(value_buf, sizeof(value_buf), "%d", edited);
+        dualsense_draw_centered_value(value_buf);
+    }
+    ImGui::PopID();
+
+    if (changed) {
+        edited = std::clamp(edited, min, max);
+        patch_dualsense([=](DualSenseConfig& c) { c.*field = edited; });
         return true;
     }
     return false;
@@ -506,11 +570,81 @@ bool dualsense_slider_int(const char* label, int value, int min, int max,
 
 bool dualsense_slider_float(const char* label, float value, float min, float max,
                             float DualSenseConfig::*field, const char* fmt = "%.2f") {
-    if (ImGui::SliderFloat(label, &value, min, max, fmt)) {
-        patch_dualsense([=](DualSenseConfig& c) { c.*field = value; });
+    float row_x = 0.0f;
+    float label_w = 0.0f;
+    float slider_w = 0.0f;
+    float input_w = 0.0f;
+    dualsense_numeric_layout(row_x, label_w, slider_w, input_w);
+
+    float edited = value;
+    bool changed = false;
+    ImGui::PushID(label);
+    ImGui::SetCursorPosX(row_x);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(row_x + label_w);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGui::GetColorU32(ImGuiCol_FrameBg, 0.72f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImGui::GetColorU32(ImGuiCol_SliderGrab, 0.82f));
+    ImGui::SetNextItemWidth(slider_w);
+    changed |= ImGui::SliderFloat("##slider", &edited, min, max, "");
+    ImGui::PopStyleColor(2);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(input_w);
+    const ImGuiID value_id = ImGui::GetID("##value");
+    const bool value_active = ImGui::GetStateStorage()->GetBool(value_id, false);
+    if (!value_active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0));
+    changed |= ImGui::InputFloat("##value", &edited, 0.0f, 0.0f, fmt);
+    ImGui::GetStateStorage()->SetBool(value_id, ImGui::IsItemActive());
+    if (!value_active) {
+        ImGui::PopStyleColor();
+        char value_buf[32];
+        std::snprintf(value_buf, sizeof(value_buf), fmt, edited);
+        dualsense_draw_centered_value(value_buf);
+    }
+    ImGui::PopID();
+
+    if (changed) {
+        edited = std::clamp(edited, min, max);
+        patch_dualsense([=](DualSenseConfig& c) { c.*field = edited; });
         return true;
     }
     return false;
+}
+
+bool dualsense_section_header(const char* label) {
+    ImGui::PushID(label);
+    ImGuiID id = ImGui::GetID("open");
+    bool open = ImGui::GetStateStorage()->GetBool(id, false);
+
+    const auto& style = ImGui::GetStyle();
+    const float inset = 4.0f;
+    const float width = std::max(64.0f, ImGui::GetContentRegionAvail().x - inset);
+    const float height = ImGui::GetFrameHeight();
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + inset * 0.5f);
+    ImGui::InvisibleButton("##section", ImVec2(width, height));
+    if (ImGui::IsItemClicked()) {
+        open = !open;
+        ImGui::GetStateStorage()->SetBool(id, open);
+    }
+
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+    const ImU32 bg = ImGui::GetColorU32(held ? ImGuiCol_HeaderActive
+                                      : hovered ? ImGuiCol_HeaderHovered
+                                                : ImGuiCol_Header);
+    const ImU32 text = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    auto* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(min, max, bg, style.FrameRounding);
+    dl->AddText(ImVec2(min.x + style.FramePadding.x, min.y + style.FramePadding.y),
+                text, open ? "\xE2\x96\xBE" : "\xE2\x96\xB8");
+    dl->AddText(ImVec2(min.x + style.FramePadding.x + 18.0f,
+                       min.y + style.FramePadding.y),
+                text, label);
+
+    ImGui::PopID();
+    return open;
 }
 
 static void refresh_dualsense_devices() {
@@ -533,8 +667,12 @@ static void draw_dualsense_controller_picker(const DualSenseConfig& ds) {
     const char* preview =
         selected == 0 ? "Auto (first found)"
                       : g_ui.dualsense_devices[static_cast<size_t>(selected - 1)].name.c_str();
-    ImGui::SetNextItemWidth(260.0f);
-    if (ImGui::BeginCombo("Controller", preview)) {
+    const float label_w = 82.0f;
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Controller");
+    ImGui::SameLine(label_w);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (ImGui::BeginCombo("##controller", preview)) {
         const bool auto_selected = selected == 0;
         if (ImGui::Selectable("Auto (first found)", auto_selected)) {
             patch_dualsense([](DualSenseConfig& c) { c.controller_lock_serial.clear(); });
@@ -557,23 +695,19 @@ static void draw_dualsense_controller_picker(const DualSenseConfig& ds) {
         }
         ImGui::EndCombo();
     }
-
-    if (ImGui::Button("Rescan Controllers")) {
-        refresh_dualsense_devices();
-    }
-    ImGui::SameLine();
-    if (ds.controller_lock_serial.empty()) ImGui::BeginDisabled();
-    if (ImGui::Button("Identify")) {
-        enqueue_action([serial = ds.controller_lock_serial, force = ds.startup_pulse_force] {
-            (void)dualsense::identify_controller(serial, force);
-        });
-    }
-    if (ds.controller_lock_serial.empty()) ImGui::EndDisabled();
 }
 
 static void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
+    if (!ds.enabled) ImGui::BeginDisabled();
     ImGui::Columns(2, "##dualsense_controls", false);
-    ImGui::TextDisabled("L2");
+    const auto center_column_label = [](const char* text) {
+        const float col_w = ImGui::GetColumnWidth();
+        const float text_w = ImGui::CalcTextSize(text).x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (col_w - text_w) * 0.5f));
+        ImGui::TextDisabled("%s", text);
+    };
+
+    center_column_label("\xEE\x83\x97");
     dualsense_toggle("L2 Shift Thump", ds.enable_gear_shift_brake,
                      &DualSenseConfig::enable_gear_shift_brake);
     dualsense_toggle("ABS Rumble", ds.enable_abs, &DualSenseConfig::enable_abs);
@@ -585,7 +719,7 @@ static void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
                      &DualSenseConfig::enable_handbrake_bonus);
 
     ImGui::NextColumn();
-    ImGui::TextDisabled("R2");
+    center_column_label("\xEE\x83\x98");
     dualsense_toggle("R2 Shift Thump", ds.enable_gear_shift,
                      &DualSenseConfig::enable_gear_shift);
     dualsense_toggle("Redline Buzz", ds.enable_rev_limiter,
@@ -596,20 +730,25 @@ static void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
     dualsense_toggle("Throttle Stiffness", ds.enable_throttle_resistance,
                      &DualSenseConfig::enable_throttle_resistance);
     ImGui::Columns(1);
+    if (!ds.enabled) ImGui::EndDisabled();
 }
 
-static void draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
-    dualsense_slider_int("Wall Zones", ds.wall_zones, 1, 9, &DualSenseConfig::wall_zones);
+static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
+    bool any_expanded = false;
 
-    if (ImGui::TreeNodeEx("Pedal Dead Zones", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (dualsense_section_header("Pedal Dead Zones")) {
+        any_expanded = true;
+        ImGui::PushID("Pedal Dead Zones");
         dualsense_slider_int("Gas Trigger Dead Zone", ds.accel_deadzone, 0, 255,
                              &DualSenseConfig::accel_deadzone);
         dualsense_slider_int("Brake Trigger Dead Zone", ds.brake_deadzone, 0, 255,
                              &DualSenseConfig::brake_deadzone);
-        ImGui::TreePop();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNodeEx("Left Trigger - Brake Force", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (dualsense_section_header("Left Trigger - Brake Force")) {
+        any_expanded = true;
+        ImGui::PushID("Left Trigger - Brake Force");
         dualsense_slider_int("Resting Stiffness", ds.brake_baseline_force, 0, 255,
                              &DualSenseConfig::brake_baseline_force);
         dualsense_slider_int("Hard-Press Stiffness", ds.brake_max_force, 0, 255,
@@ -618,36 +757,36 @@ static void draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
                                &DualSenseConfig::brake_curve);
         dualsense_slider_int("Handbrake Extra Stiffness", ds.handbrake_bonus, 0, 255,
                              &DualSenseConfig::handbrake_bonus);
-        ImGui::TreePop();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNode("Left Trigger - Static Wall")) {
+    if (dualsense_section_header("Left Trigger - Static Wall (optional)")) {
+        any_expanded = true;
+        ImGui::PushID("Left Trigger - Static Wall (optional)");
+        if (!ds.enable_brake_static_wall) ImGui::BeginDisabled();
         dualsense_slider_int("Wall Position", ds.brake_static_wall_at, 0, 255,
                              &DualSenseConfig::brake_static_wall_at);
         dualsense_slider_int("Wall Hardness", ds.brake_static_wall_force, 0, 255,
                              &DualSenseConfig::brake_static_wall_force);
-        dualsense_slider_int("Brake Wall On", ds.brake_wall_engage_at, 0, 255,
-                             &DualSenseConfig::brake_wall_engage_at);
-        dualsense_slider_int("Brake Wall Off", ds.brake_wall_release_at, 0, 255,
-                             &DualSenseConfig::brake_wall_release_at);
-        ImGui::TreePop();
+        if (!ds.enable_brake_static_wall) ImGui::EndDisabled();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNodeEx("Right Trigger - Gas Force", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (dualsense_section_header("Right Trigger - Gas Force")) {
+        any_expanded = true;
+        ImGui::PushID("Right Trigger - Gas Force");
         dualsense_slider_int("Resting Stiffness", ds.throttle_baseline_force, 0, 255,
                              &DualSenseConfig::throttle_baseline_force);
         dualsense_slider_int("Hard-Press Stiffness", ds.throttle_max_force, 0, 255,
                              &DualSenseConfig::throttle_max_force);
         dualsense_slider_float("Stiffness Curve Shape", ds.throttle_curve, 0.1f, 20.0f,
                                &DualSenseConfig::throttle_curve);
-        dualsense_slider_int("Throttle Wall On", ds.throttle_wall_engage_at, 0, 255,
-                             &DualSenseConfig::throttle_wall_engage_at);
-        dualsense_slider_int("Throttle Wall Off", ds.throttle_wall_release_at, 0, 255,
-                             &DualSenseConfig::throttle_wall_release_at);
-        ImGui::TreePop();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNodeEx("ABS Rumble", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (dualsense_section_header("ABS Rumble")) {
+        any_expanded = true;
+        ImGui::PushID("ABS Rumble");
         dualsense_slider_int("Only When Braking Harder Than", ds.abs_brake_threshold, 0, 255,
                              &DualSenseConfig::abs_brake_threshold);
         dualsense_slider_float("Only When Faster Than", ds.abs_min_speed_kmh, 0.0f, 500.0f,
@@ -658,10 +797,12 @@ static void draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
                                10.0f, &DualSenseConfig::abs_combined_slip_threshold);
         dualsense_slider_int("Rumble Speed", ds.abs_freq, 0, 255, &DualSenseConfig::abs_freq);
         dualsense_slider_int("Rumble Strength", ds.abs_amp, 0, 255, &DualSenseConfig::abs_amp);
-        ImGui::TreePop();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNodeEx("Redline Buzz", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (dualsense_section_header("Redline Buzz")) {
+        any_expanded = true;
+        ImGui::PushID("Redline Buzz");
         dualsense_slider_float("Fire Near Redline At", ds.rev_limit_ratio, 0.0f, 1.0f,
                                &DualSenseConfig::rev_limit_ratio);
         dualsense_slider_int("Buzz Speed", ds.rev_limit_freq, 0, 255,
@@ -670,57 +811,99 @@ static void draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
                              &DualSenseConfig::rev_limit_amp);
         dualsense_slider_float("Buzz Hold Time", ds.rev_limit_hold_ms, 0.0f, 1000.0f,
                                &DualSenseConfig::rev_limit_hold_ms, "%.0f ms");
-        ImGui::TreePop();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNodeEx("Wheelspin Buzz", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (dualsense_section_header("Wheelspin Buzz")) {
+        any_expanded = true;
+        ImGui::PushID("Wheelspin Buzz");
         dualsense_slider_int("Buzz Strength", ds.wheelspin_amp, 0, 255,
                              &DualSenseConfig::wheelspin_amp);
-        ImGui::TreePop();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNodeEx("Idle Buzz", ImGuiTreeNodeFlags_DefaultOpen)) {
-        dualsense_slider_float("Idle Max Speed", ds.idle_max_speed_kmh, 0.0f, 100.0f,
-                               &DualSenseConfig::idle_max_speed_kmh, "%.0f km/h");
-        dualsense_slider_int("Idle Accel Max", ds.idle_accel_max, 0, 255,
-                             &DualSenseConfig::idle_accel_max);
-        dualsense_slider_int("Idle Frequency", ds.idle_freq, 0, 255,
-                             &DualSenseConfig::idle_freq);
-        dualsense_slider_int("Idle Low Amp", ds.idle_amp_low, 0, 255,
-                             &DualSenseConfig::idle_amp_low);
+    if (dualsense_section_header("Idle Buzz")) {
+        any_expanded = true;
+        ImGui::PushID("Idle Buzz");
         dualsense_slider_int("Idle Strength", ds.idle_amp_high, 0, 255,
                              &DualSenseConfig::idle_amp_high);
-        dualsense_slider_float("Idle Period", ds.idle_period_s, 0.05f, 5.0f,
-                               &DualSenseConfig::idle_period_s, "%.2f s");
-        ImGui::TreePop();
+        ImGui::PopID();
     }
 
-    if (ImGui::TreeNodeEx("Gear Shift Thump", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (dualsense_section_header("Gear Shift Thump")) {
+        any_expanded = true;
+        ImGui::PushID("Gear Shift Thump");
         dualsense_slider_int("Thump Speed", ds.gear_shift_freq, 0, 255,
                              &DualSenseConfig::gear_shift_freq);
         dualsense_slider_int("Thump Strength", ds.gear_shift_amp, 0, 255,
                              &DualSenseConfig::gear_shift_amp);
         dualsense_slider_float("Thump Length", ds.gear_shift_duration_ms, 0.0f, 2000.0f,
                                &DualSenseConfig::gear_shift_duration_ms, "%.0f ms");
-        ImGui::TreePop();
+        ImGui::PopID();
     }
+
+    return any_expanded;
 }
 
 static void draw_dualsense_controller_tab(const DualSenseConfig& ds) {
-    if (g_ctx.dualsense) {
-        const auto status = g_ctx.dualsense->status();
-        ImGui::TextDisabled("Controller: %s",
-                            status.controller_connected ? status.controller_name.c_str()
-                                                        : "not connected");
-        ImGui::TextDisabled("Telemetry: %s", status.telemetry_seen ? "seen" : "waiting");
-        if (!status.last_error.empty()) ImGui::TextWrapped("%s", status.last_error.c_str());
+    const dualsense::RuntimeStatus status =
+        g_ctx.dualsense ? g_ctx.dualsense->status() : dualsense::RuntimeStatus{};
+
+    const ImVec4 green(0.36f, 0.85f, 0.46f, 1.0f);
+    const ImVec4 yellow(0.95f, 0.77f, 0.32f, 1.0f);
+    const ImVec4 red(0.95f, 0.35f, 0.35f, 1.0f);
+
+    draw_dualsense_controller_picker(ds);
+
+    if (status.controller_connected) {
+        ImGui::TextColored(green, "Connected");
+        ImGui::SameLine();
+        ImGui::TextUnformatted(status.controller_name.c_str());
+    } else {
+        ImGui::TextColored(yellow, "Waiting for controller");
     }
 
-    int udp_port = ds.udp_port;
-    ImGui::SetNextItemWidth(120.0f);
-    if (ImGui::InputInt("UDP Port", &udp_port, 0, 0)) {
-        udp_port = std::clamp(udp_port, 1, 65535);
-        patch_dualsense([=](DualSenseConfig& c) { c.udp_port = udp_port; });
+    if (ImGui::Button("Rescan")) {
+        refresh_dualsense_devices();
+    }
+    ImGui::SameLine();
+    if (ds.controller_lock_serial.empty()) ImGui::BeginDisabled();
+    if (ImGui::Button("Identify")) {
+        enqueue_action([serial = ds.controller_lock_serial, force = ds.startup_pulse_force] {
+            (void)dualsense::identify_controller(serial, force);
+        });
+    }
+    if (ds.controller_lock_serial.empty()) ImGui::EndDisabled();
+    const float reset_w = ImGui::CalcTextSize("Reset").x +
+                          ImGui::GetStyle().FramePadding.x * 2.0f;
+    const float reset_x = ImGui::GetWindowContentRegionMax().x - reset_w;
+    if (ImGui::GetCursorPosX() < reset_x) ImGui::SameLine(reset_x);
+    if (ImGui::Button("Reset")) {
+        patch_dualsense([](DualSenseConfig& c) {
+            DualSenseConfig defaults;
+            c.udp_port = defaults.udp_port;
+            c.enable_startup_pulse = defaults.enable_startup_pulse;
+            c.startup_pulse_force = defaults.startup_pulse_force;
+            c.enable_reconnect = defaults.enable_reconnect;
+            c.reconnect_interval_s = defaults.reconnect_interval_s;
+            c.controller_lock_serial.clear();
+        });
+    }
+
+    ImGui::Separator();
+
+    char udp_buf[6] = {};
+    std::snprintf(udp_buf, sizeof(udp_buf), "%d", ds.udp_port);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("UDP Port");
+    ImGui::SameLine(82.0f);
+    ImGui::SetNextItemWidth(68.0f);
+    if (ImGui::InputText("##udp_port", udp_buf, sizeof(udp_buf),
+                         ImGuiInputTextFlags_CharsDecimal)) {
+        if (udp_buf[0] != '\0') {
+            const int udp_port = std::clamp(std::atoi(udp_buf), 1, 65535);
+            patch_dualsense([=](DualSenseConfig& c) { c.udp_port = udp_port; });
+        }
     }
     ImGui::SameLine();
     if (!ds.enabled) ImGui::BeginDisabled();
@@ -728,48 +911,105 @@ static void draw_dualsense_controller_tab(const DualSenseConfig& ds) {
         (void)dualsense::send_test_telemetry(ds.udp_port);
     }
     if (!ds.enabled) ImGui::EndDisabled();
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Sends one synthetic Forza UDP packet to exercise trigger effects.");
+    ImGui::SameLine();
+    if (!status.last_error.empty()) {
+        ImGui::TextColored(red, "Error");
+    } else if (status.telemetry_seen) {
+        ImGui::TextColored(green, "Seen");
+    } else {
+        ImGui::TextColored(yellow, "Waiting");
     }
 
-    dualsense_toggle("Startup Pulse", ds.enable_startup_pulse,
-                     &DualSenseConfig::enable_startup_pulse);
-    dualsense_slider_int("Startup Force", ds.startup_pulse_force, 0, 255,
-                         &DualSenseConfig::startup_pulse_force);
-    dualsense_toggle("Auto Reconnect", ds.enable_reconnect, &DualSenseConfig::enable_reconnect);
-    dualsense_slider_float("Reconnect Delay", ds.reconnect_interval_s, 0.1f, 60.0f,
-                           &DualSenseConfig::reconnect_interval_s, "%.1f s");
-    draw_dualsense_controller_picker(ds);
+    if (!status.last_error.empty()) ImGui::TextWrapped("%s", status.last_error.c_str());
+
+    ImGui::Separator();
+
+    const bool startup_open = dualsense_section_header("Startup");
+    if (startup_open) {
+        dualsense_toggle("Startup Pulse", ds.enable_startup_pulse,
+                         &DualSenseConfig::enable_startup_pulse);
+        dualsense_slider_int("Startup Force", ds.startup_pulse_force, 0, 255,
+                             &DualSenseConfig::startup_pulse_force);
+    }
+
+    const bool reconnect_open = dualsense_section_header("Reconnect");
+    if (reconnect_open) {
+        dualsense_toggle("Auto Reconnect", ds.enable_reconnect,
+                         &DualSenseConfig::enable_reconnect);
+        dualsense_slider_float("Reconnect Delay", ds.reconnect_interval_s, 0.1f, 60.0f,
+                               &DualSenseConfig::reconnect_interval_s, "%.1f s");
+    }
+}
+
+static void draw_dualsense_reset_button() {
+    const bool armed = g_ui.dualsense_reset_armed;
+    if (armed) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.12f, 0.12f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.16f, 0.16f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.85f, 0.20f, 0.20f, 1.0f));
+    }
+
+    if (ImGui::Button(armed ? "Click Again To Reset" : "Reset DualSense Defaults")) {
+        if (!armed) {
+            g_ui.dualsense_reset_armed = true;
+        } else {
+            patch_dualsense([](DualSenseConfig& c) {
+                DualSenseConfig defaults;
+                defaults.enabled = c.enabled;
+                defaults.udp_port = c.udp_port;
+                defaults.controller_lock_serial = c.controller_lock_serial;
+                c = defaults;
+            });
+            g_ui.dualsense_reset_armed = false;
+        }
+    }
+
+    if (armed) ImGui::PopStyleColor(3);
+}
+
+static bool dualsense_tab_button(const char* label, int tab) {
+    const bool active = g_ui.dualsense_tab == tab;
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              ImGui::GetStyleColorVec4(ImGuiCol_TabHovered));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
+    }
+    const bool clicked = ImGui::Button(label);
+    if (active) ImGui::PopStyleColor(3);
+    if (clicked) g_ui.dualsense_tab = tab;
+    return clicked;
 }
 
 static void draw_dualsense_settings(const DualSenseConfig& ds) {
+    dualsense_tab_button("Triggers", 0);
+    ImGui::SameLine(0.0f, 3.0f);
+    dualsense_tab_button("Settings", 1);
+    ImGui::SameLine(0.0f, 3.0f);
+    dualsense_tab_button("Controller", 2);
+
+    const float toggle_w = 148.0f;
+    const float toggle_x = ImGui::GetWindowContentRegionMax().x - toggle_w;
+    if (ImGui::GetCursorPosX() < toggle_x) ImGui::SameLine(toggle_x);
     dualsense_toggle("Enable Triggers", ds.enabled, &DualSenseConfig::enabled);
     ImGui::Separator();
 
-    if (ImGui::BeginTabBar("##dualsense_tabs")) {
-        if (ImGui::BeginTabItem("Controls")) {
-            draw_dualsense_controls_tab(ds);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Settings")) {
-            draw_dualsense_tuning_tab(ds);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Controller")) {
-            draw_dualsense_controller_tab(ds);
-            ImGui::Separator();
-            if (ImGui::Button("Reset DualSense Defaults")) {
-                patch_dualsense([](DualSenseConfig& c) {
-                    DualSenseConfig defaults;
-                    defaults.enabled = c.enabled;
-                    defaults.udp_port = c.udp_port;
-                    defaults.controller_lock_serial = c.controller_lock_serial;
-                    c = defaults;
-                });
-            }
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+    if (g_ui.dualsense_tab == 0) {
+        g_ui.dualsense_settings_expanded = false;
+        draw_dualsense_controls_tab(ds);
+    } else if (g_ui.dualsense_tab == 1) {
+        if (!ds.enabled) ImGui::BeginDisabled();
+        g_ui.dualsense_settings_expanded = draw_dualsense_tuning_tab(ds);
+        ImGui::Separator();
+        draw_dualsense_reset_button();
+        if (!ds.enabled) ImGui::EndDisabled();
+    } else {
+        g_ui.dualsense_tab = 2;
+        g_ui.dualsense_settings_expanded = false;
+        if (!ds.enabled) ImGui::BeginDisabled();
+        draw_dualsense_controller_tab(ds);
+        if (!ds.enabled) ImGui::EndDisabled();
     }
 }
 
@@ -847,37 +1087,73 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
 }
 
 static void draw_dualsense_window(const PlayerBarLayout& layout) {
-    if (!g_ui.dualsense_visible) return;
+    const bool opening = g_ui.dualsense_visible;
+    const float dt = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
+    const float anim_delta = dt * 8.0f;
+    if (opening) {
+        g_ui.dualsense_anim = std::min(1.0f, g_ui.dualsense_anim + anim_delta);
+    } else {
+        g_ui.dualsense_anim = std::max(0.0f, g_ui.dualsense_anim - anim_delta);
+    }
+    if (!opening && g_ui.dualsense_anim < 0.01f) {
+        g_ui.dualsense_anim = 0.0f;
+        return;
+    }
 
     const float set_tb = ImGui::GetFrameHeight();
-    ImGui::SetNextWindowPos(ImVec2(layout.dualsense_right, layout.pos.y + layout.size.y - set_tb),
-                            ImGuiCond_Always, ImVec2(1.0f, 0));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 0), ImVec2(620.0f, 760.0f));
-    ImGui::SetNextWindowBgAlpha(0.94f);
+    const auto* vp    = ImGui::GetMainViewport();
+    const float win_top = layout.pos.y + layout.size.y - set_tb;
+    const float vp_room = std::max(200.0f, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f);
+    const float target_w = std::clamp(layout.size.x - 28.0f, 320.0f, 480.0f);
+    const int active_tab = std::clamp(g_ui.dualsense_tab, 0, 2);
+    const float max_h = std::min(active_tab == 1 ? 430.0f : vp_room, vp_room);
+    const float measured_target_h =
+        g_ui.dualsense_tab_height[active_tab] + (active_tab == 1 ? 1.0f : 0.0f);
+    const float target_h = std::clamp(measured_target_h, set_tb + 80.0f, max_h);
+    const float eased = 1.0f - (1.0f - g_ui.dualsense_anim) * (1.0f - g_ui.dualsense_anim);
+    const float current_h = std::max(set_tb + 4.0f, target_h * eased);
+    const float target_x = layout.pos.x + (layout.size.x - target_w) * 0.5f;
+    const float target_y = layout.pos.y + layout.size.y - set_tb;
+    const float slide_y = target_y - (1.0f - eased) * 18.0f;
+    ImGui::SetNextWindowPos(ImVec2(target_x, slide_y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.94f * eased);
 
-    ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize |
-                             ImGuiWindowFlags_NoCollapse |
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse |
                              ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoFocusOnAppearing |
                              ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (active_tab == 1 && g_ui.dualsense_settings_expanded) {
+        flags |= ImGuiWindowFlags_AlwaysVerticalScrollbar;
+    } else if (active_tab == 0 || active_tab == 2) {
+        flags |= ImGuiWindowFlags_NoScrollbar;
+    }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##DualSenseSettings", nullptr, flags)) {
         draw_bordered_background();
-        ImGui::PushItemWidth(230.0f);
-        const auto cfg = g_ctx.store->snapshot();
-        draw_dualsense_settings(cfg.dualsense);
-        ImGui::PopItemWidth();
+        if (current_h > set_tb * 2.0f) {
+            ImGui::PushItemWidth(180.0f);
+            const auto cfg = g_ctx.store->snapshot();
+            draw_dualsense_settings(cfg.dualsense);
+            ImGui::PopItemWidth();
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
+            const float measured_h =
+                ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y * 0.35f;
+            const int measured_tab = std::clamp(g_ui.dualsense_tab, 0, 2);
+            if (measured_tab != 1 || !g_ui.dualsense_settings_expanded) {
+                g_ui.dualsense_tab_height[measured_tab] = measured_h;
+            }
+            g_ui.dualsense_tab_overflow[measured_tab] =
+                measured_h > g_ui.dualsense_tab_height[measured_tab] + 1.0f;
+        }
 
         if (ImGui::IsMouseClicked(0) &&
             !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
@@ -887,7 +1163,7 @@ static void draw_dualsense_window(const PlayerBarLayout& layout) {
     }
     ImGui::End();
     ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
 }
 
 // ── UI section: player bar ─────────────────────────────────────────────
