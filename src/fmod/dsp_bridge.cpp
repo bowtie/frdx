@@ -39,6 +39,12 @@ inline float soft_clip(float x) noexcept {
     return std::copysign(a > 1.0f ? 1.0f : (a > k ? k + (1.0f - k) * over / (1.0f + over) : a), x);
 }
 
+inline int16_t load_s16(const std::byte* p) noexcept {
+    int16_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 // FMOD's `Handle::open` / `Handle::unlock` have no .rdata anchor; we match
 // their (unique) prologues directly.
 constexpr const char* kResolverPattern =
@@ -351,26 +357,22 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     const float scale    = gain * kAmp;
     const bool do_clip   = gain > 1.0f;
 
-    // Pull the ring in chunks: one ring.read() per chunk amortises the
-    // ring's two atomic loads over many frames. 1024 frames = 4 KiB stack,
-    // well under any sane FMOD callback budget.
+    // Pull the ring as contiguous spans and convert directly from its storage.
+    // This keeps the real-time mixer callback from copying each PCM chunk into
+    // a scratch buffer before doing the S16 -> float conversion.
     constexpr uint32_t kChunkFrames = 1024;
-    int16_t scratch[kChunkFrames * 2];
     auto& ring = b->mgr_.ring();
 
     uint32_t produced = 0;
-    for (; produced < length;) {
-        const uint32_t want_frames = std::min(length - produced, kChunkFrames);
-        const std::size_t got      = ring.read(scratch, want_frames * 4);
-        const auto got_frames      = static_cast<uint32_t>(got / 4);
-
+    auto mix_bytes = [&](const std::byte* pcm, uint32_t frames) {
         if (do_clip) {
-            for (uint32_t f = 0; f < got_frames; ++f) {
-                const float fl = scratch[f * 2 + 0] * scale;
-                const float fr = scratch[f * 2 + 1] * scale;
-                const float L  = soft_clip(fl);
-                const float R  = soft_clip(fr);
-                float* o       = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
+            for (uint32_t f = 0; f < frames; ++f) {
+                const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
+                const float fl    = load_s16(frame + 0) * scale;
+                const float fr    = load_s16(frame + 2) * scale;
+                const float L     = soft_clip(fl);
+                const float R     = soft_clip(fr);
+                float* o          = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
                 if (out_ch == 1) {
                     o[0] = (L + R) * 0.5f;
                 } else {
@@ -379,10 +381,11 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
                 }
             }
         } else {
-            for (uint32_t f = 0; f < got_frames; ++f) {
-                const float L = scratch[f * 2 + 0] * scale;
-                const float R = scratch[f * 2 + 1] * scale;
-                float* o      = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
+            for (uint32_t f = 0; f < frames; ++f) {
+                const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
+                const float L     = load_s16(frame + 0) * scale;
+                const float R     = load_s16(frame + 2) * scale;
+                float* o          = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
                 if (out_ch == 1) {
                     o[0] = (L + R) * 0.5f;
                 } else {
@@ -391,11 +394,28 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
                 }
             }
         }
+        produced += frames;
+    };
 
-        produced += got_frames;
-        if (got_frames < want_frames) {
+    for (; produced < length;) {
+        const uint32_t want_frames = std::min(length - produced, kChunkFrames);
+        auto bytes                 = ring.readable_span(static_cast<std::size_t>(want_frames) * 4);
+        if (bytes.empty()) break;
+
+        const std::size_t whole_frame_bytes = bytes.size() & ~std::size_t{3};
+        if (whole_frame_bytes == 0) {
+            std::byte frame[4];
+            const std::size_t got = ring.read(frame, sizeof(frame));
+            if (got == sizeof(frame)) {
+                mix_bytes(frame, 1);
+                continue;
+            }
             break;
         }
+
+        const auto got_frames = static_cast<uint32_t>(whole_frame_bytes / 4);
+        mix_bytes(bytes.data(), got_frames);
+        ring.consume(whole_frame_bytes);
     }
 
     if (produced < length) {

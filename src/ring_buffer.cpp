@@ -61,6 +61,27 @@ std::size_t RingBuffer::read(void* dst, std::size_t n) noexcept {
     return n;
 }
 
+std::span<const std::byte> RingBuffer::readable_span(std::size_t n) const noexcept {
+    if (n == 0) return {};
+
+    const auto r     = read_pos_.load(std::memory_order_relaxed);
+    const auto w     = write_pos_.load(std::memory_order_acquire);
+    const auto avail = w - r;
+    if (avail == 0) return {};
+    if (n > avail) n = avail;
+
+    const auto off  = r & mask_;
+    const auto tail = std::min(n, capacity_ - off);
+    return {data_.get() + off, tail};
+}
+
+void RingBuffer::consume(std::size_t n) noexcept {
+    if (n == 0) return;
+
+    const auto r = read_pos_.load(std::memory_order_relaxed);
+    read_pos_.store(r + n, std::memory_order_release);
+}
+
 void RingBuffer::drain() noexcept {
     read_pos_.store(write_pos_.load(std::memory_order_acquire), std::memory_order_release);
 }

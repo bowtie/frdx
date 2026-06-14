@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 
 namespace frdx {
 
@@ -31,6 +32,12 @@ public:
 
     // Reads up to `n` bytes; returns the actual count read.
     std::size_t read(void* dst, std::size_t n) noexcept;
+
+    // Returns the first contiguous readable span, capped at `n` bytes.
+    std::span<const std::byte> readable_span(std::size_t n) const noexcept;
+
+    // Advances the read cursor after consuming bytes from readable_span().
+    void consume(std::size_t n) noexcept;
 
     // Discard everything currently in flight (advance read to write).
     void drain() noexcept;

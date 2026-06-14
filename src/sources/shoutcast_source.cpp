@@ -51,6 +51,16 @@ std::optional<std::size_t> parse_json_array_index(std::string_view text) noexcep
     return value;
 }
 
+std::optional<int> parse_positive_int(std::string_view text) noexcept {
+    if (text.empty()) return std::nullopt;
+    int value           = 0;
+    const auto* first   = text.data();
+    const auto* last    = first + text.size();
+    const auto [ptr, ec] = std::from_chars(first, last, value);
+    if (ec != std::errc{} || ptr != last || value <= 0) return std::nullopt;
+    return value;
+}
+
 // Resolve the ffmpeg binary path.  Checks the configured path first, then
 // a bundled <game>/mods/frdx/ffmpeg/ffmpeg.exe, then falls back to PATH lookup.
 std::wstring resolve_ffmpeg_path(const std::filesystem::path& configured) {
@@ -166,7 +176,9 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
         sp.id   = j.value("id", "");
         sp.name = j.value("name", "");
         if (j.contains("streams") && j["streams"].is_array()) {
-            for (const auto& s : j["streams"]) {
+            const auto& streams = j["streams"];
+            sp.streams.reserve(streams.size());
+            for (const auto& s : streams) {
                 StationStream ss;
                 ss.id   = s.value("id", "");
                 ss.name = s.value("name", "");
@@ -223,6 +235,7 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
     };
 
     if (root.is_array()) {
+        out.reserve(root.size());
         for (const auto& j : root) out.push_back(parse_station(j));
     } else {
         out.push_back(parse_station(root));
@@ -1117,10 +1130,7 @@ void ShoutcastSource::run_ws_poller(std::string url, const StationMetadataMappin
             if (!hb.interval_field.empty()) {
                 std::string ival = resolve_json_path(msg, hb.interval_field);
                 if (!ival.empty()) {
-                    try {
-                        int new_interval = std::stoi(ival);
-                        if (new_interval > 0) heartbeat_ms = new_interval;
-                    } catch (...) {}
+                    if (auto new_interval = parse_positive_int(ival)) heartbeat_ms = *new_interval;
                 }
             }
 
@@ -1494,7 +1504,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                     log::info("[shoutcast] ffmpeg icy metadata: {} - {}", logged_artist,
                               logged_title);
                 } else if (line.find("StreamTitle") == std::string_view::npos) {
-                    log::warn("[shoutcast] ffmpeg: {}", std::string{line});
+                    log::warn("[shoutcast] ffmpeg: {}", line);
                 }
             }
             if (consumed > 0) p->stderr_buf.erase(0, consumed);

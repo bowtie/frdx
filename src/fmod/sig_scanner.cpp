@@ -52,6 +52,7 @@ ParsedPattern parse_one(std::string_view text) {
 
 std::vector<ParsedPattern> parse_alternatives(std::string_view text) {
     std::vector<ParsedPattern> out;
+    out.reserve(1 + static_cast<std::size_t>(std::ranges::count(text, '|')));
     std::size_t start = 0;
     for (std::size_t i = 0; i <= text.size(); ++i) {
         if (i == text.size() || text[i] == '|') {
@@ -85,6 +86,7 @@ std::vector<const std::byte*> find_anchor_strings(const PEImage& img, std::strin
     std::vector<const std::byte*> hits;
     const std::size_t n = anchor.size();
     if (n == 0) return hits;
+    hits.reserve(4);
     const std::byte* s = img.rdata;
     const std::byte* e = img.rdata_end;
     if (e <= s || static_cast<std::size_t>(e - s) < n + 1) return hits;
@@ -103,6 +105,7 @@ std::vector<const std::byte*> find_lea_to(const PEImage& img,
                                           const std::vector<const std::byte*>& targets) {
     std::vector<const std::byte*> out;
     if (targets.empty()) return out;
+    out.reserve(targets.size());
 
     auto is_target = [&](const std::byte* p) { return std::ranges::binary_search(targets, p); };
 
@@ -130,6 +133,7 @@ std::vector<std::byte*> validate_candidates(const PEImage& img,
                                             const std::vector<const std::byte*>& leas,
                                             const std::vector<ParsedPattern>& alts) {
     std::vector<std::byte*> out;
+    out.reserve(std::min<std::size_t>(leas.size(), 8));
     for (const std::byte* lea : leas) {
         const auto rva = static_cast<uint32_t>(lea - img.base);
         auto it        = std::ranges::upper_bound(img.function_rvas, rva);
