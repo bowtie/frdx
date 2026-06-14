@@ -7,6 +7,7 @@
 #include "frdx/log.hpp"
 #include "frdx/subprocess.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <windows.h>
@@ -23,10 +24,10 @@
 #include <deque>
 #include <fstream>
 #include <functional>
-#include <sstream>
 #include <thread>
 #include <atomic>
 #include <optional>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -165,6 +166,14 @@ struct StationComboCache {
     const void* source_ptr = nullptr;
 };
 
+enum class ConsoleLineKind : uint8_t {
+    normal,
+    error,
+    warn,
+    overlay,
+    dualsense,
+};
+
 struct UiState {
     std::atomic<bool> player_visible{true};
     std::atomic<bool> settings_visible{false};
@@ -189,6 +198,10 @@ struct UiState {
     StationComboCache combo_cache;
     int combo_sel    = 0;
     bool combo_dirty = true;
+
+    std::vector<std::string> console_lines;
+    std::vector<ConsoleLineKind> console_line_kinds;
+    uint64_t console_log_generation = 0;
 
     std::vector<dualsense::ControllerDevice> dualsense_devices;
     dualsense::RuntimeStatus helper_status;
@@ -299,7 +312,7 @@ struct PlayerBarLayout {
     float dualsense_right{};
 };
 
-static void draw_hud(IAudioSource* active, const TrackInfo& track);
+static void draw_hud(IAudioSource* active, const TrackInfo& track, std::string_view title);
 static void draw_settings_window(const PlayerBarLayout& layout);
 static void draw_dualsense_window(const PlayerBarLayout& layout);
 static PlayerBarLayout draw_player_bar(IAudioSource* active);
@@ -1055,7 +1068,7 @@ static void close_player_children_except(bool keep_settings, bool keep_dualsense
     }
 }
 
-static void draw_hud(IAudioSource* active, const TrackInfo& track) {
+static void draw_hud(IAudioSource* active, const TrackInfo& track, std::string_view title) {
     if (!g_ui.hud_visible) return;
 
     ImGui::SetNextWindowBgAlpha(0.0f);
@@ -1069,8 +1082,8 @@ static void draw_hud(IAudioSource* active, const TrackInfo& track) {
     dl->ChannelsSplit(2);
     dl->ChannelsSetCurrent(1);
     if (active) {
-        std::string title = track.title.empty() ? active->display_name() : track.title;
-        ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "%s", title.c_str());
+        ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "%.*s",
+                           static_cast<int>(title.size()), title.data());
         ImGui::Separator();
         if (!track.artist.empty() && track.artist != "Select a station") {
             ImGui::TextColored(ImVec4(0.6f, 0.63f, 0.7f, 1.0f), "%s", track.artist.c_str());
@@ -1286,11 +1299,18 @@ static void refresh_dualsense_devices() {
     g_ui.dualsense_devices_dirty = false;
 }
 
-static std::vector<std::string> split_status_line(const std::string& line) {
-    std::vector<std::string> parts;
-    std::stringstream ss(line);
-    std::string part;
-    while (std::getline(ss, part, '\t')) parts.push_back(part);
+static std::array<std::string_view, 4> split_status_line(std::string_view line, size_t& count) {
+    std::array<std::string_view, 4> parts{};
+    count = 0;
+    while (count < parts.size()) {
+        const auto tab = line.find('\t');
+        if (tab == std::string_view::npos) {
+            parts[count++] = line;
+            break;
+        }
+        parts[count++] = line.substr(0, tab);
+        line.remove_prefix(tab + 1);
+    }
     return parts;
 }
 
@@ -1311,8 +1331,9 @@ static bool read_helper_status_file(dualsense::RuntimeStatus& status,
     std::string line;
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        const auto parts = split_status_line(line);
-        if (parts.size() < 2) continue;
+        size_t part_count = 0;
+        const auto parts  = split_status_line(line, part_count);
+        if (part_count < 2) continue;
         const auto& key = parts[0];
         if (key == "enabled") {
             next_status.enabled = parts[1] == "1";
@@ -1321,11 +1342,12 @@ static bool read_helper_status_file(dualsense::RuntimeStatus& status,
         } else if (key == "telemetry") {
             next_status.telemetry_seen = parts[1] == "1";
         } else if (key == "controller") {
-            next_status.controller_name = parts[1];
+            next_status.controller_name = std::string{parts[1]};
         } else if (key == "error") {
-            next_status.last_error = parts[1];
-        } else if (key == "device" && parts.size() >= 4) {
-            next_devices.push_back({parts[1], parts[2], parts[3] == "1"});
+            next_status.last_error = std::string{parts[1]};
+        } else if (key == "device" && part_count >= 4) {
+            next_devices.push_back(
+                {std::string{parts[1]}, std::string{parts[2]}, parts[3] == "1"});
         }
     }
 
@@ -1909,7 +1931,13 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
             g_ui.combo_cache.names.clear();
             g_ui.combo_cache.sids.clear();
             g_ui.combo_cache.strids.clear();
-            for (const auto& st : sc->stations_nolock()) {
+            const auto& stations = sc->stations_nolock();
+            size_t stream_count  = 0;
+            for (const auto& st : stations) stream_count += st.streams.size();
+            g_ui.combo_cache.names.reserve(stream_count);
+            g_ui.combo_cache.sids.reserve(stream_count);
+            g_ui.combo_cache.strids.reserve(stream_count);
+            for (const auto& st : stations) {
                 bool single = st.streams.size() == 1;
                 for (const auto& str : st.streams) {
                     g_ui.combo_cache.names.push_back(single ? st.name : str.name);
@@ -2199,7 +2227,8 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     const float target_x      = layout.pos.x + (layout.size.x - target_w) * 0.5f;
     const float target_y      = win_top;
     const auto& st_style      = ImGui::GetStyle();
-    const float station_count = static_cast<float>(sc_st->stations_nolock().size());
+    const auto& stations      = sc_st->stations_nolock();
+    const float station_count = static_cast<float>(stations.size());
     const float collapsed_h   = st_tb + st_style.WindowPadding.y * 2.0f +
                                 station_count * ImGui::GetFrameHeight() +
                                 std::max(0.0f, station_count - 1.0f) * st_style.ItemSpacing.y;
@@ -2242,7 +2271,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
         }
         int station_idx   = 0;
         bool any_expanded = false;
-        for (const auto& st : sc_st->stations_nolock()) {
+        for (const auto& st : stations) {
             ImGui::PushID(station_idx++);
             if (g_ui.stations_focus_active_on_open) {
                 set_dualsense_section_open(st.name.c_str(), st.id == active_st);
@@ -2300,6 +2329,25 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     ImGui::PopStyleVar(3);
 }
 
+static ConsoleLineKind classify_console_line(std::string_view line) {
+    if (line.find("ERROR") != std::string_view::npos) return ConsoleLineKind::error;
+    if (line.find("WARN") != std::string_view::npos) return ConsoleLineKind::warn;
+    if (line.find("[overlay]") != std::string_view::npos) return ConsoleLineKind::overlay;
+    if (line.find("[dualsense]") != std::string_view::npos) return ConsoleLineKind::dualsense;
+    return ConsoleLineKind::normal;
+}
+
+static ImVec4 console_line_color(ConsoleLineKind kind) {
+    switch (kind) {
+        case ConsoleLineKind::error: return ImVec4(1.0f, 0.38f, 0.38f, 1.0f);
+        case ConsoleLineKind::warn: return ImVec4(1.0f, 0.78f, 0.35f, 1.0f);
+        case ConsoleLineKind::overlay: return ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
+        case ConsoleLineKind::dualsense: return ImVec4(0.64f, 0.92f, 0.72f, 1.0f);
+        case ConsoleLineKind::normal: break;
+    }
+    return ImGui::GetStyleColorVec4(ImGuiCol_Text);
+}
+
 static void draw_console_window() {
     if (!g_ui.console_visible) return;
 
@@ -2316,11 +2364,24 @@ static void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
     if (ImGui::Begin("FRDX Console", nullptr, flags)) {
-        const auto lines = log::recent_lines();
+        const uint64_t log_generation = log::recent_generation();
+        if (g_ui.console_log_generation != log_generation) {
+            g_ui.console_lines          = log::recent_lines();
+            g_ui.console_line_kinds.clear();
+            g_ui.console_line_kinds.reserve(g_ui.console_lines.size());
+            for (const auto& line : g_ui.console_lines) {
+                g_ui.console_line_kinds.push_back(classify_console_line(line));
+            }
+            g_ui.console_log_generation = log_generation;
+        }
+        const auto& lines = g_ui.console_lines;
         ImGui::TextDisabled("%zu recent log lines", lines.size());
         ImGui::SameLine();
         if (ImGui::SmallButton("Copy")) {
             std::string joined;
+            size_t joined_size = 0;
+            for (const auto& line : lines) joined_size += line.size() + 1;
+            joined.reserve(joined_size);
             for (const auto& line : lines) {
                 joined += line;
                 joined += '\n';
@@ -2338,18 +2399,11 @@ static void draw_console_window() {
         ImGui::PushTextWrapPos(0.0f);
         for (size_t line_idx = 0; line_idx < lines.size(); ++line_idx) {
             const auto& line = lines[line_idx];
-            ImVec4 color     = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-            if (line.find("ERROR") != std::string::npos) {
-                color = ImVec4(1.0f, 0.38f, 0.38f, 1.0f);
-            } else if (line.find("WARN") != std::string::npos) {
-                color = ImVec4(1.0f, 0.78f, 0.35f, 1.0f);
-            } else if (line.find("[overlay]") != std::string::npos) {
-                color = ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
-            } else if (line.find("[dualsense]") != std::string::npos) {
-                color = ImVec4(0.64f, 0.92f, 0.72f, 1.0f);
-            }
+            const ConsoleLineKind kind =
+                line_idx < g_ui.console_line_kinds.size() ? g_ui.console_line_kinds[line_idx]
+                                                          : ConsoleLineKind::normal;
             ImGui::PushID(static_cast<int>(line_idx));
-            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::PushStyleColor(ImGuiCol_Text, console_line_color(kind));
             ImGui::TextWrapped("%s", line.c_str());
             ImGui::PopStyleColor();
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
@@ -2391,18 +2445,28 @@ void draw_imgui_ui_impl() {
 
     auto* active = g_ctx.mgr->active();
 
-    // Track info cache – only calls current_track() when generation changes
-    static uint64_t s_track_gen = 0;
+    // Track info cache - only calls current_track() when source or generation changes.
+    static IAudioSource* s_track_source = nullptr;
+    static uint64_t s_track_gen         = 0;
     static TrackInfo s_cached_track;
+    static std::string s_cached_hud_title;
     if (active) {
         uint64_t gen = active->track_generation();
-        if (gen != s_track_gen) {
-            s_track_gen    = gen;
-            s_cached_track = active->current_track();
+        if (active != s_track_source || gen == 0 || gen != s_track_gen) {
+            s_track_source     = active;
+            s_track_gen        = gen;
+            s_cached_track     = active->current_track();
+            s_cached_hud_title = s_cached_track.title.empty() ? active->display_name()
+                                                              : s_cached_track.title;
         }
+    } else {
+        s_track_source = nullptr;
+        s_track_gen    = 0;
+        s_cached_track = {};
+        s_cached_hud_title.clear();
     }
 
-    draw_hud(active, s_cached_track);
+    draw_hud(active, s_cached_track, s_cached_hud_title);
 
     if (!g_ui.player_visible) {
         draw_console_window();

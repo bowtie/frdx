@@ -12,11 +12,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cwctype>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -81,6 +79,7 @@ struct HidLayout {
 
 constexpr HidLayout kUsb{0x02, 1, 11, 22, 64, false};
 constexpr HidLayout kBt{0x31, 2, 12, 23, 78, true};
+constexpr size_t kMaxReportSize = kBt.size;
 constexpr uint8_t kTriggerFlags = 0x04 | 0x08;
 
 detail::unique_handle open_hid_query_handle(const wchar_t* path) {
@@ -303,7 +302,7 @@ std::optional<Telemetry> parse_packet(const uint8_t* p, size_t n) {
     return t;
 }
 
-uint32_t crc32(const uint8_t* data, size_t len, uint32_t crc = 0xFFFFFFFFu) {
+uint32_t crc32_update(const uint8_t* data, size_t len, uint32_t crc = 0xFFFFFFFFu) {
     static std::array<uint32_t, 256> table = [] {
         std::array<uint32_t, 256> t{};
         for (uint32_t i = 0; i < t.size(); ++i) {
@@ -314,40 +313,69 @@ uint32_t crc32(const uint8_t* data, size_t len, uint32_t crc = 0xFFFFFFFFu) {
         return t;
     }();
     for (size_t i = 0; i < len; ++i) crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8u);
+    return crc;
+}
+
+uint32_t bt_crc(const uint8_t* data) {
+    constexpr uint8_t kBtCrcPrefix = 0xA2;
+    uint32_t crc                   = crc32_update(&kBtCrcPrefix, 1);
+    crc                            = crc32_update(data, 74, crc);
     return crc ^ 0xFFFFFFFFu;
 }
 
-uint32_t bt_crc(const std::vector<uint8_t>& buf) {
-    std::vector<uint8_t> tmp;
-    tmp.reserve(75);
-    tmp.push_back(0xA2);
-    tmp.insert(tmp.end(), buf.begin(), buf.begin() + 74);
-    return crc32(tmp.data(), tmp.size());
+constexpr wchar_t ascii_upper(wchar_t c) noexcept {
+    return c >= L'a' && c <= L'z' ? static_cast<wchar_t>(c - (L'a' - L'A')) : c;
+}
+
+constexpr char ascii_upper(char c) noexcept {
+    return c >= 'a' && c <= 'z' ? static_cast<char>(c - ('a' - 'A')) : c;
+}
+
+bool contains_ascii_ci(std::wstring_view haystack, std::wstring_view needle) noexcept {
+    if (needle.empty()) return true;
+    if (haystack.size() < needle.size()) return false;
+
+    for (size_t i = 0; i <= haystack.size() - needle.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            if (ascii_upper(haystack[i + j]) != ascii_upper(needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+bool contains_ascii_ci(std::string_view haystack, std::string_view needle) noexcept {
+    if (needle.empty()) return true;
+    if (haystack.size() < needle.size()) return false;
+
+    for (size_t i = 0; i <= haystack.size() - needle.size(); ++i) {
+        bool match = true;
+        for (size_t j = 0; j < needle.size(); ++j) {
+            if (ascii_upper(haystack[i + j]) != ascii_upper(needle[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
 }
 
 bool path_is_bluetooth(std::wstring_view path) {
-    std::wstring upper(path);
-    std::transform(upper.begin(), upper.end(), upper.begin(),
-                   [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
-    return upper.find(L"BTHENUM") != std::wstring::npos ||
-           upper.find(L"BLUETOOTH") != std::wstring::npos;
+    return contains_ascii_ci(path, L"BTHENUM") || contains_ascii_ci(path, L"BLUETOOTH");
 }
 
 bool path_is_dualsense(std::wstring_view path) {
-    std::wstring upper(path);
-    std::transform(upper.begin(), upper.end(), upper.begin(),
-                   [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
-    return upper.find(L"VID_054C") != std::wstring::npos &&
-           (upper.find(L"PID_0CE6") != std::wstring::npos ||
-            upper.find(L"PID_0DF2") != std::wstring::npos);
+    return contains_ascii_ci(path, L"VID_054C") &&
+           (contains_ascii_ci(path, L"PID_0CE6") || contains_ascii_ci(path, L"PID_0DF2"));
 }
 
 bool path_is_col03(std::wstring_view path) {
-    std::wstring upper(path);
-    std::transform(upper.begin(), upper.end(), upper.begin(),
-                   [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
-    return upper.find(L"&COL03#") != std::wstring::npos ||
-           upper.find(L"MI_03") != std::wstring::npos;
+    return contains_ascii_ci(path, L"&COL03#") || contains_ascii_ci(path, L"MI_03");
 }
 
 std::string utf8_from_wide(std::wstring_view s) {
@@ -445,10 +473,7 @@ std::string hidapi_display_name(const HidApiCandidate& info) {
 }
 
 bool hidapi_path_is_col03(std::string_view path) {
-    std::string upper(path);
-    std::transform(upper.begin(), upper.end(), upper.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    return upper.find("&COL03#") != std::string::npos || upper.find("MI_03") != std::string::npos;
+    return contains_ascii_ci(path, "&COL03#") || contains_ascii_ci(path, "MI_03");
 }
 
 std::vector<HidApiCandidate> enumerate_hidapi_controllers() {
@@ -463,16 +488,15 @@ std::vector<HidApiCandidate> enumerate_hidapi_controllers() {
     hid_device_info* root = hid_enumerate(kVendorSony, 0);
     for (hid_device_info* cur = root; cur; cur = cur->next) {
         ++g_last_scan_stats.hidapi_devices;
-        const bool dualsense =
-            cur->vendor_id == kVendorSony &&
-            (cur->product_id == kDualSense || cur->product_id == kDualSenseEdge);
+        const bool dualsense = cur->vendor_id == kVendorSony &&
+                               (cur->product_id == kDualSense || cur->product_id == kDualSenseEdge);
         if (!dualsense) continue;
         ++g_last_scan_stats.hidapi_dualsense_paths;
 
-        const std::string path = cur->path ? cur->path : "";
-        const bool col03 = hidapi_path_is_col03(path) || cur->interface_number == 3;
+        const std::string path   = cur->path ? cur->path : "";
+        const bool col03         = hidapi_path_is_col03(path) || cur->interface_number == 3;
         const bool gamepad_usage = cur->usage_page == 1 && cur->usage == 5;
-        const bool bluetooth = cur->bus_type == HID_API_BUS_BLUETOOTH;
+        const bool bluetooth     = cur->bus_type == HID_API_BUS_BLUETOOTH;
         std::string serial;
         if (cur->serial_number && cur->serial_number[0] != L'\0') {
             serial = utf8_from_wide(cur->serial_number);
@@ -482,19 +506,19 @@ std::vector<HidApiCandidate> enumerate_hidapi_controllers() {
         log::info("[dualsense] HIDAPI DualSense path{} iface={} usage={:04X}:{:04X} bus={}: {}",
                   col03 ? " (col03)" : "", cur->interface_number, cur->usage_page, cur->usage,
                   static_cast<int>(cur->bus_type), path);
-        out.push_back({path, product, serial, bluetooth, gamepad_usage, col03,
-                       cur->interface_number});
+        out.push_back(
+            {path, product, serial, bluetooth, gamepad_usage, col03, cur->interface_number});
     }
     hid_free_enumeration(root);
 
-    std::stable_sort(out.begin(), out.end(), [](const HidApiCandidate& a,
-                                                const HidApiCandidate& b) {
-        const int sa = (a.col03 ? 16 : 0) + (a.interface_no == 3 ? 8 : 0) +
-                       (a.gamepad_usage ? 2 : 0) + (a.bluetooth ? 0 : 1);
-        const int sb = (b.col03 ? 16 : 0) + (b.interface_no == 3 ? 8 : 0) +
-                       (b.gamepad_usage ? 2 : 0) + (b.bluetooth ? 0 : 1);
-        return sa > sb;
-    });
+    std::stable_sort(out.begin(), out.end(),
+                     [](const HidApiCandidate& a, const HidApiCandidate& b) {
+                         const int sa = (a.col03 ? 16 : 0) + (a.interface_no == 3 ? 8 : 0) +
+                                        (a.gamepad_usage ? 2 : 0) + (a.bluetooth ? 0 : 1);
+                         const int sb = (b.col03 ? 16 : 0) + (b.interface_no == 3 ? 8 : 0) +
+                                        (b.gamepad_usage ? 2 : 0) + (b.bluetooth ? 0 : 1);
+                         return sa > sb;
+                     });
     if (out.empty()) {
         log::warn("[dualsense] HIDAPI found no DualSense paths; scanned Sony HID devices={}",
                   g_last_scan_stats.hidapi_devices);
@@ -536,8 +560,10 @@ void append_rawinput_dualsense_devices(std::vector<ControllerInfo>& out,
         if (!path.empty() && path.back() == L'\0') path.pop_back();
         if (!path_is_dualsense(path)) continue;
         ++stats.dualsense_paths;
-        log::info("[dualsense] Raw Input DualSense path{}: {}",
-                  path_is_col03(path) ? " (col03)" : "", utf8_from_wide(path));
+        const bool col03     = path_is_col03(path);
+        const bool bluetooth = path_is_bluetooth(path);
+        log::info("[dualsense] Raw Input DualSense path{}: {}", col03 ? " (col03)" : "",
+                  utf8_from_wide(path));
         if (contains_controller_path(out, path)) continue;
 
         detail::unique_handle h = open_hid_query_handle(path.c_str());
@@ -546,13 +572,7 @@ void append_rawinput_dualsense_devices(std::vector<ControllerInfo>& out,
             log::warn("[dualsense] Raw Input saw DualSense path but HID open is blocked "
                       "(win32 err {}): {}",
                       err, utf8_from_wide(path));
-            out.push_back({path,
-                           L"DualSense",
-                           {},
-                           path_is_bluetooth(path),
-                           false,
-                           false,
-                           path_is_col03(path)});
+            out.push_back({path, L"DualSense", {}, bluetooth, false, false, col03});
             continue;
         }
 
@@ -569,7 +589,7 @@ void append_rawinput_dualsense_devices(std::vector<ControllerInfo>& out,
         wchar_t product[128] = {};
         HidD_GetProductString(h.get(), product, sizeof(product));
         out.push_back({path, product[0] ? product : L"DualSense", read_controller_serial(h.get()),
-                       path_is_bluetooth(path), false, gamepad_usage, path_is_col03(path)});
+                       bluetooth, false, gamepad_usage, col03});
         log::info("[dualsense] Raw Input fallback found DualSense HID path: {}",
                   utf8_from_wide(path));
     }
@@ -602,10 +622,11 @@ std::vector<ControllerInfo> enumerate_controllers() {
             continue;
 
         const bool path_dualsense = path_is_dualsense(detail->DevicePath);
+        const bool path_col03     = path_dualsense && path_is_col03(detail->DevicePath);
+        const bool path_bluetooth = path_dualsense && path_is_bluetooth(detail->DevicePath);
         if (path_dualsense) {
             ++stats.dualsense_paths;
-            log::info("[dualsense] SetupAPI DualSense path{}: {}",
-                      path_is_col03(detail->DevicePath) ? " (col03)" : "",
+            log::info("[dualsense] SetupAPI DualSense path{}: {}", path_col03 ? " (col03)" : "",
                       utf8_from_wide(detail->DevicePath));
         }
         detail::unique_handle h = open_hid_query_handle(detail->DevicePath);
@@ -618,10 +639,10 @@ std::vector<ControllerInfo> enumerate_controllers() {
                 out.push_back({detail->DevicePath,
                                L"DualSense",
                                {},
-                               path_is_bluetooth(detail->DevicePath),
+                               path_bluetooth,
                                false,
                                false,
-                               path_is_col03(detail->DevicePath)});
+                               path_col03});
             }
             continue;
         }
@@ -635,10 +656,10 @@ std::vector<ControllerInfo> enumerate_controllers() {
                 out.push_back({detail->DevicePath,
                                L"DualSense",
                                {},
-                               path_is_bluetooth(detail->DevicePath),
+                               path_bluetooth,
                                false,
                                false,
-                               path_is_col03(detail->DevicePath)});
+                               path_col03});
             }
             continue;
         }
@@ -666,9 +687,12 @@ std::vector<ControllerInfo> enumerate_controllers() {
 
         wchar_t product[128] = {};
         HidD_GetProductString(h.get(), product, sizeof(product));
+        const bool selected_bluetooth =
+            path_dualsense ? path_bluetooth : path_is_bluetooth(detail->DevicePath);
+        const bool selected_col03 = path_dualsense ? path_col03 : path_is_col03(detail->DevicePath);
         out.push_back({detail->DevicePath, product[0] ? product : L"DualSense",
-                       read_controller_serial(h.get()), path_is_bluetooth(detail->DevicePath),
-                       false, gamepad_usage, path_is_col03(detail->DevicePath)});
+                       read_controller_serial(h.get()), selected_bluetooth, false, gamepad_usage,
+                       selected_col03});
     }
 
     SetupDiDestroyDeviceInfoList(devs);
@@ -692,9 +716,9 @@ std::vector<ControllerInfo> enumerate_controllers() {
                        (b.bluetooth ? 0 : 1);
         return sa > sb;
     });
-    const auto hidapi_devices = g_last_scan_stats.hidapi_devices;
-    const auto hidapi_paths   = g_last_scan_stats.hidapi_dualsense_paths;
-    g_last_scan_stats         = stats;
+    const auto hidapi_devices                = g_last_scan_stats.hidapi_devices;
+    const auto hidapi_paths                  = g_last_scan_stats.hidapi_dualsense_paths;
+    g_last_scan_stats                        = stats;
     g_last_scan_stats.hidapi_devices         = hidapi_devices;
     g_last_scan_stats.hidapi_dualsense_paths = hidapi_paths;
     if (out.empty()) {
@@ -705,17 +729,31 @@ std::vector<ControllerInfo> enumerate_controllers() {
     return out;
 }
 
-std::vector<uint8_t> build_report(const HidLayout& layout, const TriggerEffect& left,
-                                  const TriggerEffect& right) {
-    std::vector<uint8_t> report(layout.size, 0);
-    report[0] = layout.report_id;
-    if (layout.bluetooth) report[1] = 0x02;
-    report[layout.flags] = kTriggerFlags;
+struct HidReport {
+    std::array<uint8_t, kMaxReportSize> bytes{};
+    size_t length = 0;
+
+    uint8_t* data() noexcept { return bytes.data(); }
+    const uint8_t* data() const noexcept { return bytes.data(); }
+    size_t size() const noexcept { return length; }
+    uint8_t& operator[](size_t index) noexcept { return bytes[index]; }
+    const uint8_t& operator[](size_t index) const noexcept { return bytes[index]; }
+};
+
+uint32_t bt_crc(const HidReport& report) { return bt_crc(report.data()); }
+
+HidReport build_report(const HidLayout& layout, const TriggerEffect& left,
+                       const TriggerEffect& right) {
+    HidReport report;
+    report.length   = layout.size;
+    report.bytes[0] = layout.report_id;
+    if (layout.bluetooth) report.bytes[1] = 0x02;
+    report.bytes[layout.flags] = kTriggerFlags;
 
     auto write_effect = [&](size_t pos, const TriggerEffect& effect) {
-        report[pos] = static_cast<uint8_t>(effect.mode);
+        report.bytes[pos] = static_cast<uint8_t>(effect.mode);
         for (size_t i = 0; i < effect.param_count && i < effect.params.size(); ++i)
-            report[pos + 1 + i] = effect.params[i];
+            report.bytes[pos + 1 + i] = effect.params[i];
     };
     write_effect(layout.right, right);
     write_effect(layout.left, left);
@@ -727,7 +765,7 @@ std::vector<uint8_t> build_report(const HidLayout& layout, const TriggerEffect& 
     return report;
 }
 
-bool write_report(HANDLE h, const std::vector<uint8_t>& report) {
+bool write_report(HANDLE h, const HidReport& report) {
     DWORD written = 0;
     return WriteFile(h, report.data(), static_cast<DWORD>(report.size()), &written, nullptr) &&
            written != 0;
@@ -952,13 +990,13 @@ public:
         bool ok     = false;
         if (backend_ == HidWriteBackend::hidapi_write) {
             const int wrote = hid_write(hidapi_, report.data(), report.size());
-            ok = wrote > 0;
+            ok              = wrote > 0;
             if (!ok) {
                 log::warn("[dualsense] HIDAPI hid_write failed: {}", hidapi_error_utf8(hidapi_));
             }
         } else if (backend_ == HidWriteBackend::hidapi_output_report) {
             const int wrote = hid_send_output_report(hidapi_, report.data(), report.size());
-            ok = wrote > 0;
+            ok              = wrote > 0;
             if (!ok) {
                 log::warn("[dualsense] HIDAPI hid_send_output_report failed: {}",
                           hidapi_error_utf8(hidapi_));
@@ -981,10 +1019,9 @@ private:
     bool connect_hidapi(const std::string& locked_serial) {
         auto controllers = enumerate_hidapi_controllers();
         if (controllers.empty()) {
-            last_error_ =
-                "DualSense not found through HIDAPI (Sony HID=" +
-                std::to_string(g_last_scan_stats.hidapi_devices) + ", DualSense paths=" +
-                std::to_string(g_last_scan_stats.hidapi_dualsense_paths) + ")";
+            last_error_ = "DualSense not found through HIDAPI (Sony HID=" +
+                          std::to_string(g_last_scan_stats.hidapi_devices) + ", DualSense paths=" +
+                          std::to_string(g_last_scan_stats.hidapi_dualsense_paths) + ")";
             return false;
         }
 
@@ -1666,7 +1703,7 @@ bool identify_controller(const std::string& serial, int force) {
 
     const auto layout = it->bluetooth ? kBt : kUsb;
     const auto pulse  = rigid(static_cast<float>(force));
-    auto send_report  = [&](const std::vector<uint8_t>& rpt) {
+    auto send_report  = [&](const HidReport& rpt) {
         if (backend == HidWriteBackend::write_file) return write_report(h.get(), rpt);
         return HidD_SetOutputReport(h.get(), const_cast<uint8_t*>(rpt.data()),
                                     static_cast<ULONG>(rpt.size())) != FALSE;

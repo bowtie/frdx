@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frdx/audio_source.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/fmod/metadata_injector.hpp"
 #include "frdx/fmod/pe_image.hpp"
@@ -56,6 +57,10 @@ private:
     const PEImage& img_;
     std::atomic<float> configured_gain_;
     MetadataInjector meta_;
+    IAudioSource* metadata_source_     = nullptr;
+    std::uint64_t metadata_generation_ = 0;
+    TrackInfo metadata_track_;
+    std::string metadata_display_name_;
     std::uint64_t prev_calls_ = 0;
     int stale_ticks_          = 0;
     std::chrono::steady_clock::time_point last_reacquire_{}; // cooldown for rediscovery

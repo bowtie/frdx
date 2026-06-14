@@ -1,6 +1,7 @@
 #include "frdx/log.hpp"
 #include "frdx/detail/win32_handle.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <mutex>
@@ -17,6 +18,7 @@ using frdx::detail::unique_file;
 unique_file g_file;
 std::mutex g_mu;
 std::deque<std::string> g_recent;
+std::atomic<uint64_t> g_recent_generation{0};
 constexpr size_t kRecentLimit = 500;
 
 constexpr std::string_view level_name(Level l) noexcept {
@@ -63,15 +65,26 @@ void emit(Level level, std::string_view message) noexcept {
     std::snprintf(tsfull, sizeof(tsfull), "%s.%03lld", s_ts, static_cast<long long>(ms % 1000));
 
     std::scoped_lock lk{g_mu};
-    std::string line = std::format("{} {:5.{}} {:.{}}", tsfull, level_name(level).data(),
-                                   static_cast<int>(level_name(level).size()), message.data(),
-                                   static_cast<int>(message.size()));
+    const auto level_text = level_name(level);
+    std::string line;
+    line.reserve(std::char_traits<char>::length(tsfull) + 1 + 5 + 1 + message.size());
+    line.append(tsfull);
+    line.push_back(' ');
+    line.append(level_text);
+    if (level_text.size() < 5) line.append(5 - level_text.size(), ' ');
+    line.push_back(' ');
+    line.append(message);
     g_recent.push_back(line);
     while (g_recent.size() > kRecentLimit) g_recent.pop_front();
+    g_recent_generation.fetch_add(1, std::memory_order_release);
     if (g_file) {
         std::println(g_file.get(), "{}", line);
         std::fflush(g_file.get());
     }
+}
+
+uint64_t recent_generation() noexcept {
+    return g_recent_generation.load(std::memory_order_acquire);
 }
 
 std::vector<std::string> recent_lines() noexcept {

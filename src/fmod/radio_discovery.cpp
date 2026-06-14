@@ -68,16 +68,21 @@ const std::byte* find_col(const PEImage& img, uint32_t typedesc_rva) noexcept {
     return nullptr;
 }
 
-std::vector<std::byte*> find_vtable_candidates(const std::byte* s, const std::byte* e,
-                                               const std::byte* target) noexcept {
-    std::vector<std::byte*> out;
-    if (e <= s + 8) return out;
+std::size_t append_vtable_candidates(const std::byte* s, const std::byte* e,
+                                     const std::byte* target,
+                                     std::vector<std::byte*>& out) noexcept {
+    const auto first_new = out.size();
+    if (e <= s + 8) return first_new;
     for (const std::byte* p = s; p + 8 <= e; p += 8) {
         const std::byte* v;
         std::memcpy(&v, p, 8);
-        if (v == target) out.push_back(const_cast<std::byte*>(p) + 8);
+        if (v != target) continue;
+        auto* candidate = const_cast<std::byte*>(p) + 8;
+        if (std::find(out.begin(), out.end(), candidate) == out.end()) {
+            out.push_back(candidate);
+        }
     }
-    return out;
+    return first_new;
 }
 
 // Heap scan: walk every committed private R/W region, look for 16-byte
@@ -110,6 +115,7 @@ void scan_region(const PEImage& img, const std::byte* vtable, std::byte* p, std:
 
 std::vector<std::byte*> scan_heap(const PEImage& img, const std::byte* vtable) noexcept {
     std::vector<std::byte*> out;
+    out.reserve(kMaxHits);
     MEMORY_BASIC_INFORMATION mbi{};
     std::byte* addr           = nullptr;
     const std::byte* prev_end = nullptr;
@@ -240,18 +246,17 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
         // Try .rdata first (where vtables usually live), then the full image.
         std::byte* found_vt = nullptr;
         std::vector<std::byte*> found_vtables;
+        found_vtables.reserve(4);
         std::vector<std::byte*> found_candidates;
         for (int pass = 0; pass < 2 && found_candidates.empty(); ++pass) {
             const std::byte* s = pass == 0 ? img.rdata : img.base;
             const std::byte* e = pass == 0 ? img.rdata_end : img.base + img.size;
-            for (auto* vt : find_vtable_candidates(s, e, col)) {
+            const auto first_new = append_vtable_candidates(s, e, col, found_vtables);
+            for (std::size_t i = first_new; i < found_vtables.size(); ++i) {
+                auto* vt = found_vtables[i];
                 std::byte* first_method;
                 std::memcpy(&first_method, vt, 8);
                 if (first_method < img.base || first_method >= img.base + img.size) continue;
-                if (std::find(found_vtables.begin(), found_vtables.end(), vt) ==
-                    found_vtables.end()) {
-                    found_vtables.push_back(vt);
-                }
                 if (!found_vt) found_vt = vt;
 
                 auto hits = scan_heap(img, vt);
@@ -332,6 +337,7 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
 
     // Retry path: just re-validate the SoundName chain on cached candidates.
     int step_histogram[3] = {0, 0, 0};
+    result.instances.reserve(local.candidates.size());
     for (auto* refcount : local.candidates) {
         std::byte* radio_stream = refcount + 16;
         std::byte* body         = nullptr;

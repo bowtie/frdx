@@ -53,7 +53,7 @@ void ControlLoop::run(const std::stop_token& tok) {
 
     auto next = std::chrono::steady_clock::now();
     while (!tok.stop_requested()) {
-        const auto now  = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
         if (next < now) next = now;
         next += kTick;
         bridge_.manager().pump_once();
@@ -161,17 +161,31 @@ FRDX_NO_THREAD_SAFETY_ANALYSIS
 void ControlLoop::push_metadata() noexcept {
     auto* a = bridge_.manager().active();
     if (!a) {
+        metadata_source_     = nullptr;
+        metadata_generation_ = 0;
+        metadata_track_      = {};
+        metadata_display_name_.clear();
         [[maybe_unused]] auto _meta = meta_.update("Forza Radio DX", "Idle");
         return;
     }
-    TrackInfo info;
-    try {
-        info = a->current_track();
-    } catch (...) {
-        return;
+
+    const uint64_t generation = a->track_generation();
+    if (a != metadata_source_ || generation == 0 || generation != metadata_generation_) {
+        try {
+            metadata_track_        = a->current_track();
+            metadata_display_name_ = a->display_name();
+            metadata_source_       = a;
+            metadata_generation_   = generation;
+        } catch (...) {
+            metadata_source_     = nullptr;
+            metadata_generation_ = 0;
+            return;
+        }
     }
-    std::string title  = !info.title.empty() ? info.title : a->display_name();
-    std::string artist = info.artist;
+
+    const std::string& title =
+        !metadata_track_.title.empty() ? metadata_track_.title : metadata_display_name_;
+    const std::string& artist = metadata_track_.artist;
     if (artist.empty()) {
         // No state labels — just show the title/station name.
         [[maybe_unused]] auto _meta = meta_.update(title, "");

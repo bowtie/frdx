@@ -8,6 +8,7 @@
 #include <winhttp.h>
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -40,6 +41,16 @@ namespace {
 // PCM contract written by ffmpeg: 48000 Hz * 2 ch * 2 bytes.
 constexpr std::uint64_t kPcmBytesPerSec = 48000ull * 2ull * 2ull;
 
+std::optional<std::size_t> parse_json_array_index(std::string_view text) noexcept {
+    if (text.empty()) return std::nullopt;
+    std::size_t value    = 0;
+    const auto* first    = text.data();
+    const auto* last     = first + text.size();
+    const auto [ptr, ec] = std::from_chars(first, last, value);
+    if (ec != std::errc{} || ptr != last) return std::nullopt;
+    return value;
+}
+
 // Resolve the ffmpeg binary path.  Checks the configured path first, then
 // a bundled <game>/mods/frdx/ffmpeg/ffmpeg.exe, then falls back to PATH lookup.
 std::wstring resolve_ffmpeg_path(const std::filesystem::path& configured) {
@@ -71,13 +82,9 @@ const json* resolve_json_node(const json& root, std::string_view dot_path) {
                           : dot_path.substr(pos, dot - pos);
         if (key_sv.empty()) return nullptr;
         if (node->is_array()) {
-            try {
-                auto idx = static_cast<std::size_t>(std::stoul(std::string{key_sv}));
-                if (idx >= node->size()) return nullptr;
-                node = &(*node)[idx];
-            } catch (...) {
-                return nullptr;
-            }
+            const auto idx = parse_json_array_index(key_sv);
+            if (!idx || *idx >= node->size()) return nullptr;
+            node = &(*node)[*idx];
         } else if (node->is_object()) {
             auto it = node->find(key_sv);
             if (it == node->end()) return nullptr;
@@ -873,8 +880,11 @@ void ShoutcastSource::next() { cycle_and_restart(1); }
 void ShoutcastSource::previous() { cycle_and_restart(-1); }
 
 TrackInfo ShoutcastSource::current_track() const {
-    frdx::ScopedLock lk{mu_};
-    TrackInfo t   = info_;
+    TrackInfo t;
+    {
+        frdx::ScopedLock lk{mu_};
+        t = info_;
+    }
     t.position_ms = position_ms_.load(std::memory_order_acquire);
     return t;
 }
@@ -1422,6 +1432,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         const std::size_t r        = ring.readable();
         const std::uint64_t played = p->bytes_written > r ? p->bytes_written - r : 0;
         position_ms_.store(played * 1000ull / kPcmBytesPerSec, std::memory_order_release);
+        return r;
     };
 
     // ---- Stderr drain (ffmpeg logs + same-connection ICY metadata) ----
@@ -1449,51 +1460,50 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             p->stderr_buf.append(ebuf, egot);
             if (p->stderr_buf.size() > 65536)
                 p->stderr_buf.erase(0, p->stderr_buf.size() - 32768);
-            std::string local_buf = std::move(p->stderr_buf);
-            p->stderr_buf.clear();
-            if (!local_buf.empty()) {
-                for (;;) {
-                    auto nl = local_buf.find('\n');
-                    if (nl == std::string::npos) break;
-                    std::string line = local_buf.substr(0, nl);
-                    local_buf.erase(0, nl + 1);
-                    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-                        line.pop_back();
-                    if (line.empty()) continue;
-                    if (auto title = extract_stream_title(line)) {
-                        const auto dash = title->find(" - ");
-                        std::string logged_artist;
-                        std::string logged_title;
-                        {
-                            frdx::ScopedLock lk{mu_};
-                            if (dash != std::string::npos) {
-                                info_.artist = title->substr(0, dash);
-                                info_.title  = title->substr(dash + 3);
-                            } else {
-                                info_.artist = display_name_;
-                                info_.title  = std::move(*title);
-                            }
-                            logged_artist = info_.artist;
-                            logged_title  = info_.title;
-                            info_gen_.fetch_add(1, std::memory_order_release);
+
+            std::size_t consumed = 0;
+            for (;;) {
+                const auto nl = p->stderr_buf.find('\n', consumed);
+                if (nl == std::string::npos) break;
+
+                std::string_view line{p->stderr_buf.data() + consumed, nl - consumed};
+                consumed = nl + 1;
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                    line.remove_suffix(1);
+                if (line.empty()) continue;
+
+                if (auto title = extract_stream_title(line)) {
+                    const auto dash = title->find(" - ");
+                    std::string logged_artist;
+                    std::string logged_title;
+                    {
+                        frdx::ScopedLock lk{mu_};
+                        if (dash != std::string::npos) {
+                            info_.artist = title->substr(0, dash);
+                            info_.title  = title->substr(dash + 3);
+                        } else {
+                            info_.artist = display_name_;
+                            info_.title  = std::move(*title);
                         }
-                        ffmpeg_icy_seen_.store(true, std::memory_order_release);
-                        last_icy_ms_.store(steady_ms(), std::memory_order_release);
-                        log::info("[shoutcast] ffmpeg icy metadata: {} - {}", logged_artist,
-                                  logged_title);
-                    } else if (line.find("StreamTitle") == std::string::npos) {
-                        log::warn("[shoutcast] ffmpeg: {}", line);
+                        logged_artist = info_.artist;
+                        logged_title  = info_.title;
+                        info_gen_.fetch_add(1, std::memory_order_release);
                     }
+                    ffmpeg_icy_seen_.store(true, std::memory_order_release);
+                    last_icy_ms_.store(steady_ms(), std::memory_order_release);
+                    log::info("[shoutcast] ffmpeg icy metadata: {} - {}", logged_artist,
+                              logged_title);
+                } else if (line.find("StreamTitle") == std::string_view::npos) {
+                    log::warn("[shoutcast] ffmpeg: {}", std::string{line});
                 }
-                p->stderr_buf = std::move(local_buf);
             }
+            if (consumed > 0) p->stderr_buf.erase(0, consumed);
         }
     }
 
     // If ffmpeg has exited and the ring is drained, try reconnecting.
     if (ended) {
-        update_position();
-        if (ring.readable() == 0) {
+        if (update_position() == 0) {
             frdx::UniqueLock lk{mu_};
             int attempts = reconnect_attempts_.load(std::memory_order_acquire);
             if (attempts < 3) {
@@ -1566,12 +1576,12 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         on_eof();
         return;
     }
+    int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
     while (avail > 0) {
         const std::size_t writable = ring.writable();
         if (writable < 4) break;
         std::size_t want = std::min<std::size_t>(writable, avail);
         if (want > 4096) want = 4096;
-        int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
         DWORD got = 0;
         if (!ReadFile(read_pipe, buf, static_cast<DWORD>(want), &got, nullptr) || got == 0) {
             on_eof();
@@ -1582,13 +1592,14 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         }
         ring.write(reinterpret_cast<std::byte*>(buf), got);
         p->bytes_written += got;
-        update_position();
         avail = avail > got ? avail - got : 0;
-        if (state_.load(std::memory_order_acquire) == PlaybackState::buffering &&
-            ring.readable() > 32 * 1024)
-            state_.store(PlaybackState::playing, std::memory_order_release);
     }
-    update_position();
+    if (update_position() > 32 * 1024) {
+        auto expected = PlaybackState::buffering;
+        (void)state_.compare_exchange_strong(expected, PlaybackState::playing,
+                                             std::memory_order_release,
+                                             std::memory_order_relaxed);
+    }
 }
 
 } // namespace frdx::sources
