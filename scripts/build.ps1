@@ -171,6 +171,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\ffmpeg") |
 # Ninja outputs to build/ directly; MSBuild puts artifacts under build/Release/
 $dllSrc = if ($ninja) { Join-Path $build "version.dll" } else { Join-Path $build "Release\version.dll" }
 Copy-Item $dllSrc $dist
+$brokerSrc = if ($ninja) { Join-Path $build "frdx_dualsense_broker.exe" } else { Join-Path $build "Release\frdx_dualsense_broker.exe" }
+Copy-Item $brokerSrc $dist
 # frdx_overlay.exe was removed — the overlay is now in-process (version.dll)
 if (Test-Path (Join-Path $root "assets\fonts")) {
     Copy-Item -Recurse (Join-Path $root "assets\fonts\*") (Join-Path $dist "mods\frdx\fonts")

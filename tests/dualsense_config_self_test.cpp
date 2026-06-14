@@ -25,6 +25,7 @@ int run() {
     frdx::Config cfg;
     auto& ds = cfg.dualsense;
     ds.enabled = true;
+    ds.external_helper = true;
     ds.udp_port = 5301;
     ds.wall_zones = 7;
     ds.enable_brake_resistance = false;
@@ -83,6 +84,7 @@ int run() {
     const auto& got = loaded.dualsense;
 
     ok &= expect(got.enabled == ds.enabled, "enabled");
+    ok &= expect(got.external_helper == ds.external_helper, "external_helper");
     ok &= expect(got.udp_port == ds.udp_port, "udp_port");
     ok &= expect(got.wall_zones == ds.wall_zones, "wall_zones");
     ok &= expect(got.enable_brake_resistance == ds.enable_brake_resistance,

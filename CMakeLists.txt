@@ -46,6 +46,7 @@ add_library(version SHARED
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp
+    third_party/hidapi/windows/hid.c
 
     # Dear ImGui
     third_party/imgui/imgui.cpp
@@ -74,9 +75,12 @@ target_include_directories(version PRIVATE
     third_party/minhook
     third_party/stb
     third_party/imgui-animated
+    third_party/hidapi
+    third_party/hidapi/hidapi
 )
 
-target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi)
+target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi cfgmgr32
+                                      user32)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version
@@ -109,6 +113,7 @@ add_executable(frdx_sandbox
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp
+    third_party/hidapi/windows/hid.c
 
     # Dear ImGui
     third_party/imgui/imgui.cpp
@@ -137,9 +142,12 @@ target_include_directories(frdx_sandbox PRIVATE
     third_party/minhook
     third_party/stb
     third_party/imgui-animated
+    third_party/hidapi
+    third_party/hidapi/hidapi
 )
 
-target_link_libraries(frdx_sandbox PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi)
+target_link_libraries(frdx_sandbox PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi
+                                           cfgmgr32 user32)
 
 set_target_properties(frdx_sandbox PROPERTIES
     OUTPUT_NAME frdx_sandbox
@@ -149,16 +157,42 @@ set_target_properties(frdx_sandbox PROPERTIES
 add_executable(dualsense_self_test
     tests/dualsense_self_test.cpp
     src/log.cpp
+    third_party/hidapi/windows/hid.c
 )
 
 target_include_directories(dualsense_self_test PRIVATE
     include
     third_party/wil/include
+    third_party/hidapi
+    third_party/hidapi/hidapi
 )
 
-target_link_libraries(dualsense_self_test PRIVATE ws2_32 hid setupapi)
+target_link_libraries(dualsense_self_test PRIVATE ws2_32 hid setupapi cfgmgr32 user32)
 
 add_test(NAME dualsense_self_test COMMAND dualsense_self_test)
+
+add_executable(frdx_dualsense_broker
+    src/dualsense_broker_main.cpp
+    src/dualsense.cpp
+    src/config.cpp
+    src/log.cpp
+    third_party/hidapi/windows/hid.c
+)
+
+target_include_directories(frdx_dualsense_broker PRIVATE
+    include
+    third_party/toml11
+    third_party/wil/include
+    third_party/hidapi
+    third_party/hidapi/hidapi
+)
+
+target_link_libraries(frdx_dualsense_broker PRIVATE ws2_32 hid setupapi cfgmgr32 user32 shell32)
+
+set_target_properties(frdx_dualsense_broker PROPERTIES
+    OUTPUT_NAME frdx_dualsense_broker
+    WIN32_EXECUTABLE FALSE
+)
 
 add_executable(dualsense_config_self_test
     tests/dualsense_config_self_test.cpp

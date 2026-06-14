@@ -1,7 +1,6 @@
 #pragma once
 
 #include "frdx/fmod/dsp_bridge.hpp"
-#include "frdx/fmod/game_state_probe.hpp"
 #include "frdx/fmod/metadata_injector.hpp"
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/fmod/radio_discovery.hpp"
@@ -45,8 +44,8 @@ private:
     void push_metadata() noexcept;
 
     // Discover the live RadioStreamFmod carrying our sample and point the
-    // bridge + metadata injector at it. Used at startup and after a recovery
-    // toggle (the game may reallocate the wrapper).
+    // bridge + metadata injector at it. Used at startup and after the game
+    // reallocates the wrapper.
     std::expected<void, ControlLoopError> acquire_target() noexcept;
 
     // Pick the best RadioInstance from a discovery result, preferring
@@ -57,10 +56,9 @@ private:
     const PEImage& img_;
     std::atomic<float> configured_gain_;
     MetadataInjector meta_;
-    GameStateProbe game_state_;
     std::uint64_t prev_calls_ = 0;
     int stale_ticks_          = 0;
-    std::chrono::steady_clock::time_point last_retune_{}; // cooldown for retune toggle
+    std::chrono::steady_clock::time_point last_reacquire_{}; // cooldown for rediscovery
     std::jthread thread_;
 };
 

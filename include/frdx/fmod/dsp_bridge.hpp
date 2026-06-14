@@ -30,8 +30,8 @@ struct FMODFns {
     // ChannelControl* arg is actually FMOD's packed 32-bit handle widened
     // to 64 bits (`(void*)(uint64_t)handle`). Resolver returns the real
     // pointer, but addDSP/removeDSP both want the handle.
-    using ChannelControlAddDSP_t  = uint32_t (*)(uint64_t channel_handle, int32_t index, void* dsp);
-    using ChannelControlRemDSP_t  = uint32_t (*)(uint64_t channel_handle, void* dsp);
+    using ChannelControlAddDSP_t = uint32_t (*)(uint64_t channel_handle, int32_t index, void* dsp);
+    using ChannelControlRemDSP_t = uint32_t (*)(uint64_t channel_handle, void* dsp);
 
     // Handle::open. Third out param is __int64 in the reference; declaring
     // it uint32_t* would risk a 4-byte stack overrun.
@@ -55,13 +55,12 @@ struct FMODFns {
     // best-effort: install proceeds without it (missing unlock just leaks
     // resolver slots).
     bool ready() const noexcept {
-        return host_base && dsp_release && channel_control_add_dsp &&
-               channel_control_rem_dsp && handle_resolver;
+        return host_base && dsp_release && channel_control_add_dsp && channel_control_rem_dsp &&
+               handle_resolver;
     }
 };
 
-std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img,
-                                              FMODFns& out) noexcept;
+std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept;
 
 // Holds the FMOD DSP handle and the read callback that feeds PCM from the
 // AudioSourceManager's ring buffer into FMOD's mixer. Pinned as a global so
@@ -84,6 +83,11 @@ public:
     // Re-attach if the game stored a new channel handle on the RadioStream
     // (station changed, race ended, etc.). Cheap to call every tick.
     void retarget_if_needed() noexcept;
+
+    // Remove our DSP from the current FMOD channel without forgetting the
+    // target RadioStreamFmod. The control loop can call this while FRDX is
+    // idle so the game's original carrier audio is not intercepted.
+    void detach() noexcept;
 
     // True while our currently-installed channel handle is still resolvable.
     // Goes false when FMOD destroys the channel without writing a fresh
@@ -129,13 +133,15 @@ private:
     // or dead. Centralises the FMOD read+validate that retarget and the
     // public `*_alive` queries both need.
     uint32_t read_live_handle(std::byte* radio_stream) const noexcept;
-    void release_current_dsp_locked() noexcept;
+    bool ensure_dsp_locked() noexcept;
+    void detach_current_handle_locked() noexcept;
+    void destroy_current_dsp_locked() noexcept;
     void install_dsp_locked(uint32_t handle) noexcept;
 
     AudioSourceManager& mgr_;
     FMODFns fns_;
 
-    mutable std::mutex dsp_mu_;         // protects current_dsp_, current_handle_
+    mutable std::mutex dsp_mu_; // protects current_dsp_, current_handle_
     void* fmod_system_       = nullptr;
     void* current_dsp_       = nullptr;
     uint32_t current_handle_ = 0;

@@ -25,6 +25,7 @@ struct AudioConfig {
 
 struct DualSenseConfig {
     bool enabled = false;
+    bool external_helper = false;
 
     int udp_port = 5300;
 

@@ -662,17 +662,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     frdx::ConfigStore store(cfg_path, cfg);
 
     frdx::AudioSourceManager mgr(4ull << 20);
-    frdx::dualsense::DualSenseService dualsense{cfg.dualsense};
+    auto service_dualsense_cfg = [](frdx::DualSenseConfig ds) {
+        if (ds.enabled || ds.external_helper) ds.enabled = false;
+        return ds;
+    };
+    frdx::dualsense::DualSenseService dualsense{service_dualsense_cfg(cfg.dualsense)};
     dualsense.start();
 
     frdx::fmod_bridge::FMODFns fns{};
     frdx::fmod_bridge::DSPBridge bridge(mgr, fns);
     bridge.set_gain(cfg.audio.output_gain);
     bridge.set_force_stereo_audio(cfg.audio.force_stereo_audio);
-    store.on_change([&bridge, &dualsense](const frdx::Config& c) {
+    store.on_change([&bridge, &dualsense, service_dualsense_cfg](const frdx::Config& c) {
         bridge.set_gain(c.audio.output_gain);
         bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
-        dualsense.update_config(c.dualsense);
+        dualsense.update_config(service_dualsense_cfg(c.dualsense));
     });
 
     // WASAPI audio output (replaces FMOD for the sandbox)

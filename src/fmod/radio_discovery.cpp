@@ -2,6 +2,7 @@
 #include "frdx/log.hpp"
 #include "frdx/safe_mem.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -159,11 +160,10 @@ std::string read_sound_name(std::byte* radio_stream, int* step, std::byte** out_
     if (out_body) *out_body = b;
 
     char name_buf[512];
-    name_buf[0] = '\0';
-    bool ok     = false;
-    [[maybe_unused]] auto _sn_result = seh_call([&] {
-        ok = safe_read_msvc_string_buf(b + 0x10, name_buf, sizeof(name_buf)).has_value();
-    });
+    name_buf[0]                      = '\0';
+    bool ok                          = false;
+    [[maybe_unused]] auto _sn_result = seh_call(
+        [&] { ok = safe_read_msvc_string_buf(b + 0x10, name_buf, sizeof(name_buf)).has_value(); });
     return ok ? std::string{name_buf} : std::string{};
 }
 
@@ -174,6 +174,7 @@ struct Cache {
     const std::byte* typedesc = nullptr;
     const std::byte* col      = nullptr;
     std::byte* vtable         = nullptr;
+    std::vector<std::byte*> vtables;
     std::vector<std::byte*> candidates;
     int empty_streak = 0; // chain-invalid retries since last hit
 };
@@ -191,7 +192,7 @@ constexpr int kRescanThreshold = 30;
 
 void* resolve_fmod_system(const PEImage& img, std::byte* radio_stream) noexcept {
     if (!radio_stream) return nullptr;
-    void* out = nullptr;
+    void* out                         = nullptr;
     [[maybe_unused]] auto _rfs_result = seh_call([&] {
         // radio_stream +0x08 -> X (first field past vtable), X +0xC0 -> SystemI*.
         std::byte* x = nullptr;
@@ -238,6 +239,7 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
 
         // Try .rdata first (where vtables usually live), then the full image.
         std::byte* found_vt = nullptr;
+        std::vector<std::byte*> found_vtables;
         std::vector<std::byte*> found_candidates;
         for (int pass = 0; pass < 2 && found_candidates.empty(); ++pass) {
             const std::byte* s = pass == 0 ? img.rdata : img.base;
@@ -246,6 +248,11 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
                 std::byte* first_method;
                 std::memcpy(&first_method, vt, 8);
                 if (first_method < img.base || first_method >= img.base + img.size) continue;
+                if (std::find(found_vtables.begin(), found_vtables.end(), vt) ==
+                    found_vtables.end()) {
+                    found_vtables.push_back(vt);
+                }
+                if (!found_vt) found_vt = vt;
 
                 auto hits = scan_heap(img, vt);
                 if (!hits.empty()) {
@@ -256,7 +263,23 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
             }
         }
         if (found_candidates.empty()) {
-            // Game hasn't allocated the wrappers yet; don't cache, retry later.
+            if (found_vt) {
+                // Game hasn't allocated the wrappers yet. Cache the expensive
+                // RTTI/COL/vtable work so future retries only rescan the heap.
+                log::info("[discovery] cached RadioStreamFmod vtable @ 0x{:X}; "
+                          "waiting for heap candidates",
+                          static_cast<uint32_t>(found_vt - img.base));
+                local.located  = true;
+                local.typedesc = td;
+                local.col      = col;
+                local.vtable   = found_vt;
+                local.vtables  = std::move(found_vtables);
+                {
+                    std::scoped_lock lk{g_cache_mu};
+                    g_cache = local;
+                }
+                return result;
+            }
             log::info("[discovery] no heap candidates yet -- waiting for the radio system");
             return result;
         }
@@ -267,7 +290,40 @@ DiscoveryResult discover_radio_instances(const PEImage& img) noexcept {
         local.typedesc   = td;
         local.col        = col;
         local.vtable     = found_vt;
+        local.vtables    = std::move(found_vtables);
         local.candidates = std::move(found_candidates);
+        {
+            std::scoped_lock lk{g_cache_mu};
+            g_cache = local;
+        }
+    }
+
+    if (local.located && local.candidates.empty()) {
+        auto vtables = local.vtables;
+        if (vtables.empty() && local.vtable) vtables.push_back(local.vtable);
+
+        std::vector<std::byte*> hits;
+        std::byte* hit_vtable = nullptr;
+        for (auto* vt : vtables) {
+            hits = scan_heap(img, vt);
+            if (!hits.empty()) {
+                hit_vtable = vt;
+                break;
+            }
+        }
+        if (hits.empty()) {
+            static std::atomic<int> tick{0};
+            const int n = tick.fetch_add(1, std::memory_order_acq_rel);
+            if (n % 6 == 0) {
+                log::info("[discovery] no heap candidates yet -- waiting for the radio system");
+            }
+            return result;
+        }
+        local.vtable     = hit_vtable ? hit_vtable : local.vtable;
+        local.vtables    = std::move(vtables);
+        local.candidates = std::move(hits);
+        log::info("[discovery] cached {} heap candidate(s) on vtable @ 0x{:X}",
+                  local.candidates.size(), static_cast<uint32_t>(local.vtable - img.base));
         {
             std::scoped_lock lk{g_cache_mu};
             g_cache = local;

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -381,6 +382,64 @@ std::string sanitize_brackets(std::string s) {
     return s;
 }
 
+std::optional<std::string> extract_stream_title(std::string_view meta) {
+    auto trim_copy = [](std::string_view value) {
+        while (!value.empty() &&
+               (value.front() == ' ' || value.front() == '\t' || value.front() == '\r' ||
+                value.front() == '\n'))
+            value.remove_prefix(1);
+        while (!value.empty() &&
+               (value.back() == ' ' || value.back() == '\t' || value.back() == '\r' ||
+                value.back() == '\n'))
+            value.remove_suffix(1);
+        return sanitize_brackets(std::string{value});
+    };
+
+    constexpr std::string_view kFfmpegUpdate = "Metadata update for StreamTitle:";
+    if (auto pos = meta.find(kFfmpegUpdate); pos != std::string_view::npos) {
+        auto value = trim_copy(meta.substr(pos + kFfmpegUpdate.size()));
+        if (!value.empty()) return value;
+    }
+
+    if (auto pos = meta.find("StreamTitle"); pos != std::string_view::npos) {
+        auto colon = meta.find(':', pos);
+        auto quote = meta.find_first_of("'\"", pos);
+        if (colon != std::string_view::npos &&
+            (quote == std::string_view::npos || colon < quote)) {
+            auto value = trim_copy(meta.substr(colon + 1));
+            if (!value.empty()) return value;
+        }
+    }
+
+    auto st_pos = meta.find("StreamTitle='");
+    if (st_pos == std::string_view::npos) st_pos = meta.find("StreamTitle=\"");
+    if (st_pos == std::string_view::npos) return std::nullopt;
+
+    const auto val_start  = st_pos + 13;
+    const auto quote_char = meta[st_pos + 12];
+    auto val_end          = std::string_view::npos;
+
+    for (auto scan = val_start; scan < meta.size();) {
+        auto q = meta.find(quote_char, scan);
+        if (q == std::string_view::npos) break;
+        auto next = q + 1;
+        while (next < meta.size() && meta[next] == ' ') next++;
+        if (next < meta.size() && meta[next] == ';') {
+            val_end = q;
+            break;
+        }
+        scan = q + 1;
+    }
+    if (val_end == std::string_view::npos || val_end <= val_start) return std::nullopt;
+    return trim_copy(meta.substr(val_start, val_end - val_start));
+}
+
+int64_t steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 // ---- Pipe ----
 
 struct ShoutcastSource::Pipe {
@@ -508,7 +567,7 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
     const auto ff = resolve_ffmpeg_path(ffmpeg_path);
 
     std::wstring ff_cmd = frdx::subprocess::quote(ff) +
-                          L" -loglevel error"
+                          L" -hide_banner -nostats -loglevel info"
                           L" -icy 1"
                           L" -user_agent \"WinampMPEG/5.0\""
                           L" -reconnect 1"
@@ -888,8 +947,10 @@ void ShoutcastSource::restart_metadata_for_current() {
     if (stream_url.empty() && !station->streams.empty())
         stream_url = station->streams[0].url;
 
-    // Reset ICY timestamp so the first WS poller response fills title/artist.
+    // Reset ICY timestamp so the first WS/fallback ICY response fills
+    // title/artist until ffmpeg's same-connection ICY proves available.
     last_icy_ms_.store(0, std::memory_order_release);
+    ffmpeg_icy_seen_.store(false, std::memory_order_release);
 
     lk.unlock();
 
@@ -1306,41 +1367,15 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
             }
             if (error) break;
 
-            // Parse StreamTitle from metadata.
-            // SHOUTcast format: StreamTitle='value';StreamUrl='url';
-            // Embedded apostrophes in the value (e.g. "Pizuya's Cell") are
-            // not escaped — search for the ' that is followed by ; to find
-            // the real end-of-value delimiter.
             std::string_view meta(buf, meta_read);
-            auto st_pos = meta.find("StreamTitle='");
-            if (st_pos == std::string_view::npos)
-                st_pos = meta.find("StreamTitle=\"");
-            if (st_pos == std::string_view::npos) continue;
-
-            auto val_start  = st_pos + 13;
-            auto quote_char = meta[st_pos + 12];
-            auto val_end    = std::string_view::npos;
-
-            for (auto scan = val_start; scan < meta.size();) {
-                auto q = meta.find(quote_char, scan);
-                if (q == std::string_view::npos) break;
-                auto next = q + 1;
-                while (next < meta.size() && meta[next] == ' ') next++;
-                if (next < meta.size() && meta[next] == ';') {
-                    val_end = q;
-                    break;
-                }
-                scan = q + 1;
-            }
-            if (val_end == std::string_view::npos || val_end <= val_start) continue;
-
-            std::string val(meta.substr(val_start, val_end - val_start));
-            val = sanitize_brackets(std::move(val));
+            auto val_opt = extract_stream_title(meta);
+            if (!val_opt) continue;
+            std::string val = std::move(*val_opt);
 
             auto dash = val.find(" - ");
             {
                 frdx::ScopedLock lk{mu_};
-                if (!stop.stop_requested()) {
+                if (!stop.stop_requested() && !ffmpeg_icy_seen_.load(std::memory_order_acquire)) {
                     if (dash != std::string::npos) {
                         info_.artist = val.substr(0, dash);
                         info_.title  = val.substr(dash + 3);
@@ -1352,10 +1387,7 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
                 }
             }
 
-            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now().time_since_epoch())
-                              .count();
-            last_icy_ms_.store(now_ms, std::memory_order_release);
+            last_icy_ms_.store(steady_ms(), std::memory_order_release);
 
             if (first_title) {
                 first_title = false;
@@ -1392,12 +1424,11 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         position_ms_.store(played * 1000ull / kPcmBytesPerSec, std::memory_order_release);
     };
 
-    // ---- Stderr drain (ffmpeg error/warning logs) ----
-    // ICY metadata is now fetched via a direct HTTP connection (run_icy_poller),
-    // so we no longer parse [icy] StreamTitle from ffmpeg's stderr.
-    // The stderr pipe is kept to capture actual ffmpeg errors.
-    // Once empty, the stderr_empty flag avoids the PeekNamedPipe syscall entirely.
-    if (stderr_pipe && !p->stderr_empty) {
+    // ---- Stderr drain (ffmpeg logs + same-connection ICY metadata) ----
+    // ffmpeg emits ICY StreamTitle lines from the exact stream being decoded.
+    // Those are better synchronized than our fallback direct ICY connection,
+    // which can run ahead of buffered audio on some stations.
+    if (stderr_pipe) {
         for (int safety = 0; safety < 3; ++safety) {
             DWORD eavail = 0;
             if (!PeekNamedPipe(stderr_pipe, nullptr, 0, nullptr, &eavail, nullptr)) {
@@ -1406,7 +1437,6 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 break;
             }
             if (eavail == 0) {
-                p->stderr_empty = true;
                 break;
             }
             char ebuf[512];
@@ -1430,8 +1460,32 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                     while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
                         line.pop_back();
                     if (line.empty()) continue;
-                    log::warn("[shoutcast] ffmpeg: {}", line);
+                    if (auto title = extract_stream_title(line)) {
+                        const auto dash = title->find(" - ");
+                        std::string logged_artist;
+                        std::string logged_title;
+                        {
+                            frdx::ScopedLock lk{mu_};
+                            if (dash != std::string::npos) {
+                                info_.artist = title->substr(0, dash);
+                                info_.title  = title->substr(dash + 3);
+                            } else {
+                                info_.artist = display_name_;
+                                info_.title  = std::move(*title);
+                            }
+                            logged_artist = info_.artist;
+                            logged_title  = info_.title;
+                            info_gen_.fetch_add(1, std::memory_order_release);
+                        }
+                        ffmpeg_icy_seen_.store(true, std::memory_order_release);
+                        last_icy_ms_.store(steady_ms(), std::memory_order_release);
+                        log::info("[shoutcast] ffmpeg icy metadata: {} - {}", logged_artist,
+                                  logged_title);
+                    } else if (line.find("StreamTitle") == std::string::npos) {
+                        log::warn("[shoutcast] ffmpeg: {}", line);
+                    }
                 }
+                p->stderr_buf = std::move(local_buf);
             }
         }
     }

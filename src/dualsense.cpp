@@ -7,15 +7,18 @@
 #include <windows.h>
 #include <hidsdi.h>
 #include <setupapi.h>
+#include <hidapi/hidapi.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cwctype>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -24,19 +27,19 @@
 namespace frdx::dualsense {
 namespace {
 
-constexpr USHORT kVendorSony = 0x054C;
-constexpr USHORT kDualSense = 0x0CE6;
-constexpr USHORT kDualSenseEdge = 0x0DF2;
-constexpr int kMinPacketSize = 323;
-constexpr int kRawMax = 255;
-constexpr float kLowSpeedKmh = 5.0f;
+constexpr USHORT kVendorSony         = 0x054C;
+constexpr USHORT kDualSense          = 0x0CE6;
+constexpr USHORT kDualSenseEdge      = 0x0DF2;
+constexpr int kMinPacketSize         = 323;
+constexpr int kRawMax                = 255;
+constexpr float kLowSpeedKmh         = 5.0f;
 constexpr float kBurnoutRotThreshold = 30.0f;
 
 enum class EffectMode : uint8_t {
-    rigid = 0x01,
-    off = 0x05,
-    vibrate = 0x06,
-    rigid_zones = 0x21,
+    rigid         = 0x01,
+    off           = 0x05,
+    vibrate       = 0x06,
+    rigid_zones   = 0x21,
     vibrate_zones = 0x26,
 };
 
@@ -51,20 +54,20 @@ struct TriggerEffect {
 };
 
 struct Telemetry {
-    bool on = false;
+    bool on       = false;
     float max_rpm = 0.0f;
-    float rpm = 0.0f;
+    float rpm     = 0.0f;
     std::array<float, 4> tire_slip_ratio{};
     std::array<float, 4> wheel_rotation_speed{};
     std::array<int32_t, 4> wheel_in_puddle{};
     std::array<float, 4> surface_rumble{};
     std::array<float, 4> tire_combined_slip{};
     int32_t drive_train = 0;
-    float speed = 0.0f;
-    uint8_t accel = 0;
-    uint8_t brake = 0;
-    uint8_t handbrake = 0;
-    uint8_t gear = 0;
+    float speed         = 0.0f;
+    uint8_t accel       = 0;
+    uint8_t brake       = 0;
+    uint8_t handbrake   = 0;
+    uint8_t gear        = 0;
 };
 
 struct HidLayout {
@@ -80,6 +83,69 @@ constexpr HidLayout kUsb{0x02, 1, 11, 22, 64, false};
 constexpr HidLayout kBt{0x31, 2, 12, 23, 78, true};
 constexpr uint8_t kTriggerFlags = 0x04 | 0x08;
 
+detail::unique_handle open_hid_query_handle(const wchar_t* path) {
+    detail::unique_handle h{CreateFileW(path, GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (h) return h;
+
+    return detail::unique_handle{
+        CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+}
+
+detail::unique_handle open_hid_writer_handle(const wchar_t* path, DWORD* last_error = nullptr) {
+    detail::unique_handle h{CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (h) return h;
+    if (last_error) *last_error = GetLastError();
+
+    h = detail::unique_handle{CreateFileW(path, GENERIC_WRITE,
+                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (h) return h;
+    if (last_error) *last_error = GetLastError();
+
+    h = detail::unique_handle{CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (last_error && !h) *last_error = GetLastError();
+    return h;
+}
+
+enum class HidWriteBackend {
+    write_file,
+    set_output_report,
+    hidapi_write,
+    hidapi_output_report,
+};
+
+enum class TriggerBackend {
+    hid,
+    broker,
+    steam_input,
+};
+
+constexpr uint32_t kBrokerMagic          = 0x58445246; // FRDX
+constexpr const wchar_t* kBrokerPipeName = L"\\\\.\\pipe\\frdx-dualsense-broker";
+
+struct BrokerPacket {
+    uint32_t magic           = kBrokerMagic;
+    uint8_t left_mode        = 0;
+    uint8_t left_param_count = 0;
+    std::array<uint8_t, 10> left_params{};
+    uint8_t right_mode        = 0;
+    uint8_t right_param_count = 0;
+    std::array<uint8_t, 10> right_params{};
+    uint8_t quit = 0;
+};
+
+struct BrokerStatus {
+    uint32_t magic = kBrokerMagic;
+    uint8_t ok     = 0;
+    char message[511]{};
+};
+
 uint8_t clamp_byte(float v) {
     return static_cast<uint8_t>(std::clamp<int>(static_cast<int>(std::lround(v)), 0, 255));
 }
@@ -88,12 +154,31 @@ uint8_t amp_to_strength(int amp) {
     return static_cast<uint8_t>(std::clamp((std::max(0, amp) / 32) + 1, 1, 8));
 }
 
+uint8_t steam_feedback_strength(int force) {
+    if (force <= 0) return 0;
+    return static_cast<uint8_t>(std::clamp((force * 8 + 79) / 80, 1, 8));
+}
+
+std::array<uint8_t, 10> unpack_zones(const std::array<uint8_t, 10>& params) {
+    const uint16_t active =
+        static_cast<uint16_t>(params[0]) | (static_cast<uint16_t>(params[1]) << 8);
+    const uint32_t packed =
+        static_cast<uint32_t>(params[2]) | (static_cast<uint32_t>(params[3]) << 8) |
+        (static_cast<uint32_t>(params[4]) << 16) | (static_cast<uint32_t>(params[5]) << 24);
+    std::array<uint8_t, 10> zones{};
+    for (size_t i = 0; i < zones.size(); ++i) {
+        if ((active & (1u << i)) == 0) continue;
+        zones[i] = static_cast<uint8_t>(((packed >> (3 * i)) & 0x07) + 1);
+    }
+    return zones;
+}
+
 float ramp(int value, int deadzone, int baseline, int max_force, float curve, int ceiling) {
     if (value < deadzone) return static_cast<float>(baseline);
     const float denom = static_cast<float>(std::max(ceiling - deadzone, 1));
-    const float r = std::min(1.0f, (static_cast<float>(value - deadzone) / denom));
-    return static_cast<float>(baseline) + static_cast<float>(max_force - baseline) *
-                                           std::pow(r, std::max(0.01f, curve));
+    const float r     = std::min(1.0f, (static_cast<float>(value - deadzone) / denom));
+    return static_cast<float>(baseline) +
+           static_cast<float>(max_force - baseline) * std::pow(r, std::max(0.01f, curve));
 }
 
 bool wall_state(int value, bool engaged, int engage_at, int release_at) {
@@ -104,18 +189,18 @@ TriggerEffect off() { return {}; }
 
 TriggerEffect rigid(float force) {
     TriggerEffect out;
-    out.mode = EffectMode::rigid;
-    out.params[0] = 0;
-    out.params[1] = clamp_byte(force);
+    out.mode        = EffectMode::rigid;
+    out.params[0]   = 0;
+    out.params[1]   = clamp_byte(force);
     out.param_count = 2;
     return out;
 }
 
 TriggerEffect vibrate(int freq, int amp) {
     TriggerEffect out;
-    out.mode = EffectMode::vibrate;
-    out.params[0] = clamp_byte(static_cast<float>(freq));
-    out.params[1] = clamp_byte(static_cast<float>(amp));
+    out.mode        = EffectMode::vibrate;
+    out.params[0]   = clamp_byte(static_cast<float>(freq));
+    out.params[1]   = clamp_byte(static_cast<float>(amp));
     out.param_count = 2;
     return out;
 }
@@ -130,17 +215,15 @@ std::array<uint8_t, 6> pack_zones(const std::array<uint8_t, 10>& strengths) {
             packed |= static_cast<uint32_t>(s - 1) << (3 * i);
         }
     }
-    return {static_cast<uint8_t>(active & 0xFF),
-            static_cast<uint8_t>((active >> 8) & 0xFF),
-            static_cast<uint8_t>(packed & 0xFF),
-            static_cast<uint8_t>((packed >> 8) & 0xFF),
-            static_cast<uint8_t>((packed >> 16) & 0xFF),
-            static_cast<uint8_t>((packed >> 24) & 0xFF)};
+    return {
+        static_cast<uint8_t>(active & 0xFF),         static_cast<uint8_t>((active >> 8) & 0xFF),
+        static_cast<uint8_t>(packed & 0xFF),         static_cast<uint8_t>((packed >> 8) & 0xFF),
+        static_cast<uint8_t>((packed >> 16) & 0xFF), static_cast<uint8_t>((packed >> 24) & 0xFF)};
 }
 
 TriggerEffect rigid_zones(const std::array<uint8_t, 10>& zones) {
     TriggerEffect out;
-    out.mode = EffectMode::rigid_zones;
+    out.mode          = EffectMode::rigid_zones;
     const auto packed = pack_zones(zones);
     std::copy(packed.begin(), packed.end(), out.params.begin());
     out.param_count = 10;
@@ -149,15 +232,15 @@ TriggerEffect rigid_zones(const std::array<uint8_t, 10>& zones) {
 
 TriggerEffect vibrate_zones(uint8_t amp, int freq, int wall_zones) {
     const uint8_t a = std::clamp<uint8_t>(amp, 1, 8);
-    const int w = std::clamp(wall_zones, 1, 9);
+    const int w     = std::clamp(wall_zones, 1, 9);
     std::array<uint8_t, 10> zones{};
     for (int i = 0; i < 10; ++i) zones[static_cast<size_t>(i)] = i >= 10 - w ? 8 : a;
 
     TriggerEffect out;
-    out.mode = EffectMode::vibrate_zones;
+    out.mode          = EffectMode::vibrate_zones;
     const auto packed = pack_zones(zones);
     std::copy(packed.begin(), packed.end(), out.params.begin());
-    out.params[8] = clamp_byte(static_cast<float>(freq));
+    out.params[8]   = clamp_byte(static_cast<float>(freq));
     out.param_count = 10;
     return out;
 }
@@ -170,9 +253,9 @@ TriggerEffect build_wall(int wall_zones) {
 }
 
 TriggerEffect build_brake_walls(int static_at, int force, int wall_zones) {
-    const int n = std::clamp(wall_zones, 1, 9);
+    const int n         = std::clamp(wall_zones, 1, 9);
     const auto strength = amp_to_strength(force);
-    const int start = std::min(9, std::clamp(static_at, 0, 255) * 10 / 256);
+    const int start     = std::min(9, std::clamp(static_at, 0, 255) * 10 / 256);
     std::array<uint8_t, 10> zones{};
     for (int i = start; i < 10; ++i) zones[static_cast<size_t>(i)] = strength;
     for (int i = 10 - n; i < 10; ++i) zones[static_cast<size_t>(i)] = 8;
@@ -198,25 +281,25 @@ template <class T> void write_le(uint8_t* p, size_t off, T v) {
 std::optional<Telemetry> parse_packet(const uint8_t* p, size_t n) {
     if (n < kMinPacketSize) return std::nullopt;
     Telemetry t;
-    t.on = read_le<int32_t>(p, 0) != 0;
-    t.max_rpm = read_le<float>(p, 8);
-    t.rpm = read_le<float>(p, 16);
-    t.tire_slip_ratio = {read_le<float>(p, 84), read_le<float>(p, 88),
-                         read_le<float>(p, 92), read_le<float>(p, 96)};
+    t.on                   = read_le<int32_t>(p, 0) != 0;
+    t.max_rpm              = read_le<float>(p, 8);
+    t.rpm                  = read_le<float>(p, 16);
+    t.tire_slip_ratio      = {read_le<float>(p, 84), read_le<float>(p, 88), read_le<float>(p, 92),
+                              read_le<float>(p, 96)};
     t.wheel_rotation_speed = {read_le<float>(p, 100), read_le<float>(p, 104),
                               read_le<float>(p, 108), read_le<float>(p, 112)};
-    t.wheel_in_puddle = {read_le<int32_t>(p, 132), read_le<int32_t>(p, 136),
-                         read_le<int32_t>(p, 140), read_le<int32_t>(p, 144)};
-    t.surface_rumble = {read_le<float>(p, 148), read_le<float>(p, 152),
-                        read_le<float>(p, 156), read_le<float>(p, 160)};
-    t.tire_combined_slip = {read_le<float>(p, 180), read_le<float>(p, 184),
-                            read_le<float>(p, 188), read_le<float>(p, 192)};
-    t.drive_train = read_le<int32_t>(p, 224);
-    t.speed = read_le<float>(p, 256) * 3.6f;
-    t.accel = p[315];
-    t.brake = p[316];
-    t.handbrake = p[318];
-    t.gear = p[319];
+    t.wheel_in_puddle      = {read_le<int32_t>(p, 132), read_le<int32_t>(p, 136),
+                              read_le<int32_t>(p, 140), read_le<int32_t>(p, 144)};
+    t.surface_rumble     = {read_le<float>(p, 148), read_le<float>(p, 152), read_le<float>(p, 156),
+                            read_le<float>(p, 160)};
+    t.tire_combined_slip = {read_le<float>(p, 180), read_le<float>(p, 184), read_le<float>(p, 188),
+                            read_le<float>(p, 192)};
+    t.drive_train        = read_le<int32_t>(p, 224);
+    t.speed              = read_le<float>(p, 256) * 3.6f;
+    t.accel              = p[315];
+    t.brake              = p[316];
+    t.handbrake          = p[318];
+    t.gear               = p[319];
     return t;
 }
 
@@ -248,6 +331,23 @@ bool path_is_bluetooth(std::wstring_view path) {
                    [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
     return upper.find(L"BTHENUM") != std::wstring::npos ||
            upper.find(L"BLUETOOTH") != std::wstring::npos;
+}
+
+bool path_is_dualsense(std::wstring_view path) {
+    std::wstring upper(path);
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+    return upper.find(L"VID_054C") != std::wstring::npos &&
+           (upper.find(L"PID_0CE6") != std::wstring::npos ||
+            upper.find(L"PID_0DF2") != std::wstring::npos);
+}
+
+bool path_is_col03(std::wstring_view path) {
+    std::wstring upper(path);
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                   [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+    return upper.find(L"&COL03#") != std::wstring::npos ||
+           upper.find(L"MI_03") != std::wstring::npos;
 }
 
 std::string utf8_from_wide(std::wstring_view s) {
@@ -291,11 +391,26 @@ struct ControllerInfo {
     std::wstring path;
     std::wstring product;
     std::string serial;
-    bool bluetooth = false;
+    bool bluetooth     = false;
+    bool blocked       = false;
+    bool gamepad_usage = false;
+    bool col03         = false;
 };
+
+struct ControllerScanStats {
+    uint32_t setupapi_hid_interfaces = 0;
+    uint32_t rawinput_hid_devices    = 0;
+    uint32_t dualsense_paths         = 0;
+    uint32_t hidapi_devices          = 0;
+    uint32_t hidapi_dualsense_paths  = 0;
+};
+
+ControllerScanStats g_last_scan_stats{};
 
 std::string controller_display_name(const ControllerInfo& info) {
     std::string out(info.bluetooth ? "DualSense BT" : "DualSense USB");
+    if (info.col03) out += " col03";
+    if (info.blocked) out += " (blocked)";
     if (!info.serial.empty()) {
         out += " ";
         out += info.serial;
@@ -303,56 +418,261 @@ std::string controller_display_name(const ControllerInfo& info) {
     return out;
 }
 
+struct HidApiCandidate {
+    std::string path;
+    std::wstring product;
+    std::string serial;
+    bool bluetooth     = false;
+    bool gamepad_usage = false;
+    bool col03         = false;
+    int interface_no   = -1;
+};
+
+std::string hidapi_error_utf8(hid_device* dev) {
+    const wchar_t* err = hid_error(dev);
+    return err ? utf8_from_wide(err) : std::string{};
+}
+
+std::string hidapi_display_name(const HidApiCandidate& info) {
+    std::string out(info.bluetooth ? "DualSense BT" : "DualSense USB");
+    out += " via HIDAPI";
+    if (info.col03) out += " col03";
+    if (!info.serial.empty()) {
+        out += " ";
+        out += info.serial;
+    }
+    return out;
+}
+
+bool hidapi_path_is_col03(std::string_view path) {
+    std::string upper(path);
+    std::transform(upper.begin(), upper.end(), upper.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return upper.find("&COL03#") != std::string::npos || upper.find("MI_03") != std::string::npos;
+}
+
+std::vector<HidApiCandidate> enumerate_hidapi_controllers() {
+    std::vector<HidApiCandidate> out;
+    g_last_scan_stats.hidapi_devices         = 0;
+    g_last_scan_stats.hidapi_dualsense_paths = 0;
+    if (hid_init() != 0) {
+        log::warn("[dualsense] HIDAPI init failed: {}", hidapi_error_utf8(nullptr));
+        return out;
+    }
+
+    hid_device_info* root = hid_enumerate(kVendorSony, 0);
+    for (hid_device_info* cur = root; cur; cur = cur->next) {
+        ++g_last_scan_stats.hidapi_devices;
+        const bool dualsense =
+            cur->vendor_id == kVendorSony &&
+            (cur->product_id == kDualSense || cur->product_id == kDualSenseEdge);
+        if (!dualsense) continue;
+        ++g_last_scan_stats.hidapi_dualsense_paths;
+
+        const std::string path = cur->path ? cur->path : "";
+        const bool col03 = hidapi_path_is_col03(path) || cur->interface_number == 3;
+        const bool gamepad_usage = cur->usage_page == 1 && cur->usage == 5;
+        const bool bluetooth = cur->bus_type == HID_API_BUS_BLUETOOTH;
+        std::string serial;
+        if (cur->serial_number && cur->serial_number[0] != L'\0') {
+            serial = utf8_from_wide(cur->serial_number);
+        }
+        std::wstring product = cur->product_string ? cur->product_string : L"DualSense";
+
+        log::info("[dualsense] HIDAPI DualSense path{} iface={} usage={:04X}:{:04X} bus={}: {}",
+                  col03 ? " (col03)" : "", cur->interface_number, cur->usage_page, cur->usage,
+                  static_cast<int>(cur->bus_type), path);
+        out.push_back({path, product, serial, bluetooth, gamepad_usage, col03,
+                       cur->interface_number});
+    }
+    hid_free_enumeration(root);
+
+    std::stable_sort(out.begin(), out.end(), [](const HidApiCandidate& a,
+                                                const HidApiCandidate& b) {
+        const int sa = (a.col03 ? 16 : 0) + (a.interface_no == 3 ? 8 : 0) +
+                       (a.gamepad_usage ? 2 : 0) + (a.bluetooth ? 0 : 1);
+        const int sb = (b.col03 ? 16 : 0) + (b.interface_no == 3 ? 8 : 0) +
+                       (b.gamepad_usage ? 2 : 0) + (b.bluetooth ? 0 : 1);
+        return sa > sb;
+    });
+    if (out.empty()) {
+        log::warn("[dualsense] HIDAPI found no DualSense paths; scanned Sony HID devices={}",
+                  g_last_scan_stats.hidapi_devices);
+    }
+    return out;
+}
+
+bool contains_controller_path(const std::vector<ControllerInfo>& controllers,
+                              std::wstring_view path) {
+    return std::any_of(controllers.begin(), controllers.end(),
+                       [&](const ControllerInfo& c) { return c.path == path; });
+}
+
+void append_rawinput_dualsense_devices(std::vector<ControllerInfo>& out,
+                                       ControllerScanStats& stats) {
+    UINT count = 0;
+    UINT size  = sizeof(RAWINPUTDEVICELIST);
+    if (GetRawInputDeviceList(nullptr, &count, size) != 0 || count == 0) return;
+
+    std::vector<RAWINPUTDEVICELIST> devices(count);
+    if (GetRawInputDeviceList(devices.data(), &count, size) == static_cast<UINT>(-1)) return;
+
+    for (UINT i = 0; i < count; ++i) {
+        if (devices[i].dwType != RIM_TYPEHID) continue;
+        ++stats.rawinput_hid_devices;
+
+        UINT name_chars = 0;
+        if (GetRawInputDeviceInfoW(devices[i].hDevice, RIDI_DEVICENAME, nullptr, &name_chars) !=
+            0) {
+            continue;
+        }
+        if (name_chars == 0) continue;
+
+        std::wstring path(name_chars, L'\0');
+        if (GetRawInputDeviceInfoW(devices[i].hDevice, RIDI_DEVICENAME, path.data(), &name_chars) ==
+            static_cast<UINT>(-1)) {
+            continue;
+        }
+        if (!path.empty() && path.back() == L'\0') path.pop_back();
+        if (!path_is_dualsense(path)) continue;
+        ++stats.dualsense_paths;
+        log::info("[dualsense] Raw Input DualSense path{}: {}",
+                  path_is_col03(path) ? " (col03)" : "", utf8_from_wide(path));
+        if (contains_controller_path(out, path)) continue;
+
+        detail::unique_handle h = open_hid_query_handle(path.c_str());
+        if (!h) {
+            const DWORD err = GetLastError();
+            log::warn("[dualsense] Raw Input saw DualSense path but HID open is blocked "
+                      "(win32 err {}): {}",
+                      err, utf8_from_wide(path));
+            out.push_back({path,
+                           L"DualSense",
+                           {},
+                           path_is_bluetooth(path),
+                           false,
+                           false,
+                           path_is_col03(path)});
+            continue;
+        }
+
+        bool gamepad_usage        = false;
+        PHIDP_PREPARSED_DATA prep = nullptr;
+        if (HidD_GetPreparsedData(h.get(), &prep)) {
+            HIDP_CAPS caps{};
+            if (HidP_GetCaps(prep, &caps) == HIDP_STATUS_SUCCESS) {
+                gamepad_usage = caps.UsagePage == 1 && caps.Usage == 5;
+            }
+            HidD_FreePreparsedData(prep);
+        }
+
+        wchar_t product[128] = {};
+        HidD_GetProductString(h.get(), product, sizeof(product));
+        out.push_back({path, product[0] ? product : L"DualSense", read_controller_serial(h.get()),
+                       path_is_bluetooth(path), false, gamepad_usage, path_is_col03(path)});
+        log::info("[dualsense] Raw Input fallback found DualSense HID path: {}",
+                  utf8_from_wide(path));
+    }
+}
+
 std::vector<ControllerInfo> enumerate_controllers() {
     GUID hid_guid{};
     HidD_GetHidGuid(&hid_guid);
 
-    HDEVINFO devs = SetupDiGetClassDevsW(&hid_guid, nullptr, nullptr,
-                                         DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    HDEVINFO devs =
+        SetupDiGetClassDevsW(&hid_guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (devs == INVALID_HANDLE_VALUE) return {};
 
     std::vector<ControllerInfo> out;
+    ControllerScanStats stats{};
     SP_DEVICE_INTERFACE_DATA if_data{};
     if_data.cbSize = sizeof(if_data);
 
     for (DWORD index = 0; SetupDiEnumDeviceInterfaces(devs, nullptr, &hid_guid, index, &if_data);
          ++index) {
+        ++stats.setupapi_hid_interfaces;
         DWORD needed = 0;
         SetupDiGetDeviceInterfaceDetailW(devs, &if_data, nullptr, 0, &needed, nullptr);
         if (!needed) continue;
 
         std::vector<std::byte> detail_buf(needed);
-        auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detail_buf.data());
+        auto* detail   = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detail_buf.data());
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
         if (!SetupDiGetDeviceInterfaceDetailW(devs, &if_data, detail, needed, nullptr, nullptr))
             continue;
 
-        detail::unique_handle h{CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE,
-                                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-        if (!h) continue;
+        const bool path_dualsense = path_is_dualsense(detail->DevicePath);
+        if (path_dualsense) {
+            ++stats.dualsense_paths;
+            log::info("[dualsense] SetupAPI DualSense path{}: {}",
+                      path_is_col03(detail->DevicePath) ? " (col03)" : "",
+                      utf8_from_wide(detail->DevicePath));
+        }
+        detail::unique_handle h = open_hid_query_handle(detail->DevicePath);
+        if (!h) {
+            if (path_dualsense) {
+                const DWORD err = GetLastError();
+                log::warn(
+                    "[dualsense] DualSense HID path is present but blocked (win32 err {}): {}", err,
+                    utf8_from_wide(detail->DevicePath));
+                out.push_back({detail->DevicePath,
+                               L"DualSense",
+                               {},
+                               path_is_bluetooth(detail->DevicePath),
+                               false,
+                               false,
+                               path_is_col03(detail->DevicePath)});
+            }
+            continue;
+        }
 
         HIDD_ATTRIBUTES attrs{};
         attrs.Size = sizeof(attrs);
-        if (!HidD_GetAttributes(h.get(), &attrs)) continue;
-        if (attrs.VendorID != kVendorSony ||
-            (attrs.ProductID != kDualSense && attrs.ProductID != kDualSenseEdge))
+        if (!HidD_GetAttributes(h.get(), &attrs)) {
+            if (path_dualsense) {
+                log::warn("[dualsense] DualSense HID attributes unavailable: {}",
+                          utf8_from_wide(detail->DevicePath));
+                out.push_back({detail->DevicePath,
+                               L"DualSense",
+                               {},
+                               path_is_bluetooth(detail->DevicePath),
+                               false,
+                               false,
+                               path_is_col03(detail->DevicePath)});
+            }
             continue;
+        }
+        const bool attrs_dualsense =
+            attrs.VendorID == kVendorSony &&
+            (attrs.ProductID == kDualSense || attrs.ProductID == kDualSenseEdge);
+        if (!attrs_dualsense && !path_dualsense) continue;
 
         PHIDP_PREPARSED_DATA prep = nullptr;
-        if (!HidD_GetPreparsedData(h.get(), &prep)) continue;
+        if (!HidD_GetPreparsedData(h.get(), &prep)) {
+            log::warn("[dualsense] DualSense HID preparsed data unavailable: {}",
+                      utf8_from_wide(detail->DevicePath));
+            continue;
+        }
         HIDP_CAPS caps{};
         const bool caps_ok = HidP_GetCaps(prep, &caps) == HIDP_STATUS_SUCCESS;
         HidD_FreePreparsedData(prep);
-        if (!caps_ok || caps.UsagePage != 1 || caps.Usage != 5) continue;
+        if (!caps_ok) continue;
+        const bool gamepad_usage = caps.UsagePage == 1 && caps.Usage == 5;
+        if (!gamepad_usage) {
+            log::info(
+                "[dualsense] accepting DualSense non-gamepad HID interface usage {:04X}:{:04X}",
+                caps.UsagePage, caps.Usage);
+        }
 
         wchar_t product[128] = {};
         HidD_GetProductString(h.get(), product, sizeof(product));
         out.push_back({detail->DevicePath, product[0] ? product : L"DualSense",
-                       read_controller_serial(h.get()), path_is_bluetooth(detail->DevicePath)});
+                       read_controller_serial(h.get()), path_is_bluetooth(detail->DevicePath),
+                       false, gamepad_usage, path_is_col03(detail->DevicePath)});
     }
 
     SetupDiDestroyDeviceInfoList(devs);
+    append_rawinput_dualsense_devices(out, stats);
 
     std::vector<std::string> wired_serials;
     for (const auto& c : out) {
@@ -365,6 +685,23 @@ std::vector<ControllerInfo> enumerate_controllers() {
                                                   c.serial) != wired_serials.end();
                              }),
               out.end());
+    std::stable_sort(out.begin(), out.end(), [](const ControllerInfo& a, const ControllerInfo& b) {
+        const int sa = (a.blocked ? 0 : 8) + (a.col03 ? 16 : 0) + (a.gamepad_usage ? 2 : 0) +
+                       (a.bluetooth ? 0 : 1);
+        const int sb = (b.blocked ? 0 : 8) + (b.col03 ? 16 : 0) + (b.gamepad_usage ? 2 : 0) +
+                       (b.bluetooth ? 0 : 1);
+        return sa > sb;
+    });
+    const auto hidapi_devices = g_last_scan_stats.hidapi_devices;
+    const auto hidapi_paths   = g_last_scan_stats.hidapi_dualsense_paths;
+    g_last_scan_stats         = stats;
+    g_last_scan_stats.hidapi_devices         = hidapi_devices;
+    g_last_scan_stats.hidapi_dualsense_paths = hidapi_paths;
+    if (out.empty()) {
+        log::warn("[dualsense] no DualSense found; scanned SetupAPI HID interfaces={}, Raw Input "
+                  "HID devices={}, DualSense VID/PID paths={}",
+                  stats.setupapi_hid_interfaces, stats.rawinput_hid_devices, stats.dualsense_paths);
+    }
     return out;
 }
 
@@ -396,47 +733,243 @@ bool write_report(HANDLE h, const std::vector<uint8_t>& report) {
            written != 0;
 }
 
+std::filesystem::path current_module_directory() {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&current_module_directory), &module)) {
+        return {};
+    }
+
+    std::wstring path(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD got = GetModuleFileNameW(module, path.data(), static_cast<DWORD>(path.size()));
+        if (got == 0) return {};
+        if (got < path.size() - 1) {
+            path.resize(got);
+            break;
+        }
+        path.resize(path.size() * 2);
+    }
+    return std::filesystem::path(path).parent_path();
+}
+
+std::wstring widen(std::string_view s) {
+    if (s.empty()) return {};
+    const int needed =
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (needed <= 0) return {};
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), needed);
+    return out;
+}
+
+std::wstring quote_arg(std::wstring_view arg) {
+    std::wstring out{L'"'};
+    for (wchar_t ch : arg) {
+        if (ch == L'"') out += L'\\';
+        out += ch;
+    }
+    out += L'"';
+    return out;
+}
+
+bool wait_overlapped(HANDLE h, OVERLAPPED& ov, DWORD timeout_ms) {
+    const DWORD wait = WaitForSingleObject(ov.hEvent, timeout_ms);
+    if (wait != WAIT_OBJECT_0) {
+        CancelIo(h);
+        return false;
+    }
+    DWORD transferred = 0;
+    return GetOverlappedResult(h, &ov, &transferred, FALSE) != FALSE;
+}
+
+bool connect_pipe_with_timeout(HANDLE pipe, DWORD timeout_ms) {
+    detail::unique_handle event{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    if (!event) return false;
+    OVERLAPPED ov{};
+    ov.hEvent = event.get();
+    if (ConnectNamedPipe(pipe, &ov)) return true;
+    const DWORD err = GetLastError();
+    if (err == ERROR_PIPE_CONNECTED) return true;
+    if (err != ERROR_IO_PENDING) return false;
+    return wait_overlapped(pipe, ov, timeout_ms);
+}
+
+bool read_exact_with_timeout(HANDLE pipe, void* data, DWORD bytes, DWORD timeout_ms) {
+    detail::unique_handle event{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    if (!event) return false;
+    OVERLAPPED ov{};
+    ov.hEvent = event.get();
+    DWORD got = 0;
+    if (ReadFile(pipe, data, bytes, &got, &ov) && got == bytes) return true;
+    const DWORD err = GetLastError();
+    if (err != ERROR_IO_PENDING) return false;
+    const DWORD wait = WaitForSingleObject(ov.hEvent, timeout_ms);
+    if (wait != WAIT_OBJECT_0) {
+        CancelIo(pipe);
+        return false;
+    }
+    return GetOverlappedResult(pipe, &ov, &got, FALSE) && got == bytes;
+}
+
+bool write_exact_with_timeout(HANDLE pipe, const void* data, DWORD bytes, DWORD timeout_ms) {
+    detail::unique_handle event{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    if (!event) return false;
+    OVERLAPPED ov{};
+    ov.hEvent     = event.get();
+    DWORD written = 0;
+    if (WriteFile(pipe, data, bytes, &written, &ov) && written == bytes) return true;
+    const DWORD err = GetLastError();
+    if (err != ERROR_IO_PENDING) return false;
+    const DWORD wait = WaitForSingleObject(ov.hEvent, timeout_ms);
+    if (wait != WAIT_OBJECT_0) {
+        CancelIo(pipe);
+        return false;
+    }
+    return GetOverlappedResult(pipe, &ov, &written, FALSE) && written == bytes;
+}
+
+TriggerEffect packet_effect(uint8_t mode, uint8_t count, const std::array<uint8_t, 10>& params) {
+    TriggerEffect effect;
+    effect.mode        = static_cast<EffectMode>(mode);
+    effect.param_count = std::min<uint8_t>(count, static_cast<uint8_t>(effect.params.size()));
+    effect.params      = params;
+    return effect;
+}
+
+BrokerPacket make_packet(const TriggerEffect& left, const TriggerEffect& right, bool quit = false) {
+    BrokerPacket packet;
+    packet.left_mode         = static_cast<uint8_t>(left.mode);
+    packet.left_param_count  = left.param_count;
+    packet.left_params       = left.params;
+    packet.right_mode        = static_cast<uint8_t>(right.mode);
+    packet.right_param_count = right.param_count;
+    packet.right_params      = right.params;
+    packet.quit              = quit ? 1 : 0;
+    return packet;
+}
+
 class HidWriter {
 public:
     bool connect(const std::string& locked_serial) {
         if (handle_) return true;
+        if (hidapi_) return true;
+
+        if (connect_hidapi(locked_serial)) return true;
+
         auto controllers = enumerate_controllers();
         if (controllers.empty()) {
-            last_error_ = "DualSense not found";
+            last_error_ =
+                "DualSense not found (SetupAPI HID=" +
+                std::to_string(g_last_scan_stats.setupapi_hid_interfaces) +
+                ", RawInput HID=" + std::to_string(g_last_scan_stats.rawinput_hid_devices) +
+                ", DualSense paths=" + std::to_string(g_last_scan_stats.dualsense_paths) +
+                ", HIDAPI Sony HID=" + std::to_string(g_last_scan_stats.hidapi_devices) +
+                ", HIDAPI DualSense paths=" +
+                std::to_string(g_last_scan_stats.hidapi_dualsense_paths) + ")";
             return false;
         }
         auto selected = controllers.begin();
         if (!locked_serial.empty()) {
-            auto match = std::find_if(controllers.begin(), controllers.end(),
-                                      [&](const ControllerInfo& c) {
-                                          return c.serial == locked_serial;
-                                      });
+            auto match =
+                std::find_if(controllers.begin(), controllers.end(),
+                             [&](const ControllerInfo& c) { return c.serial == locked_serial; });
             if (match != controllers.end()) selected = match;
         }
-        info_ = *selected;
+        info_   = *selected;
         layout_ = info_.bluetooth ? kBt : kUsb;
-        handle_.reset(CreateFileW(info_.path.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                                  FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!handle_) {
-            last_error_ = "failed to open DualSense HID interface";
+        log::info("[dualsense] selected HID candidate{}: {}", info_.col03 ? " (col03)" : "",
+                  utf8_from_wide(info_.path));
+        if (info_.blocked) {
+            last_error_ = "DualSense HID is present but blocked; disable Steam Input for this game";
             return false;
         }
+
+        // Primary: open with write access for WriteFile backend.
+        DWORD writer_err = 0;
+        handle_          = open_hid_writer_handle(info_.path.c_str(), &writer_err);
+        if (handle_) {
+            backend_ = HidWriteBackend::write_file;
+            log::info("[dualsense] opened HID writer{} with WriteFile backend",
+                      info_.col03 ? " (col03)" : "");
+            last_error_.clear();
+            return true;
+        }
+
+        log::warn("[dualsense] WriteFile backend open failed{} (win32 err {}) on {}; "
+                  "trying SetOutputReport fallback",
+                  info_.col03 ? " on col03" : "", writer_err, utf8_from_wide(info_.path));
+
+        // Fallback: query handle + HidD_SetOutputReport (may coexist with Steam).
+        handle_ = open_hid_query_handle(info_.path.c_str());
+        if (!handle_) {
+            const auto query_err = GetLastError();
+            log::warn("[dualsense] query handle open also failed (win32 err {})", query_err);
+            last_error_ =
+                "failed to open DualSense HID interface; disable Steam Input for this game";
+            return false;
+        }
+
+        // Probe the fallback path with a silent off report.
+        auto off_report = build_report(layout_, off(), off());
+        if (!HidD_SetOutputReport(handle_.get(), off_report.data(),
+                                  static_cast<ULONG>(off_report.size()))) {
+            log::warn("[dualsense] HidD_SetOutputReport probe failed{} (win32 err {}); fallback "
+                      "unavailable",
+                      info_.col03 ? " on col03" : "", GetLastError());
+            handle_.reset();
+            last_error_ =
+                "failed to open DualSense HID interface; disable Steam Input for this game";
+            return false;
+        }
+
+        backend_ = HidWriteBackend::set_output_report;
+        log::info("[dualsense] opened HID interface{} via SetOutputReport fallback",
+                  info_.col03 ? " (col03)" : "");
         last_error_.clear();
         return true;
     }
 
-    void disconnect() noexcept { handle_.reset(); }
-    bool connected() const noexcept { return !!handle_; }
+    void disconnect() noexcept {
+        if (hidapi_) {
+            hid_close(hidapi_);
+            hidapi_ = nullptr;
+        }
+        handle_.reset();
+        backend_ = HidWriteBackend::write_file;
+    }
+    bool connected() const noexcept { return !!handle_ || hidapi_ != nullptr; }
     std::string name() const {
+        if (hidapi_) return hidapi_display_name(hidapi_info_);
         return controller_display_name(info_);
     }
     std::string last_error() const { return last_error_; }
 
     bool write(const TriggerEffect& left, const TriggerEffect& right) {
-        if (!handle_) return false;
-        const auto report = build_report(layout_, left, right);
-        if (!write_report(handle_.get(), report)) {
+        if (!handle_ && !hidapi_) return false;
+        auto report = build_report(layout_, left, right);
+        bool ok     = false;
+        if (backend_ == HidWriteBackend::hidapi_write) {
+            const int wrote = hid_write(hidapi_, report.data(), report.size());
+            ok = wrote > 0;
+            if (!ok) {
+                log::warn("[dualsense] HIDAPI hid_write failed: {}", hidapi_error_utf8(hidapi_));
+            }
+        } else if (backend_ == HidWriteBackend::hidapi_output_report) {
+            const int wrote = hid_send_output_report(hidapi_, report.data(), report.size());
+            ok = wrote > 0;
+            if (!ok) {
+                log::warn("[dualsense] HIDAPI hid_send_output_report failed: {}",
+                          hidapi_error_utf8(hidapi_));
+            }
+        } else if (backend_ == HidWriteBackend::write_file) {
+            ok = write_report(handle_.get(), report);
+        } else {
+            ok = HidD_SetOutputReport(handle_.get(), report.data(),
+                                      static_cast<ULONG>(report.size())) != FALSE;
+        }
+        if (!ok) {
             last_error_ = "DualSense HID write failed";
             disconnect();
             return false;
@@ -445,9 +978,517 @@ public:
     }
 
 private:
+    bool connect_hidapi(const std::string& locked_serial) {
+        auto controllers = enumerate_hidapi_controllers();
+        if (controllers.empty()) {
+            last_error_ =
+                "DualSense not found through HIDAPI (Sony HID=" +
+                std::to_string(g_last_scan_stats.hidapi_devices) + ", DualSense paths=" +
+                std::to_string(g_last_scan_stats.hidapi_dualsense_paths) + ")";
+            return false;
+        }
+
+        auto selected = controllers.begin();
+        if (!locked_serial.empty()) {
+            auto match =
+                std::find_if(controllers.begin(), controllers.end(),
+                             [&](const HidApiCandidate& c) { return c.serial == locked_serial; });
+            if (match != controllers.end()) selected = match;
+        }
+        hidapi_info_ = *selected;
+        layout_      = hidapi_info_.bluetooth ? kBt : kUsb;
+        log::info("[dualsense] selected HIDAPI candidate{} iface={}: {}",
+                  hidapi_info_.col03 ? " (col03)" : "", hidapi_info_.interface_no,
+                  hidapi_info_.path);
+
+        hidapi_ = hid_open_path(hidapi_info_.path.c_str());
+        if (!hidapi_) {
+            last_error_ = "HIDAPI hid_open_path failed: " + hidapi_error_utf8(nullptr);
+            log::warn("[dualsense] {} on {}", last_error_, hidapi_info_.path);
+            return false;
+        }
+
+        auto off_report = build_report(layout_, off(), off());
+        int wrote       = hid_write(hidapi_, off_report.data(), off_report.size());
+        if (wrote > 0) {
+            backend_ = HidWriteBackend::hidapi_write;
+            log::info("[dualsense] opened HIDAPI writer{} with hid_write backend",
+                      hidapi_info_.col03 ? " (col03)" : "");
+            last_error_.clear();
+            return true;
+        }
+
+        log::warn("[dualsense] HIDAPI hid_write probe failed{}: {}; trying output-report fallback",
+                  hidapi_info_.col03 ? " on col03" : "", hidapi_error_utf8(hidapi_));
+        wrote = hid_send_output_report(hidapi_, off_report.data(), off_report.size());
+        if (wrote > 0) {
+            backend_ = HidWriteBackend::hidapi_output_report;
+            log::info("[dualsense] opened HIDAPI writer{} with output-report backend",
+                      hidapi_info_.col03 ? " (col03)" : "");
+            last_error_.clear();
+            return true;
+        }
+
+        last_error_ = "HIDAPI output report probe failed: " + hidapi_error_utf8(hidapi_);
+        log::warn("[dualsense] {}", last_error_);
+        hid_close(hidapi_);
+        hidapi_ = nullptr;
+        return false;
+    }
+
+    hid_device* hidapi_ = nullptr;
+    HidApiCandidate hidapi_info_;
     detail::unique_handle handle_;
     ControllerInfo info_;
-    HidLayout layout_ = kUsb;
+    HidLayout layout_        = kUsb;
+    HidWriteBackend backend_ = HidWriteBackend::write_file;
+    std::string last_error_;
+};
+
+class BrokerWriter {
+public:
+    bool connect(const std::string& locked_serial) {
+        if (pipe_) return true;
+
+        if (connect_existing()) {
+            log::info("[dualsense] controller connected through pre-launched HID broker");
+            return true;
+        }
+
+        const auto exe = current_module_directory() / L"frdx_dualsense_broker.exe";
+        log::info("[dualsense] trying external HID broker at {}", exe.string());
+        if (!std::filesystem::exists(exe)) {
+            last_error_ = "DualSense broker executable missing";
+            log::warn("[dualsense] {}", last_error_);
+            return false;
+        }
+
+        const DWORD pid  = GetCurrentProcessId();
+        const DWORD tick = GetTickCount();
+        std::wstring pipe_name =
+            L"\\\\.\\pipe\\frdx-dualsense-" + std::to_wstring(pid) + L"-" + std::to_wstring(tick);
+
+        detail::unique_handle server{CreateNamedPipeW(
+            pipe_name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 5000, nullptr)};
+        if (!server) {
+            last_error_ = "failed to create DualSense broker pipe";
+            log::warn("[dualsense] {} (win32 err {})", last_error_, GetLastError());
+            return false;
+        }
+
+        std::wstring cmd = quote_arg(exe.wstring()) + L" --broker " + quote_arg(pipe_name) + L" " +
+                           quote_arg(widen(locked_serial));
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::wstring mutable_cmd = cmd;
+        if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                            nullptr, exe.parent_path().c_str(), &si, &pi)) {
+            last_error_ = "failed to launch DualSense broker";
+            log::warn("[dualsense] {} (win32 err {})", last_error_, GetLastError());
+            return false;
+        }
+        CloseHandle(pi.hThread);
+        process_.reset(pi.hProcess);
+
+        if (!connect_pipe_with_timeout(server.get(), 5000)) {
+            last_error_ = "DualSense broker did not connect";
+            log::warn("[dualsense] {}", last_error_);
+            disconnect();
+            return false;
+        }
+
+        BrokerStatus status;
+        if (!read_exact_with_timeout(server.get(), &status, sizeof(status), 5000) ||
+            status.magic != kBrokerMagic || status.ok == 0) {
+            last_error_ = status.message[0] ? std::string{status.message}
+                                            : "DualSense broker could not open direct HID";
+            log::warn("[dualsense] {}", last_error_);
+            if (process_) WaitForSingleObject(process_.get(), 500);
+            disconnect();
+            return false;
+        }
+
+        pipe_ = std::move(server);
+        last_error_.clear();
+        return true;
+    }
+
+    void disconnect() noexcept {
+        if (pipe_) {
+            const auto packet = make_packet(off(), off(), true);
+            (void)write_exact_with_timeout(pipe_.get(), &packet, sizeof(packet), 250);
+        }
+        pipe_.reset();
+        if (process_) {
+            WaitForSingleObject(process_.get(), 500);
+            process_.reset();
+        }
+    }
+
+    bool connected() const noexcept { return !!pipe_; }
+    std::string name() const { return "DualSense via HID broker"; }
+    std::string last_error() const { return last_error_; }
+
+    bool write(const TriggerEffect& left, const TriggerEffect& right) {
+        if (!pipe_) return false;
+        const auto packet = make_packet(left, right);
+        if (!write_exact_with_timeout(pipe_.get(), &packet, sizeof(packet), 1000)) {
+            last_error_ = "DualSense broker pipe write failed";
+            disconnect();
+            return false;
+        }
+        return true;
+    }
+
+private:
+    bool connect_existing() {
+        if (!WaitNamedPipeW(kBrokerPipeName, 50)) return false;
+        detail::unique_handle pipe{
+            CreateFileW(kBrokerPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr)};
+        if (!pipe) return false;
+
+        BrokerStatus status;
+        if (!read_exact_with_timeout(pipe.get(), &status, sizeof(status), 1000) ||
+            status.magic != kBrokerMagic || status.ok == 0) {
+            last_error_ = status.message[0] ? std::string{status.message}
+                                            : "pre-launched DualSense broker rejected connection";
+            log::warn("[dualsense] {}", last_error_);
+            return false;
+        }
+
+        pipe_ = std::move(pipe);
+        last_error_.clear();
+        return true;
+    }
+
+    detail::unique_handle pipe_;
+    detail::unique_handle process_;
+    std::string last_error_;
+};
+
+struct SteamTriggerOffParam {
+    uint8_t padding[48]{};
+};
+
+struct SteamTriggerFeedbackParam {
+    uint8_t position = 0;
+    uint8_t strength = 0;
+    uint8_t padding[46]{};
+};
+
+struct SteamTriggerVibrationParam {
+    uint8_t position  = 0;
+    uint8_t amplitude = 0;
+    uint8_t frequency = 0;
+    uint8_t padding[45]{};
+};
+
+struct SteamTriggerMultiFeedbackParam {
+    uint8_t strength[10]{};
+    uint8_t padding[38]{};
+};
+
+struct SteamTriggerMultiVibrationParam {
+    uint8_t frequency = 0;
+    uint8_t amplitude[10]{};
+    uint8_t padding[37]{};
+};
+
+union SteamTriggerCommandData {
+    SteamTriggerOffParam off_param;
+    SteamTriggerFeedbackParam feedback_param;
+    SteamTriggerVibrationParam vibration_param;
+    SteamTriggerMultiFeedbackParam multi_feedback_param;
+    SteamTriggerMultiVibrationParam multi_vibration_param;
+    uint8_t raw[48];
+};
+
+struct SteamTriggerCommand {
+    int mode = 0;
+    uint8_t padding[4]{};
+    SteamTriggerCommandData command_data{};
+};
+
+struct SteamTriggerParam {
+    uint8_t trigger_mask = 0;
+    uint8_t padding[7]{};
+    SteamTriggerCommand command[2]{};
+};
+
+static_assert(sizeof(SteamTriggerParam) == 120, "Steam DualSense trigger param size mismatch");
+
+SteamTriggerParam build_steam_param(const TriggerEffect& left, const TriggerEffect& right) {
+    constexpr uint8_t kMaskL2 = 0x01;
+    constexpr uint8_t kMaskR2 = 0x02;
+    SteamTriggerParam param{};
+    param.trigger_mask = kMaskL2 | kMaskR2;
+
+    auto write_effect = [](SteamTriggerCommand& command, const TriggerEffect& effect) {
+        switch (effect.mode) {
+            case EffectMode::rigid:
+                command.mode = 1; // SCE_PAD_TRIGGER_EFFECT_MODE_FEEDBACK
+                command.command_data.feedback_param.position = effect.params[0];
+                command.command_data.feedback_param.strength =
+                    steam_feedback_strength(effect.params[1]);
+                break;
+            case EffectMode::vibrate:
+                command.mode = 3; // SCE_PAD_TRIGGER_EFFECT_MODE_VIBRATION
+                command.command_data.vibration_param.position  = 5;
+                command.command_data.vibration_param.amplitude = amp_to_strength(effect.params[1]);
+                command.command_data.vibration_param.frequency = effect.params[0];
+                break;
+            case EffectMode::rigid_zones:
+                command.mode = 4; // SCE_PAD_TRIGGER_EFFECT_MODE_MULTIPLE_POSITION_FEEDBACK
+                {
+                    const auto zones = unpack_zones(effect.params);
+                    for (size_t i = 0; i < zones.size(); ++i)
+                        command.command_data.multi_feedback_param.strength[i] =
+                            std::clamp<uint8_t>(zones[i], 0, 8);
+                }
+                break;
+            case EffectMode::vibrate_zones:
+                command.mode = 6; // SCE_PAD_TRIGGER_EFFECT_MODE_MULTIPLE_POSITION_VIBRATION
+                command.command_data.multi_vibration_param.frequency = effect.params[8];
+                {
+                    const auto zones = unpack_zones(effect.params);
+                    for (size_t i = 0; i < zones.size(); ++i)
+                        command.command_data.multi_vibration_param.amplitude[i] =
+                            std::clamp<uint8_t>(zones[i], 0, 8);
+                }
+                break;
+            case EffectMode::off:
+            default:
+                command.mode = 0; // SCE_PAD_TRIGGER_EFFECT_MODE_OFF
+                break;
+        }
+    };
+
+    write_effect(param.command[0], left);
+    write_effect(param.command[1], right);
+    return param;
+}
+
+class SteamInputWriter {
+public:
+    bool connect() {
+        if (input_ && handle_) return true;
+
+        HMODULE module = GetModuleHandleW(L"steam_api64.dll");
+        if (!module) module = LoadLibraryW(L"steam_api64.dll");
+        if (!module) {
+            last_error_ = "Steam Input API not loaded";
+            return false;
+        }
+
+        steam_input_v006_ =
+            reinterpret_cast<SteamInputV006Fn>(GetProcAddress(module, "SteamAPI_SteamInput_v006"));
+        init_ =
+            reinterpret_cast<SteamInputInitFn>(GetProcAddress(module, "SteamAPI_ISteamInput_Init"));
+        run_frame_ = reinterpret_cast<SteamInputRunFrameFn>(
+            GetProcAddress(module, "SteamAPI_ISteamInput_RunFrame"));
+        get_connected_ = reinterpret_cast<SteamInputGetConnectedControllersFn>(
+            GetProcAddress(module, "SteamAPI_ISteamInput_GetConnectedControllers"));
+        get_type_ = reinterpret_cast<SteamInputGetInputTypeForHandleFn>(
+            GetProcAddress(module, "SteamAPI_ISteamInput_GetInputTypeForHandle"));
+        set_trigger_ = reinterpret_cast<SteamInputSetDualSenseTriggerEffectFn>(
+            GetProcAddress(module, "SteamAPI_ISteamInput_SetDualSenseTriggerEffect"));
+
+        if (!steam_input_v006_ || !init_ || !run_frame_ || !get_connected_ || !get_type_ ||
+            !set_trigger_) {
+            last_error_ = "Steam Input DualSense API exports missing";
+            return false;
+        }
+
+        input_ = steam_input_v006_();
+        if (!input_) {
+            last_error_ = "Steam Input interface unavailable";
+            return false;
+        }
+
+        (void)init_(input_, true);
+        run_frame_(input_, true);
+
+        std::array<uint64_t, 16> handles{};
+        const int count =
+            std::clamp(get_connected_(input_, handles.data()), 0, static_cast<int>(handles.size()));
+        if (count <= 0) {
+            last_error_ = "Steam Input found no controllers";
+            input_      = nullptr;
+            return false;
+        }
+
+        std::string seen_types;
+        for (int i = 0; i < count; ++i) {
+            const int type = get_type_(input_, handles[static_cast<size_t>(i)]);
+            if (!seen_types.empty()) seen_types += ",";
+            seen_types += std::to_string(type);
+            if (type == kSteamInputTypePS5) {
+                handle_     = handles[static_cast<size_t>(i)];
+                input_type_ = type;
+                last_error_.clear();
+                return true;
+            }
+        }
+
+        last_error_ =
+            "Steam Input found controllers but no DualSense/PS5 handle (types=" + seen_types + ")";
+        input_ = nullptr;
+        return false;
+    }
+
+    void disconnect() noexcept {
+        if (input_ && handle_) {
+            const auto param = build_steam_param(off(), off());
+            set_trigger_(input_, handle_, &param);
+        }
+        input_      = nullptr;
+        handle_     = 0;
+        input_type_ = 0;
+    }
+
+    bool connected() const noexcept { return input_ && handle_; }
+    std::string name() const {
+        if (input_type_ == kSteamInputTypePS5) return "DualSense via Steam Input";
+        return "Steam Input controller";
+    }
+    std::string last_error() const { return last_error_; }
+
+    bool write(const TriggerEffect& left, const TriggerEffect& right) {
+        if (!input_ || !handle_) return false;
+        run_frame_(input_, true);
+        const auto param = build_steam_param(left, right);
+        set_trigger_(input_, handle_, &param);
+        return true;
+    }
+
+private:
+    using SteamInputV006Fn                      = void* (*)();
+    using SteamInputInitFn                      = bool (*)(void*, bool);
+    using SteamInputRunFrameFn                  = void (*)(void*, bool);
+    using SteamInputGetConnectedControllersFn   = int (*)(void*, uint64_t*);
+    using SteamInputGetInputTypeForHandleFn     = int (*)(void*, uint64_t);
+    using SteamInputSetDualSenseTriggerEffectFn = void (*)(void*, uint64_t,
+                                                           const SteamTriggerParam*);
+
+    static constexpr int kSteamInputTypePS5 = 13;
+
+    void* input_                                       = nullptr;
+    uint64_t handle_                                   = 0;
+    int input_type_                                    = 0;
+    SteamInputV006Fn steam_input_v006_                 = nullptr;
+    SteamInputInitFn init_                             = nullptr;
+    SteamInputRunFrameFn run_frame_                    = nullptr;
+    SteamInputGetConnectedControllersFn get_connected_ = nullptr;
+    SteamInputGetInputTypeForHandleFn get_type_        = nullptr;
+    SteamInputSetDualSenseTriggerEffectFn set_trigger_ = nullptr;
+    std::string last_error_;
+};
+
+class TriggerWriter {
+public:
+    bool connect(const std::string& locked_serial) {
+        if (connected()) return true;
+        if (hid_.connect(locked_serial)) {
+            backend_ = TriggerBackend::hid;
+            last_error_.clear();
+            return true;
+        }
+
+        const std::string hid_error = hid_.last_error();
+        if (broker_.connect(locked_serial)) {
+            backend_ = TriggerBackend::broker;
+            log::info("[dualsense] controller connected through external HID broker");
+            last_error_.clear();
+            return true;
+        }
+
+        const std::string broker_error = broker_.last_error();
+        if (!broker_error.empty()) {
+            log::warn("[dualsense] external HID broker unavailable: {}", broker_error);
+        }
+
+        last_error_ = hid_error;
+        if (!broker_error.empty()) {
+            if (!last_error_.empty()) last_error_ += "; ";
+            last_error_ += broker_error;
+        }
+        log::warn("[dualsense] direct HID unavailable; Steam Input fallback is disabled");
+        return false;
+    }
+
+    bool promote_hid(const std::string& locked_serial) {
+        if (backend_ == TriggerBackend::hid) return hid_.connected();
+        HidWriter candidate;
+        if (!candidate.connect(locked_serial)) {
+            last_error_ = candidate.last_error();
+            return false;
+        }
+
+        steam_.disconnect();
+        hid_     = std::move(candidate);
+        backend_ = TriggerBackend::hid;
+        last_error_.clear();
+        log::info("[dualsense] promoted controller backend to direct HID ({})", hid_.name());
+        return true;
+    }
+
+    void disconnect() noexcept {
+        if (backend_ == TriggerBackend::hid) {
+            hid_.disconnect();
+        } else if (backend_ == TriggerBackend::broker) {
+            broker_.disconnect();
+        } else {
+            steam_.disconnect();
+        }
+        backend_ = TriggerBackend::hid;
+    }
+
+    bool connected() const noexcept {
+        if (backend_ == TriggerBackend::hid) return hid_.connected();
+        if (backend_ == TriggerBackend::broker) return broker_.connected();
+        return steam_.connected();
+    }
+
+    std::string name() const {
+        if (backend_ == TriggerBackend::hid) return hid_.name();
+        if (backend_ == TriggerBackend::broker) return broker_.name();
+        return steam_.name();
+    }
+
+    std::string last_error() const { return last_error_; }
+
+    bool using_steam_input() const noexcept {
+        return backend_ == TriggerBackend::steam_input && steam_.connected();
+    }
+
+    bool write(const TriggerEffect& left, const TriggerEffect& right) {
+        const bool ok = [this, &left, &right] {
+            if (backend_ == TriggerBackend::hid) return hid_.write(left, right);
+            if (backend_ == TriggerBackend::broker) return broker_.write(left, right);
+            return steam_.write(left, right);
+        }();
+        if (!ok) {
+            if (backend_ == TriggerBackend::hid) {
+                last_error_ = hid_.last_error();
+            } else if (backend_ == TriggerBackend::broker) {
+                last_error_ = broker_.last_error();
+            } else {
+                last_error_ = steam_.last_error();
+            }
+            disconnect();
+        }
+        return ok;
+    }
+
+private:
+    TriggerBackend backend_ = TriggerBackend::hid;
+    HidWriter hid_;
+    BrokerWriter broker_;
+    SteamInputWriter steam_;
     std::string last_error_;
 };
 
@@ -487,7 +1528,7 @@ private:
             const float rpm_ratio = t.max_rpm > 0.0f ? t.rpm / t.max_rpm : 0.0f;
             if (rpm_ratio > s.rev_limit_ratio)
                 rev_until_ = now + std::chrono::milliseconds(
-                                        static_cast<int>(std::lround(s.rev_limit_hold_ms)));
+                                       static_cast<int>(std::lround(s.rev_limit_hold_ms)));
         }
         return now < rev_until_ ? vibrate(s.rev_limit_freq, s.rev_limit_amp) : off();
     }
@@ -496,9 +1537,10 @@ private:
         if (!s.enable_idle_buzz || t.speed >= s.idle_max_speed_kmh ||
             !(t.accel >= 1 && t.accel <= s.idle_accel_max))
             return off();
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         const int period_ms = std::max(1, static_cast<int>(s.idle_period_s * 1000.0f));
-        const bool loud = (ms % period_ms) < (period_ms / 2);
+        const bool loud     = (ms % period_ms) < (period_ms / 2);
         return vibrate(s.idle_freq, loud ? s.idle_amp_high : s.idle_amp_low);
     }
 
@@ -511,7 +1553,7 @@ private:
     TriggerEffect wheelspin_buzz(const Telemetry& t, const DualSenseConfig& s) const {
         if (!s.enable_wheelspin_buzz || t.accel < s.accel_deadzone) return off();
         const auto wheels = driven_wheels(t.drive_train);
-        float spin = 0.0f;
+        float spin        = 0.0f;
         if (t.speed < kLowSpeedKmh) {
             for (size_t w : wheels) spin = std::max(spin, std::abs(t.wheel_rotation_speed[w]));
             if (spin < kBurnoutRotThreshold) return off();
@@ -562,8 +1604,8 @@ private:
         }
         auto pulse = abs_pulse(t, s);
         if (pulse.mode != EffectMode::off) return pulse;
-        l2_in_wall_ = wall_state(t.brake, l2_in_wall_, s.brake_wall_engage_at,
-                                 s.brake_wall_release_at);
+        l2_in_wall_ =
+            wall_state(t.brake, l2_in_wall_, s.brake_wall_engage_at, s.brake_wall_release_at);
         if (l2_in_wall_) return build_wall(s.wall_zones);
         if (s.enable_brake_static_wall)
             return build_brake_walls(s.brake_static_wall_at, s.brake_static_wall_force,
@@ -582,8 +1624,8 @@ private:
         if (rev.mode != EffectMode::off) return rev;
         auto spin = wheelspin_buzz(t, s);
         if (spin.mode != EffectMode::off) return spin;
-        r2_in_wall_ = wall_state(t.accel, r2_in_wall_, s.throttle_wall_engage_at,
-                                 s.throttle_wall_release_at);
+        r2_in_wall_ =
+            wall_state(t.accel, r2_in_wall_, s.throttle_wall_engage_at, s.throttle_wall_release_at);
         if (r2_in_wall_) return build_wall(s.wall_zones);
         return throttle_ramp(t, s);
     }
@@ -610,21 +1652,28 @@ std::vector<ControllerDevice> enumerate_devices() {
 bool identify_controller(const std::string& serial, int force) {
     if (serial.empty()) return false;
     const auto devices = enumerate_controllers();
-    const auto it = std::find_if(devices.begin(), devices.end(), [&](const ControllerInfo& d) {
-        return d.serial == serial;
-    });
+    const auto it      = std::find_if(devices.begin(), devices.end(),
+                                      [&](const ControllerInfo& d) { return d.serial == serial; });
     if (it == devices.end()) return false;
 
-    detail::unique_handle h{CreateFileW(it->path.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (!h) return false;
+    detail::unique_handle h = open_hid_writer_handle(it->path.c_str());
+    HidWriteBackend backend = HidWriteBackend::write_file;
+    if (!h) {
+        h = open_hid_query_handle(it->path.c_str());
+        if (!h) return false;
+        backend = HidWriteBackend::set_output_report;
+    }
 
     const auto layout = it->bluetooth ? kBt : kUsb;
-    const auto pulse = rigid(static_cast<float>(force));
-    if (!write_report(h.get(), build_report(layout, pulse, pulse))) return false;
+    const auto pulse  = rigid(static_cast<float>(force));
+    auto send_report  = [&](const std::vector<uint8_t>& rpt) {
+        if (backend == HidWriteBackend::write_file) return write_report(h.get(), rpt);
+        return HidD_SetOutputReport(h.get(), const_cast<uint8_t*>(rpt.data()),
+                                    static_cast<ULONG>(rpt.size())) != FALSE;
+    };
+    if (!send_report(build_report(layout, pulse, pulse))) return false;
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    write_report(h.get(), build_report(layout, off(), off()));
+    send_report(build_report(layout, off(), off()));
     return true;
 }
 
@@ -642,22 +1691,132 @@ bool send_test_telemetry(int udp_port) {
 
     WSADATA wsa{};
     const bool started_wsa = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    SOCKET sock            = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) {
         if (started_wsa) WSACleanup();
         return false;
     }
 
     sockaddr_in addr{};
-    addr.sin_family = AF_INET;
+    addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(static_cast<u_short>(std::clamp(udp_port, 1, 65535)));
+    addr.sin_port        = htons(static_cast<u_short>(std::clamp(udp_port, 1, 65535)));
     const int sent =
         sendto(sock, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()),
                0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     closesocket(sock);
     if (started_wsa) WSACleanup();
     return sent == static_cast<int>(packet.size());
+}
+
+int run_controller_broker(const std::wstring& pipe_name, const std::string& locked_serial) {
+    const auto log_dir = current_module_directory() / L"mods" / L"frdx";
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    log::init(log_dir / L"dualsense_broker.log");
+    log::info("[dualsense-broker] starting");
+
+    detail::unique_handle pipe{CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (!pipe) {
+        log::warn("[dualsense-broker] pipe open failed ({})", GetLastError());
+        return 2;
+    }
+
+    HidWriter hid;
+    const bool connected = hid.connect(locked_serial);
+    BrokerStatus status;
+    status.ok = connected ? 1 : 0;
+    const std::string status_message =
+        connected ? hid.name() : ("DualSense broker direct HID failed: " + hid.last_error());
+    std::snprintf(status.message, sizeof(status.message), "%s", status_message.c_str());
+    DWORD written = 0;
+    WriteFile(pipe.get(), &status, sizeof(status), &written, nullptr);
+    if (!connected) {
+        log::warn("[dualsense-broker] direct HID connect failed: {}", hid.last_error());
+        return 3;
+    }
+
+    log::info("[dualsense-broker] direct HID connected ({})", hid.name());
+    for (;;) {
+        BrokerPacket packet;
+        DWORD got = 0;
+        if (!ReadFile(pipe.get(), &packet, sizeof(packet), &got, nullptr) || got == 0) break;
+        if (got != sizeof(packet) || packet.magic != kBrokerMagic) continue;
+        if (packet.quit) break;
+
+        const TriggerEffect left =
+            packet_effect(packet.left_mode, packet.left_param_count, packet.left_params);
+        const TriggerEffect right =
+            packet_effect(packet.right_mode, packet.right_param_count, packet.right_params);
+        if (!hid.write(left, right)) {
+            log::warn("[dualsense-broker] HID write failed: {}", hid.last_error());
+            return 4;
+        }
+    }
+
+    hid.write(off(), off());
+    hid.disconnect();
+    log::info("[dualsense-broker] exiting");
+    return 0;
+}
+
+int run_controller_broker_server(const std::string& locked_serial) {
+    const auto log_dir = current_module_directory() / L"mods" / L"frdx";
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    log::init(log_dir / L"dualsense_broker.log");
+    log::info("[dualsense-broker] standalone server starting");
+
+    HidWriter hid;
+    const bool connected = hid.connect(locked_serial);
+    BrokerStatus status;
+    status.ok = connected ? 1 : 0;
+    const std::string status_message =
+        connected ? hid.name() : ("DualSense broker direct HID failed: " + hid.last_error());
+    std::snprintf(status.message, sizeof(status.message), "%s", status_message.c_str());
+    if (!connected) {
+        log::warn("[dualsense-broker] direct HID connect failed: {}", hid.last_error());
+    } else {
+        log::info("[dualsense-broker] direct HID connected ({})", hid.name());
+    }
+
+    for (;;) {
+        detail::unique_handle pipe{CreateNamedPipeW(kBrokerPipeName, PIPE_ACCESS_DUPLEX,
+                                                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                                                    1, 4096, 4096, 0, nullptr)};
+        if (!pipe) {
+            log::warn("[dualsense-broker] CreateNamedPipe failed ({})", GetLastError());
+            return 2;
+        }
+
+        const BOOL pipe_connected =
+            ConnectNamedPipe(pipe.get(), nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+        if (!pipe_connected) continue;
+
+        DWORD written = 0;
+        WriteFile(pipe.get(), &status, sizeof(status), &written, nullptr);
+        if (!connected) return 3;
+
+        log::info("[dualsense-broker] game connected");
+        for (;;) {
+            BrokerPacket packet;
+            DWORD got = 0;
+            if (!ReadFile(pipe.get(), &packet, sizeof(packet), &got, nullptr) || got == 0) break;
+            if (got != sizeof(packet) || packet.magic != kBrokerMagic) continue;
+            if (packet.quit) break;
+
+            const TriggerEffect left =
+                packet_effect(packet.left_mode, packet.left_param_count, packet.left_params);
+            const TriggerEffect right =
+                packet_effect(packet.right_mode, packet.right_param_count, packet.right_params);
+            if (!hid.write(left, right)) {
+                log::warn("[dualsense-broker] HID write failed: {}", hid.last_error());
+                return 4;
+            }
+        }
+        log::info("[dualsense-broker] game disconnected; waiting for reconnect");
+    }
 }
 
 DualSenseService::DualSenseService(DualSenseConfig cfg) : cfg_{cfg} {}
@@ -677,7 +1836,7 @@ void DualSenseService::stop() noexcept {
 
 void DualSenseService::update_config(const DualSenseConfig& cfg) {
     std::scoped_lock lk{mu_};
-    cfg_ = cfg;
+    cfg_            = cfg;
     status_.enabled = cfg.enabled;
 }
 
@@ -694,35 +1853,37 @@ void DualSenseService::run() {
         return;
     }
 
-    SOCKET sock = INVALID_SOCKET;
+    SOCKET sock     = INVALID_SOCKET;
     int active_port = 0;
-    HidWriter hid;
+    TriggerWriter triggers;
     EffectController controller;
     std::pair<TriggerEffect, TriggerEffect> prev{off(), off()};
-    auto last_packet = std::chrono::steady_clock::now();
-    auto last_connect_attempt = std::chrono::steady_clock::time_point{};
+    auto last_packet                = std::chrono::steady_clock::now();
+    auto last_connect_attempt       = std::chrono::steady_clock::time_point{};
+    auto last_hid_promotion_attempt = std::chrono::steady_clock::time_point{};
     std::string active_controller_lock;
     bool ever_connected = false;
 
-    auto publish_status = [&](const DualSenseConfig& cfg, const HidWriter& writer) {
+    auto publish_status = [&](const DualSenseConfig& cfg, const TriggerWriter& writer) {
         std::scoped_lock lk{mu_};
-        status_.enabled = cfg.enabled;
+        status_.enabled              = cfg.enabled;
         status_.controller_connected = writer.connected();
-        status_.controller_name = writer.connected() ? writer.name() : "";
+        status_.controller_name      = writer.connected() ? writer.name() : "";
     };
 
     auto reset_runtime_state = [&] {
-        controller = EffectController{};
-        prev = {off(), off()};
-        last_packet = std::chrono::steady_clock::now();
-        last_connect_attempt = std::chrono::steady_clock::time_point{};
-        ever_connected = false;
+        controller                 = EffectController{};
+        prev                       = {off(), off()};
+        last_packet                = std::chrono::steady_clock::now();
+        last_connect_attempt       = std::chrono::steady_clock::time_point{};
+        last_hid_promotion_attempt = std::chrono::steady_clock::time_point{};
+        ever_connected             = false;
     };
 
     auto close_socket = [&] {
         if (sock != INVALID_SOCKET) {
             closesocket(sock);
-            sock = INVALID_SOCKET;
+            sock        = INVALID_SOCKET;
             active_port = 0;
         }
     };
@@ -744,8 +1905,8 @@ void DualSenseService::run() {
         close_socket();
         sockaddr_in6 addr6{};
         addr6.sin6_family = AF_INET6;
-        addr6.sin6_addr = in6addr_any;
-        addr6.sin6_port = htons(static_cast<u_short>(port));
+        addr6.sin6_addr   = in6addr_any;
+        addr6.sin6_port   = htons(static_cast<u_short>(port));
 
         sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
         if (sock != INVALID_SOCKET) {
@@ -764,9 +1925,9 @@ void DualSenseService::run() {
         }
 
         sockaddr_in addr4{};
-        addr4.sin_family = AF_INET;
+        addr4.sin_family      = AF_INET;
         addr4.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr4.sin_port = htons(static_cast<u_short>(port));
+        addr4.sin_port        = htons(static_cast<u_short>(port));
         if (!bind_udp(AF_INET, reinterpret_cast<sockaddr*>(&addr4), sizeof(addr4))) return false;
         active_port = port;
         log::info("[dualsense] listening for Forza Data Out on UDP {}", port);
@@ -777,23 +1938,23 @@ void DualSenseService::run() {
         DualSenseConfig cfg;
         {
             std::scoped_lock lk{mu_};
-            cfg = cfg_;
+            cfg             = cfg_;
             status_.enabled = cfg.enabled;
         }
 
         if (!cfg.enabled) {
-            if (hid.connected()) {
-                hid.write(off(), off());
-                hid.disconnect();
+            if (triggers.connected()) {
+                triggers.write(off(), off());
+                triggers.disconnect();
             }
             close_socket();
             reset_runtime_state();
             active_controller_lock.clear();
             {
                 std::scoped_lock lk{mu_};
-                status_.enabled = false;
+                status_.enabled              = false;
                 status_.controller_connected = false;
-                status_.telemetry_seen = false;
+                status_.telemetry_seen       = false;
                 status_.controller_name.clear();
                 status_.last_error.clear();
             }
@@ -802,7 +1963,7 @@ void DualSenseService::run() {
         }
 
         if (sock == INVALID_SOCKET || active_port != cfg.udp_port) {
-            if (hid.connected()) hid.write(off(), off());
+            if (triggers.connected()) triggers.write(off(), off());
             reset_runtime_state();
             {
                 std::scoped_lock lk{mu_};
@@ -821,33 +1982,46 @@ void DualSenseService::run() {
         }
 
         if (cfg.controller_lock_serial != active_controller_lock) {
-            if (hid.connected()) {
-                hid.write(off(), off());
-                hid.disconnect();
+            if (triggers.connected()) {
+                triggers.write(off(), off());
+                triggers.disconnect();
             }
             reset_runtime_state();
             active_controller_lock = cfg.controller_lock_serial;
-            publish_status(cfg, hid);
+            publish_status(cfg, triggers);
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (!hid.connected() &&
-            (cfg.enable_reconnect || !ever_connected) &&
+        if (!triggers.connected() && (cfg.enable_reconnect || !ever_connected) &&
             now - last_connect_attempt >= std::chrono::duration<float>(cfg.reconnect_interval_s)) {
             last_connect_attempt = now;
-            if (hid.connect(cfg.controller_lock_serial)) {
-                ever_connected = true;
+            if (triggers.connect(cfg.controller_lock_serial)) {
+                ever_connected         = true;
                 active_controller_lock = cfg.controller_lock_serial;
                 if (cfg.enable_startup_pulse) {
                     const auto pulse = rigid(static_cast<float>(cfg.startup_pulse_force));
-                    hid.write(pulse, pulse);
+                    triggers.write(pulse, pulse);
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    hid.write(off(), off());
+                    triggers.write(off(), off());
                 }
-                log::info("[dualsense] controller connected ({})", hid.name());
+                log::info("[dualsense] controller connected ({})", triggers.name());
             } else {
                 std::scoped_lock lk{mu_};
-                status_.last_error = hid.last_error();
+                status_.last_error = triggers.last_error();
+            }
+        }
+
+        if (triggers.using_steam_input() &&
+            now - last_hid_promotion_attempt >= std::chrono::seconds(15)) {
+            last_hid_promotion_attempt = now;
+            if (triggers.promote_hid(cfg.controller_lock_serial)) {
+                prev = {off(), off()};
+                if (cfg.enable_startup_pulse) {
+                    const auto pulse = rigid(static_cast<float>(cfg.startup_pulse_force));
+                    triggers.write(pulse, pulse);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+                    triggers.write(off(), off());
+                }
             }
         }
 
@@ -859,12 +2033,10 @@ void DualSenseService::run() {
         if (got <= 0) {
             if (std::chrono::steady_clock::now() - last_packet > std::chrono::seconds(1) &&
                 prev != std::pair{off(), off()}) {
-                if (hid.connected()) hid.write(off(), off());
+                if (triggers.connected()) triggers.write(off(), off());
                 prev = {off(), off()};
             }
-            {
-                publish_status(cfg, hid);
-            }
+            { publish_status(cfg, triggers); }
             continue;
         }
 
@@ -884,22 +2056,22 @@ void DualSenseService::run() {
         auto telemetry = parse_packet(buf, static_cast<size_t>(latest));
         if (!telemetry) continue;
         last_packet = std::chrono::steady_clock::now();
-        auto frame = controller.update(*telemetry, cfg);
+        auto frame  = controller.update(*telemetry, cfg);
         if (frame != prev) {
-            if (hid.connected()) hid.write(frame.first, frame.second);
+            if (triggers.connected()) triggers.write(frame.first, frame.second);
             prev = frame;
         }
 
         {
             std::scoped_lock lk{mu_};
-            status_.controller_connected = hid.connected();
-            status_.controller_name = hid.connected() ? hid.name() : "";
-            status_.telemetry_seen = true;
-            if (hid.connected()) status_.last_error.clear();
+            status_.controller_connected = triggers.connected();
+            status_.controller_name      = triggers.connected() ? triggers.name() : "";
+            status_.telemetry_seen       = true;
+            if (triggers.connected()) status_.last_error.clear();
         }
     }
 
-    if (hid.connected()) hid.write(off(), off());
+    if (triggers.connected()) triggers.write(off(), off());
     close_socket();
     WSACleanup();
 }

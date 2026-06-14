@@ -136,17 +136,6 @@
     ]
   },
   {
-    "id": "usagi",
-    "name": "Usagi FM",
-    "streams": [
-      {
-        "id": "main",
-        "name": "Anime, K-pop & J-music",
-        "url": "https://agad.usagifm.com/listen/usagifm/radio.mp3"
-      }
-    ]
-  },
-  {
     "id": "yumico",
     "name": "Yumi Co. Radio",
     "streams": [

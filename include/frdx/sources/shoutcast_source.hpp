@@ -235,6 +235,7 @@ private:
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
     // metadata, they skip overwriting title/artist.
     std::atomic<int64_t> last_icy_ms_{0};
+    std::atomic<bool> ffmpeg_icy_seen_{false};
 
     // ICY read buffer — reused across run_icy_poller() invocations.
     std::vector<char> icy_buf_;

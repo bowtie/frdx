@@ -34,8 +34,8 @@ constexpr FMODSig kAnchored[] = {
 // untouched and only over-driven peaks get rounded off.
 inline float soft_clip(float x) noexcept {
     constexpr float k = 0.85f;
-    const float a    = std::fabs(x);
-    const float over = (a > k) ? (a - k) / (1.0f - k) : 0.0f;
+    const float a     = std::fabs(x);
+    const float over  = (a > k) ? (a - k) / (1.0f - k) : 0.0f;
     return std::copysign(a > 1.0f ? 1.0f : (a > k ? k + (1.0f - k) * over / (1.0f + over) : a), x);
 }
 
@@ -91,16 +91,14 @@ FMODFns::SystemCreateDSP_t resolve_create_dsp(const PEImage& img) noexcept {
 
 } // namespace
 
-std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img,
-                                              FMODFns& out) noexcept {
+std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img, FMODFns& out) noexcept {
     if (!img.valid()) return std::unexpected{DSPError::image_not_valid};
 
     out.host_base         = img.base;
     out.system_create_dsp = resolve_create_dsp(img);
 
-    auto dsp_rel = find_by_anchor(img, kAnchored[1].anchor, kAnchored[1].pattern);
-    out.dsp_release =
-        dsp_rel ? reinterpret_cast<FMODFns::DSPRelease_t>(*dsp_rel) : nullptr;
+    auto dsp_rel    = find_by_anchor(img, kAnchored[1].anchor, kAnchored[1].pattern);
+    out.dsp_release = dsp_rel ? reinterpret_cast<FMODFns::DSPRelease_t>(*dsp_rel) : nullptr;
 
     auto add_dsp = find_by_anchor(img, kAnchored[2].anchor, kAnchored[2].pattern);
     out.channel_control_add_dsp =
@@ -114,9 +112,8 @@ std::expected<void, DSPError> resolve_fmod_signatures(const PEImage& img,
     out.handle_resolver =
         resolver ? reinterpret_cast<FMODFns::HandleResolver_t>(*resolver) : nullptr;
 
-    auto unlock = find_by_pattern(img, kUnlockPattern);
-    out.handle_unlock =
-        unlock ? reinterpret_cast<FMODFns::HandleUnlock_t>(*unlock) : nullptr;
+    auto unlock       = find_by_pattern(img, kUnlockPattern);
+    out.handle_unlock = unlock ? reinterpret_cast<FMODFns::HandleUnlock_t>(*unlock) : nullptr;
 
     log::info(
         "[sigscan] createDSP={} dsp_release={} addDSP={} removeDSP={} "
@@ -144,7 +141,7 @@ DSPBridge::DSPBridge(AudioSourceManager& mgr, const FMODFns& fns) : mgr_{mgr}, f
 DSPBridge::~DSPBridge() {
     g_bridge.store(nullptr, std::memory_order_release);
     std::scoped_lock lk{dsp_mu_};
-    release_current_dsp_locked();
+    destroy_current_dsp_locked();
 }
 
 bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
@@ -172,23 +169,30 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
     return inst != nullptr;
 }
 
-void DSPBridge::release_current_dsp_locked() noexcept {
-    if (!current_dsp_) return;
-    if (current_handle_) {
-        if (!seh_call([&] { fns_.channel_control_rem_dsp(current_handle_, current_dsp_); })) {
+void DSPBridge::detach_current_handle_locked() noexcept {
+    if (!current_dsp_ || !current_handle_) return;
+    const uint32_t old_handle = current_handle_;
+    current_handle_           = 0;
+    if (fns_.channel_control_rem_dsp) {
+        if (!seh_call([&] { fns_.channel_control_rem_dsp(old_handle, current_dsp_); })) {
             log::warn("[dsp] SEH in channel_control_rem_dsp during cleanup (handle=0x{:X})",
-                      current_handle_);
+                      old_handle);
         }
     }
+}
+
+void DSPBridge::destroy_current_dsp_locked() noexcept {
+    detach_current_handle_locked();
+    if (!current_dsp_) return;
     if (!seh_call([&] { fns_.dsp_release(current_dsp_); })) {
         log::warn("[dsp] SEH in dsp_release during cleanup (dsp={})", current_dsp_);
     }
-    current_dsp_    = nullptr;
-    current_handle_ = 0;
+    current_dsp_ = nullptr;
 }
 
-void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
-    if (!fmod_system_ || !handle) return;
+bool DSPBridge::ensure_dsp_locked() noexcept {
+    if (current_dsp_) return true;
+    if (!fmod_system_) return false;
 
     // Lazy-resolve createDSP. The first install runs long after FMOD is up
     // (control loop discovery has to finish), so the LEA that DllMain-time
@@ -200,7 +204,7 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
                       reinterpret_cast<void*>(fns_.system_create_dsp));
         } else {
             log::warn("[dsp] System::createDSP still unresolved -- install aborted");
-            return;
+            return false;
         }
     }
 
@@ -232,22 +236,28 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     }
     if (!dsp) {
         log::warn("[dsp] createDSP failed r={}", rc);
-        return;
+        return false;
     }
+
+    current_dsp_ = dsp;
+    log::info("[dsp] created reusable dsp={}", dsp);
+    return true;
+}
+
+void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
+    if (!handle || !ensure_dsp_locked()) return;
 
     // addDSP wants the packed handle zero-extended to 64 bits.
     const auto channel = static_cast<uint64_t>(handle);
-    if (!seh_call([&] { rc = fns_.channel_control_add_dsp(channel, 0, dsp); }) || rc != 0) {
+    uint32_t rc        = ~0u;
+    if (!seh_call([&] { rc = fns_.channel_control_add_dsp(channel, 0, current_dsp_); }) ||
+        rc != 0) {
         log::warn("[dsp] addDSP failed r={}", rc);
-        if (!seh_call([&] { fns_.dsp_release(dsp); })) {
-            log::warn("[dsp] SEH in dsp_release during install rollback (dsp={})", dsp);
-        }
         return;
     }
 
-    current_dsp_    = dsp;
     current_handle_ = handle;
-    log::info("[dsp] installed dsp={} on handle=0x{:X}", dsp, handle);
+    log::info("[dsp] installed dsp={} on handle=0x{:X}", current_dsp_, handle);
 }
 
 void DSPBridge::set_target(const RadioInstance& inst, void* fmod_system) noexcept {
@@ -277,13 +287,18 @@ void DSPBridge::retarget_if_needed() noexcept {
     // No live handle on the RadioStreamFmod. If we still think we're installed
     // on a dead one, release it so we stop querying the stale handle.
     if (!handle) {
-        if (current_handle_) release_current_dsp_locked();
+        detach_current_handle_locked();
         return;
     }
 
     log::info("[dsp] retargeting -> handle 0x{:X}", handle);
-    release_current_dsp_locked();
+    detach_current_handle_locked();
     install_dsp_locked(handle);
+}
+
+void DSPBridge::detach() noexcept {
+    std::scoped_lock lk{dsp_mu_};
+    detach_current_handle_locked();
 }
 
 // FMOD DSP read callback (mixer thread). Sources write 48 kHz S16 stereo
@@ -306,9 +321,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     if (out_channels) *out_channels = out_ch;
     const std::size_t total = static_cast<std::size_t>(length) * out_ch;
 
-    auto stats = [&] {
-        b->calls_.fetch_add(1, std::memory_order_relaxed);
-    };
+    auto stats = [&] { b->calls_.fetch_add(1, std::memory_order_relaxed); };
 
     if (m == DSPMode::silence || m == DSPMode::off) {
         std::memset(out_buf, 0, total * sizeof(float));
@@ -339,7 +352,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     // misconfigured config.toml could push gain above 1 -- clamp defensively.
     constexpr float kAmp = 1.0f / 32768.0f;
     const float scale    = gain * kAmp;
-    const bool  do_clip  = gain > 1.0f;
+    const bool do_clip   = gain > 1.0f;
 
     // Pull the ring in chunks: one ring.read() per chunk amortises the
     // ring's two atomic loads over many frames. 1024 frames = 4 KiB stack,
@@ -359,7 +372,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
                 const float fr = scratch[f * 2 + 1] * scale;
                 const float L  = soft_clip(fl);
                 const float R  = soft_clip(fr);
-                float* o = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
+                float* o       = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
                 if (out_ch == 1) {
                     o[0] = (L + R) * 0.5f;
                 } else {
@@ -371,7 +384,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
             for (uint32_t f = 0; f < got_frames; ++f) {
                 const float L = scratch[f * 2 + 0] * scale;
                 const float R = scratch[f * 2 + 1] * scale;
-                float* o = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
+                float* o      = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
                 if (out_ch == 1) {
                     o[0] = (L + R) * 0.5f;
                 } else {

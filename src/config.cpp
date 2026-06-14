@@ -78,6 +78,8 @@ Config load_config(const std::filesystem::path& path) {
 
     const auto& ds = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
+    cfg.dualsense.external_helper =
+        pick<bool>(ds, "external_helper", cfg.dualsense.external_helper);
     cfg.dualsense.udp_port = std::clamp(pick<int>(ds, "udp_port", cfg.dualsense.udp_port), 1,
                                         65535);
     cfg.dualsense.wall_zones =
@@ -314,6 +316,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);
+    e.kv("external_helper", cfg.dualsense.external_helper);
     e.kv("udp_port", static_cast<int64_t>(cfg.dualsense.udp_port));
     e.kv("wall_zones", static_cast<int64_t>(cfg.dualsense.wall_zones));
     e.kv("enable_brake_resistance", cfg.dualsense.enable_brake_resistance);

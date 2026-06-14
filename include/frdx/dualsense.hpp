@@ -11,9 +11,9 @@
 namespace frdx::dualsense {
 
 struct RuntimeStatus {
-    bool enabled = false;
+    bool enabled              = false;
     bool controller_connected = false;
-    bool telemetry_seen = false;
+    bool telemetry_seen       = false;
     std::string controller_name;
     std::string last_error;
 };
@@ -27,13 +27,15 @@ struct ControllerDevice {
 std::vector<ControllerDevice> enumerate_devices();
 bool identify_controller(const std::string& serial, int force = 180);
 bool send_test_telemetry(int udp_port);
+int run_controller_broker(const std::wstring& pipe_name, const std::string& locked_serial);
+int run_controller_broker_server(const std::string& locked_serial);
 
 class DualSenseService {
 public:
     explicit DualSenseService(DualSenseConfig cfg);
     ~DualSenseService();
 
-    DualSenseService(const DualSenseService&) = delete;
+    DualSenseService(const DualSenseService&)            = delete;
     DualSenseService& operator=(const DualSenseService&) = delete;
 
     void start();

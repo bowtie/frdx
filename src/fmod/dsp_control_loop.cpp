@@ -10,28 +10,26 @@ namespace frdx::fmod_bridge {
 
 namespace {
 using namespace std::chrono_literals;
-constexpr auto kTick           = 20ms;
-constexpr auto kDiscoveryRetry = 5s;
-constexpr int kDiscoveryTries  = 120; // 10-minute budget; the radio system
-                                      // isn't wired up until well into launch.
+constexpr auto kTick               = 20ms;
+constexpr auto kDiscoveryRetry     = 5s;
+constexpr auto kIdleDiscoveryRetry = 30s;
 
 // Ticks of no read_callback progress (while the source is producing PCM)
 // before we conclude the game tore the radio channel down. 1s @ 20ms.
 constexpr int kStaleTickThreshold = 50;
 
-// Minimum gap between two off/on station toggles. The toggle blocks ~300ms
-// and the game needs a moment to reallocate the channel, so we leave it well
-// alone in between rather than thrashing the radio.
-constexpr auto kRetuneCooldown = 6s;
+// Minimum gap between target rediscovery attempts while the game has not
+// exposed a live radio carrier yet.
+constexpr auto kReacquireCooldown = 6s;
 
-// SoundName of the placeholder sample our DSP overwrites. Matches the carrier
-// shipped by the radio-mod media overlay; if absent, we fall back to the
-// first chain-valid instance so a stale overlay doesn't silently break audio.
-constexpr const char* kTargetSoundName = "HZ6_R9_PeterBroderick_EyesClosedandTraveling";
+// SoundName of the placeholder sample our DSP overwrites. Matches the current
+// in-game radio carrier; if absent, we fall back to the first chain-valid
+// instance so a stale target doesn't silently break audio.
+constexpr const char* kTargetSoundName = "HZ6_R1_SHIMA_Rebirth";
 } // namespace
 
 ControlLoop::ControlLoop(DSPBridge& bridge, const PEImage& img, float configured_gain)
-    : bridge_{bridge}, img_{img}, configured_gain_{configured_gain}, game_state_{img},
+    : bridge_{bridge}, img_{img}, configured_gain_{configured_gain},
       thread_{[this](const std::stop_token& tok) { run(tok); }} {}
 
 ControlLoop::~ControlLoop() {
@@ -43,20 +41,9 @@ FRDX_NO_THREAD_SAFETY_ANALYSIS
 void ControlLoop::run(const std::stop_token& tok) {
     log::info("[ctrl] control loop started");
 
-    bool acquired = false;
-    for (int attempt = 0; attempt < kDiscoveryTries && !tok.stop_requested(); ++attempt) {
-        if (acquire_target()) {
-            acquired = true;
-            break;
-        }
-        for (auto t = std::chrono::steady_clock::now() + kDiscoveryRetry;
-             std::chrono::steady_clock::now() < t && !tok.stop_requested();)
-            std::this_thread::sleep_for(kTick);
-    }
-    if (!acquired) {
-        log::warn("[ctrl] discovery timed out; control loop exiting");
-        return;
-    }
+    bool target_acquired = acquire_target().has_value();
+    auto next_discovery  = std::chrono::steady_clock::now() + kDiscoveryRetry;
+    bool was_busy        = false;
 
     // The radio HUD reads from the SampleProperties slots at a much lower
     // rate than the audio mixer. 4 Hz is more than enough and keeps the
@@ -66,9 +53,23 @@ void ControlLoop::run(const std::stop_token& tok) {
 
     auto next = std::chrono::steady_clock::now();
     while (!tok.stop_requested()) {
+        const auto now  = std::chrono::steady_clock::now();
+        if (next < now) next = now;
         next += kTick;
-        bridge_.retarget_if_needed();
         bridge_.manager().pump_once();
+        auto* active    = bridge_.manager().active();
+        const bool busy = active && (active->playback_state() == PlaybackState::playing ||
+                                     active->playback_state() == PlaybackState::buffering);
+        if (busy && !was_busy && !target_acquired) next_discovery = now;
+        if (!target_acquired && now >= next_discovery) {
+            target_acquired = acquire_target().has_value();
+            next_discovery  = now + (busy ? kDiscoveryRetry : kIdleDiscoveryRetry);
+        }
+        if (busy && target_acquired) {
+            bridge_.retarget_if_needed();
+        } else {
+            bridge_.detach();
+        }
 
         if (++meta_tick >= kMetaEveryNTicks) {
             meta_tick = 0;
@@ -77,25 +78,20 @@ void ControlLoop::run(const std::stop_token& tok) {
 
         // Staleness watchdog: while a source is actively producing audio,
         // FMOD's mixer should be invoking our read_callback every tick.
-        // If call_count() freezes for ~1s, the channel was destroyed by
-        // FMOD without writing a fresh handle to +0x20 (e.g. placeholder
-        // sample ended). Re-discover and switch to a live channel.
-        auto* active          = bridge_.manager().active();
-        const bool busy       = active && (active->playback_state() == PlaybackState::playing ||
-                                           active->playback_state() == PlaybackState::buffering);
+        // If call_count() freezes and the channel handle is gone, the game
+        // may have reallocated the radio wrapper or the player may have turned
+        // the in-game radio off. Re-discover only; never force the game station
+        // back on from here.
         const std::uint64_t c = bridge_.call_count();
         if (busy && c == prev_calls_) {
             if (++stale_ticks_ >= kStaleTickThreshold) {
                 stale_ticks_ = 0;
                 if (!bridge_.current_handle_alive()) {
-                    // Game tore the radio channel down. Toggle the in-game
-                    // station off/on to force a fresh channel allocation,
-                    // then re-discover the live instance.
-                    const auto now = std::chrono::steady_clock::now();
-                    if (now - last_retune_ >= kRetuneCooldown &&
-                        game_state_.retune_streamer_station()) {
-                        last_retune_ = now;
-                        [[maybe_unused]] auto _acq = acquire_target();
+                    if (now - last_reacquire_ >= kReacquireCooldown) {
+                        log::info("[ctrl] radio channel inactive; rediscovering target");
+                        last_reacquire_ = now;
+                        target_acquired = acquire_target().has_value();
+                        next_discovery  = now + kDiscoveryRetry;
                     }
                 }
             }
@@ -103,6 +99,7 @@ void ControlLoop::run(const std::stop_token& tok) {
             stale_ticks_ = 0;
         }
         prev_calls_ = c;
+        was_busy    = busy;
 
         const float target = [this, active] {
             if (!active) return 0.0f;

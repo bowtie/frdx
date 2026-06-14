@@ -25,6 +25,7 @@ int run() {
     }
 
     constexpr std::string_view config_fields[] = {
+        "external_helper",
         "udp_port",
         "wall_zones",
         "enable_brake_resistance",
