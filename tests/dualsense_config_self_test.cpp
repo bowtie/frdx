@@ -81,6 +81,9 @@ int run() {
     cfg.overlay.theme = "tokyo_night";
     cfg.overlay.music_notifications_enabled = false;
     cfg.overlay.notification_position = "bottom_center";
+    cfg.audio.output_gain = 0.42f;
+    cfg.shoutcast.last_station_id = "radio";
+    cfg.shoutcast.last_stream_id = "main";
 
     frdx::save_config(path, cfg);
     const auto loaded = frdx::load_config(path);
@@ -163,6 +166,11 @@ int run() {
                  "overlay.music_notifications_enabled");
     ok &= expect(got_overlay.notification_position == cfg.overlay.notification_position,
                  "overlay.notification_position");
+    ok &= expect(near(loaded.audio.output_gain, cfg.audio.output_gain), "audio.output_gain");
+    ok &= expect(loaded.shoutcast.last_station_id == cfg.shoutcast.last_station_id,
+                 "shoutcast.last_station_id");
+    ok &= expect(loaded.shoutcast.last_stream_id == cfg.shoutcast.last_stream_id,
+                 "shoutcast.last_stream_id");
 
     auto service_cfg = loaded.dualsense;
     service_cfg.external_helper = false;
@@ -171,6 +179,18 @@ int run() {
     service_cfg.external_helper = true;
     service_cfg = frdx::dualsense_service_config(service_cfg);
     ok &= expect(!service_cfg.enabled, "service disables only in external helper mode");
+    frdx::DualSenseConfig launch_cfg{};
+    launch_cfg.enabled = true;
+    launch_cfg.external_helper = true;
+    ok &= expect(frdx::dualsense_external_helper_should_launch(launch_cfg),
+                 "external helper launches when enabled");
+    launch_cfg.external_helper = false;
+    ok &= expect(!frdx::dualsense_external_helper_should_launch(launch_cfg),
+                 "external helper does not launch in native mode");
+    launch_cfg.enabled = false;
+    launch_cfg.external_helper = true;
+    ok &= expect(!frdx::dualsense_external_helper_should_launch(launch_cfg),
+                 "external helper does not launch when triggers disabled");
 
     std::filesystem::remove(path, ec);
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;

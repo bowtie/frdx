@@ -163,6 +163,12 @@ if (-not $ninja) { $buildArgs += @("--config", "Release") }
 & $cmake @buildArgs | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
 
+$existingConfig = Join-Path $dist "mods\frdx\config.toml"
+$preservedConfig = $null
+if (Test-Path $existingConfig) {
+    $preservedConfig = Get-Content -Raw -Path $existingConfig
+}
+
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\fonts") | Out-Null
@@ -178,7 +184,11 @@ if (Test-Path (Join-Path $root "assets\fonts")) {
     Copy-Item -Recurse (Join-Path $root "assets\fonts\*") (Join-Path $dist "mods\frdx\fonts")
 }
 Copy-Item (Join-Path $root "assets\ffmpeg\ffmpeg.exe") (Join-Path $dist "mods\frdx\ffmpeg\ffmpeg.exe")
-Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "mods\frdx\config.toml")
+if ($null -ne $preservedConfig) {
+    Set-Content -Path (Join-Path $dist "mods\frdx\config.toml") -Value $preservedConfig -NoNewline -Encoding utf8
+} else {
+    Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "mods\frdx\config.toml")
+}
 Copy-Item (Join-Path $root "stations.example.json") (Join-Path $dist "mods\frdx\stations.json")
 
 $readme = @'

@@ -126,7 +126,7 @@ bool launch_external_helper_task(const std::filesystem::path& module_dir, int ud
 void maybe_launch_external_helper(const std::filesystem::path& module_dir,
                                   const DualSenseConfig& cfg) {
     static auto s_last_attempt = std::chrono::steady_clock::time_point{};
-    if (!cfg.enabled) return;
+    if (!dualsense_external_helper_should_launch(cfg)) return;
     const auto now = std::chrono::steady_clock::now();
     if (now - s_last_attempt < std::chrono::seconds(10)) return;
     s_last_attempt = now;

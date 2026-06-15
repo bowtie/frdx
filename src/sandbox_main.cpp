@@ -682,7 +682,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     auto ffmpeg_path = resolve_path("mods/frdx/ffmpeg/ffmpeg.exe");
     auto stations_path = resolve_path("mods/frdx/stations.json");
 
-    frdx::ShoutcastConfig sc_cfg{};
+    frdx::ShoutcastConfig sc_cfg = cfg.shoutcast;
     sc_cfg.ffmpeg_path = ffmpeg_path;
 
     auto src = std::make_unique<frdx::sources::ShoutcastSource>(sc_cfg);

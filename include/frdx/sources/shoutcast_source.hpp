@@ -162,16 +162,25 @@ private:
 
     void start_pipe_locked() FRDX_REQUIRES(mu_);
     void stop_pipe_locked() FRDX_REQUIRES(mu_);
+    void restore_station_display_locked() FRDX_REQUIRES(mu_);
     void cycle_preset(int direction = 1) FRDX_REQUIRES(mu_);
     void cycle_and_restart(int direction) FRDX_EXCLUDES(mu_);
     void stop_metadata_poller() FRDX_EXCLUDES(ws_mu_);          // join bg thread (no-op now, kept for API compat)
     void stop_icy_poller();               // join ICY metadata thread
-    void run_icy_poller(const std::string& stream_url,
+    void run_icy_poller(const std::string& stream_url, uint64_t metadata_epoch,
                         const std::stop_token& stop); // ICY metadata loop body
     void run_ws_poller(std::string url, const StationMetadataMapping& mapping,
                        const StationMetadataWebSocketFilter& filter,
-                       StationMetadataWebSocketHeartbeat hb,
+                       StationMetadataWebSocketHeartbeat hb, uint64_t metadata_epoch,
                        const std::stop_token& stop); // WebSocket metadata loop body
+    void queue_timed_metadata_locked(TrackInfo info, int64_t now_ms, uint64_t metadata_epoch)
+        FRDX_REQUIRES(mu_);
+    void apply_pending_metadata_locked(const char* reason) FRDX_REQUIRES(mu_);
+    void clear_pending_metadata_locked() FRDX_REQUIRES(mu_);
+    uint64_t reset_metadata_sync_locked() FRDX_REQUIRES(mu_);
+    void observe_pcm_for_metadata_sync(const int16_t* samples, std::size_t sample_count,
+                                       uint64_t metadata_epoch)
+        FRDX_EXCLUDES(mu_);
 
     // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
     static std::expected<std::unique_ptr<Pipe>, ShoutcastError>
@@ -188,6 +197,11 @@ private:
     std::string target_url_          FRDX_GUARDED_BY(mu_);
     std::size_t preset_idx_          FRDX_GUARDED_BY(mu_) = 0;
     TrackInfo info_                  FRDX_GUARDED_BY(mu_){};
+    TrackInfo pending_info_          FRDX_GUARDED_BY(mu_){};
+    int64_t pending_info_ms_         FRDX_GUARDED_BY(mu_) = 0;
+    int64_t quiet_started_ms_        FRDX_GUARDED_BY(mu_) = 0;
+    uint64_t pending_info_epoch_     FRDX_GUARDED_BY(mu_) = 0;
+    bool pending_info_valid_         FRDX_GUARDED_BY(mu_) = false;
     std::atomic<uint64_t> position_ms_{0};
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
 
@@ -235,7 +249,7 @@ private:
     // pump(). The REST/WS pollers check this — if ICY is actively delivering
     // metadata, they skip overwriting title/artist.
     std::atomic<int64_t> last_icy_ms_{0};
-    std::atomic<bool> ffmpeg_icy_seen_{false};
+    std::atomic<int64_t> last_ffmpeg_icy_ms_{0};
 
     // ICY read buffer — reused across run_icy_poller() invocations.
     std::vector<char> icy_buf_;
@@ -243,6 +257,7 @@ private:
     // Generation counter bumped on every info_ write so the overlay can
     // avoid calling current_track() (which locks mu_) every frame.
     std::atomic<uint64_t> info_gen_{0};
+    std::atomic<uint64_t> metadata_epoch_{1};
 };
 
 } // namespace frdx::sources

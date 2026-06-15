@@ -119,12 +119,6 @@ enum class HidWriteBackend {
     hidapi_output_report,
 };
 
-enum class TriggerBackend {
-    hid,
-    broker,
-    steam_input,
-};
-
 constexpr uint32_t kBrokerMagic          = 0x58445246; // FRDX
 constexpr const wchar_t* kBrokerPipeName = L"\\\\.\\pipe\\frdx-dualsense-broker";
 
@@ -151,25 +145,6 @@ uint8_t clamp_byte(float v) {
 
 uint8_t amp_to_strength(int amp) {
     return static_cast<uint8_t>(std::clamp((std::max(0, amp) / 32) + 1, 1, 8));
-}
-
-uint8_t steam_feedback_strength(int force) {
-    if (force <= 0) return 0;
-    return static_cast<uint8_t>(std::clamp((force * 8 + 79) / 80, 1, 8));
-}
-
-std::array<uint8_t, 10> unpack_zones(const std::array<uint8_t, 10>& params) {
-    const uint16_t active =
-        static_cast<uint16_t>(params[0]) | (static_cast<uint16_t>(params[1]) << 8);
-    const uint32_t packed =
-        static_cast<uint32_t>(params[2]) | (static_cast<uint32_t>(params[3]) << 8) |
-        (static_cast<uint32_t>(params[4]) << 16) | (static_cast<uint32_t>(params[5]) << 24);
-    std::array<uint8_t, 10> zones{};
-    for (size_t i = 0; i < zones.size(); ++i) {
-        if ((active & (1u << i)) == 0) continue;
-        zones[i] = static_cast<uint8_t>(((packed >> (3 * i)) & 0x07) + 1);
-    }
-    return zones;
 }
 
 float ramp(int value, int deadzone, int baseline, int max_force, float curve, int ceiling) {
@@ -920,7 +895,7 @@ public:
         log::info("[dualsense] selected HID candidate{}: {}", info_.col03 ? " (col03)" : "",
                   utf8_from_wide(info_.path));
         if (info_.blocked) {
-            last_error_ = "DualSense HID is present but blocked; disable Steam Input for this game";
+            last_error_ = "DualSense HID is present but blocked";
             return false;
         }
 
@@ -939,13 +914,12 @@ public:
                   "trying SetOutputReport fallback",
                   info_.col03 ? " on col03" : "", writer_err, utf8_from_wide(info_.path));
 
-        // Fallback: query handle + HidD_SetOutputReport (may coexist with Steam).
+        // Fallback: query handle + HidD_SetOutputReport.
         handle_ = open_hid_query_handle(info_.path.c_str());
         if (!handle_) {
             const auto query_err = GetLastError();
             log::warn("[dualsense] query handle open also failed (win32 err {})", query_err);
-            last_error_ =
-                "failed to open DualSense HID interface; disable Steam Input for this game";
+            last_error_ = "failed to open DualSense HID interface";
             return false;
         }
 
@@ -957,8 +931,7 @@ public:
                       "unavailable",
                       info_.col03 ? " on col03" : "", GetLastError());
             handle_.reset();
-            last_error_ =
-                "failed to open DualSense HID interface; disable Steam Input for this game";
+            last_error_ = "failed to open DualSense HID interface";
             return false;
         }
 
@@ -1141,7 +1114,7 @@ public:
         if (!read_exact_with_timeout(server.get(), &status, sizeof(status), 5000) ||
             status.magic != kBrokerMagic || status.ok == 0) {
             last_error_ = status.message[0] ? std::string{status.message}
-                                            : "DualSense broker could not open direct HID";
+                                            : "DualSense broker could not open controller HID";
             log::warn("[dualsense] {}", last_error_);
             if (process_) WaitForSingleObject(process_.get(), 500);
             disconnect();
@@ -1207,325 +1180,38 @@ private:
     std::string last_error_;
 };
 
-struct SteamTriggerOffParam {
-    uint8_t padding[48]{};
-};
-
-struct SteamTriggerFeedbackParam {
-    uint8_t position = 0;
-    uint8_t strength = 0;
-    uint8_t padding[46]{};
-};
-
-struct SteamTriggerVibrationParam {
-    uint8_t position  = 0;
-    uint8_t amplitude = 0;
-    uint8_t frequency = 0;
-    uint8_t padding[45]{};
-};
-
-struct SteamTriggerMultiFeedbackParam {
-    uint8_t strength[10]{};
-    uint8_t padding[38]{};
-};
-
-struct SteamTriggerMultiVibrationParam {
-    uint8_t frequency = 0;
-    uint8_t amplitude[10]{};
-    uint8_t padding[37]{};
-};
-
-union SteamTriggerCommandData {
-    SteamTriggerOffParam off_param;
-    SteamTriggerFeedbackParam feedback_param;
-    SteamTriggerVibrationParam vibration_param;
-    SteamTriggerMultiFeedbackParam multi_feedback_param;
-    SteamTriggerMultiVibrationParam multi_vibration_param;
-    uint8_t raw[48];
-};
-
-struct SteamTriggerCommand {
-    int mode = 0;
-    uint8_t padding[4]{};
-    SteamTriggerCommandData command_data{};
-};
-
-struct SteamTriggerParam {
-    uint8_t trigger_mask = 0;
-    uint8_t padding[7]{};
-    SteamTriggerCommand command[2]{};
-};
-
-static_assert(sizeof(SteamTriggerParam) == 120, "Steam DualSense trigger param size mismatch");
-
-SteamTriggerParam build_steam_param(const TriggerEffect& left, const TriggerEffect& right) {
-    constexpr uint8_t kMaskL2 = 0x01;
-    constexpr uint8_t kMaskR2 = 0x02;
-    SteamTriggerParam param{};
-    param.trigger_mask = kMaskL2 | kMaskR2;
-
-    auto write_effect = [](SteamTriggerCommand& command, const TriggerEffect& effect) {
-        switch (effect.mode) {
-            case EffectMode::rigid:
-                command.mode = 1; // SCE_PAD_TRIGGER_EFFECT_MODE_FEEDBACK
-                command.command_data.feedback_param.position = effect.params[0];
-                command.command_data.feedback_param.strength =
-                    steam_feedback_strength(effect.params[1]);
-                break;
-            case EffectMode::vibrate:
-                command.mode = 3; // SCE_PAD_TRIGGER_EFFECT_MODE_VIBRATION
-                command.command_data.vibration_param.position  = 5;
-                command.command_data.vibration_param.amplitude = amp_to_strength(effect.params[1]);
-                command.command_data.vibration_param.frequency = effect.params[0];
-                break;
-            case EffectMode::rigid_zones:
-                command.mode = 4; // SCE_PAD_TRIGGER_EFFECT_MODE_MULTIPLE_POSITION_FEEDBACK
-                {
-                    const auto zones = unpack_zones(effect.params);
-                    for (size_t i = 0; i < zones.size(); ++i)
-                        command.command_data.multi_feedback_param.strength[i] =
-                            std::clamp<uint8_t>(zones[i], 0, 8);
-                }
-                break;
-            case EffectMode::vibrate_zones:
-                command.mode = 6; // SCE_PAD_TRIGGER_EFFECT_MODE_MULTIPLE_POSITION_VIBRATION
-                command.command_data.multi_vibration_param.frequency = effect.params[8];
-                {
-                    const auto zones = unpack_zones(effect.params);
-                    for (size_t i = 0; i < zones.size(); ++i)
-                        command.command_data.multi_vibration_param.amplitude[i] =
-                            std::clamp<uint8_t>(zones[i], 0, 8);
-                }
-                break;
-            case EffectMode::off:
-            default:
-                command.mode = 0; // SCE_PAD_TRIGGER_EFFECT_MODE_OFF
-                break;
-        }
-    };
-
-    write_effect(param.command[0], left);
-    write_effect(param.command[1], right);
-    return param;
-}
-
-class SteamInputWriter {
-public:
-    bool connect() {
-        if (input_ && handle_) return true;
-
-        HMODULE module = GetModuleHandleW(L"steam_api64.dll");
-        if (!module) module = LoadLibraryW(L"steam_api64.dll");
-        if (!module) {
-            last_error_ = "Steam Input API not loaded";
-            return false;
-        }
-
-        steam_input_v006_ =
-            reinterpret_cast<SteamInputV006Fn>(GetProcAddress(module, "SteamAPI_SteamInput_v006"));
-        init_ =
-            reinterpret_cast<SteamInputInitFn>(GetProcAddress(module, "SteamAPI_ISteamInput_Init"));
-        run_frame_ = reinterpret_cast<SteamInputRunFrameFn>(
-            GetProcAddress(module, "SteamAPI_ISteamInput_RunFrame"));
-        get_connected_ = reinterpret_cast<SteamInputGetConnectedControllersFn>(
-            GetProcAddress(module, "SteamAPI_ISteamInput_GetConnectedControllers"));
-        get_type_ = reinterpret_cast<SteamInputGetInputTypeForHandleFn>(
-            GetProcAddress(module, "SteamAPI_ISteamInput_GetInputTypeForHandle"));
-        set_trigger_ = reinterpret_cast<SteamInputSetDualSenseTriggerEffectFn>(
-            GetProcAddress(module, "SteamAPI_ISteamInput_SetDualSenseTriggerEffect"));
-
-        if (!steam_input_v006_ || !init_ || !run_frame_ || !get_connected_ || !get_type_ ||
-            !set_trigger_) {
-            last_error_ = "Steam Input DualSense API exports missing";
-            return false;
-        }
-
-        input_ = steam_input_v006_();
-        if (!input_) {
-            last_error_ = "Steam Input interface unavailable";
-            return false;
-        }
-
-        (void)init_(input_, true);
-        run_frame_(input_, true);
-
-        std::array<uint64_t, 16> handles{};
-        const int count =
-            std::clamp(get_connected_(input_, handles.data()), 0, static_cast<int>(handles.size()));
-        if (count <= 0) {
-            last_error_ = "Steam Input found no controllers";
-            input_      = nullptr;
-            return false;
-        }
-
-        std::string seen_types;
-        for (int i = 0; i < count; ++i) {
-            const int type = get_type_(input_, handles[static_cast<size_t>(i)]);
-            if (!seen_types.empty()) seen_types += ",";
-            seen_types += std::to_string(type);
-            if (type == kSteamInputTypePS5) {
-                handle_     = handles[static_cast<size_t>(i)];
-                input_type_ = type;
-                last_error_.clear();
-                return true;
-            }
-        }
-
-        last_error_ =
-            "Steam Input found controllers but no DualSense/PS5 handle (types=" + seen_types + ")";
-        input_ = nullptr;
-        return false;
-    }
-
-    void disconnect() noexcept {
-        if (input_ && handle_) {
-            const auto param = build_steam_param(off(), off());
-            set_trigger_(input_, handle_, &param);
-        }
-        input_      = nullptr;
-        handle_     = 0;
-        input_type_ = 0;
-    }
-
-    bool connected() const noexcept { return input_ && handle_; }
-    std::string name() const {
-        if (input_type_ == kSteamInputTypePS5) return "DualSense via Steam Input";
-        return "Steam Input controller";
-    }
-    std::string last_error() const { return last_error_; }
-
-    bool write(const TriggerEffect& left, const TriggerEffect& right) {
-        if (!input_ || !handle_) return false;
-        run_frame_(input_, true);
-        const auto param = build_steam_param(left, right);
-        set_trigger_(input_, handle_, &param);
-        return true;
-    }
-
-private:
-    using SteamInputV006Fn                      = void* (*)();
-    using SteamInputInitFn                      = bool (*)(void*, bool);
-    using SteamInputRunFrameFn                  = void (*)(void*, bool);
-    using SteamInputGetConnectedControllersFn   = int (*)(void*, uint64_t*);
-    using SteamInputGetInputTypeForHandleFn     = int (*)(void*, uint64_t);
-    using SteamInputSetDualSenseTriggerEffectFn = void (*)(void*, uint64_t,
-                                                           const SteamTriggerParam*);
-
-    static constexpr int kSteamInputTypePS5 = 13;
-
-    void* input_                                       = nullptr;
-    uint64_t handle_                                   = 0;
-    int input_type_                                    = 0;
-    SteamInputV006Fn steam_input_v006_                 = nullptr;
-    SteamInputInitFn init_                             = nullptr;
-    SteamInputRunFrameFn run_frame_                    = nullptr;
-    SteamInputGetConnectedControllersFn get_connected_ = nullptr;
-    SteamInputGetInputTypeForHandleFn get_type_        = nullptr;
-    SteamInputSetDualSenseTriggerEffectFn set_trigger_ = nullptr;
-    std::string last_error_;
-};
-
 class TriggerWriter {
 public:
     bool connect(const std::string& locked_serial) {
         if (connected()) return true;
-        if (hid_.connect(locked_serial)) {
-            backend_ = TriggerBackend::hid;
-            last_error_.clear();
-            return true;
-        }
-
-        const std::string hid_error = hid_.last_error();
         if (broker_.connect(locked_serial)) {
-            backend_ = TriggerBackend::broker;
-            log::info("[dualsense] controller connected through external HID broker");
+            log::info("[dualsense] controller connected through HID broker");
             last_error_.clear();
             return true;
         }
 
-        const std::string broker_error = broker_.last_error();
-        if (!broker_error.empty()) {
-            log::warn("[dualsense] external HID broker unavailable: {}", broker_error);
-        }
-
-        last_error_ = hid_error;
-        if (!broker_error.empty()) {
-            if (!last_error_.empty()) last_error_ += "; ";
-            last_error_ += broker_error;
-        }
-        log::warn("[dualsense] direct HID unavailable; Steam Input fallback is disabled");
+        last_error_ = broker_.last_error();
+        if (!last_error_.empty()) log::warn("[dualsense] HID broker unavailable: {}", last_error_);
         return false;
     }
 
-    bool promote_hid(const std::string& locked_serial) {
-        if (backend_ == TriggerBackend::hid) return hid_.connected();
-        HidWriter candidate;
-        if (!candidate.connect(locked_serial)) {
-            last_error_ = candidate.last_error();
-            return false;
-        }
-
-        steam_.disconnect();
-        hid_     = std::move(candidate);
-        backend_ = TriggerBackend::hid;
-        last_error_.clear();
-        log::info("[dualsense] promoted controller backend to direct HID ({})", hid_.name());
-        return true;
-    }
-
-    void disconnect() noexcept {
-        if (backend_ == TriggerBackend::hid) {
-            hid_.disconnect();
-        } else if (backend_ == TriggerBackend::broker) {
-            broker_.disconnect();
-        } else {
-            steam_.disconnect();
-        }
-        backend_ = TriggerBackend::hid;
-    }
-
-    bool connected() const noexcept {
-        if (backend_ == TriggerBackend::hid) return hid_.connected();
-        if (backend_ == TriggerBackend::broker) return broker_.connected();
-        return steam_.connected();
-    }
-
-    std::string name() const {
-        if (backend_ == TriggerBackend::hid) return hid_.name();
-        if (backend_ == TriggerBackend::broker) return broker_.name();
-        return steam_.name();
-    }
+    void disconnect() noexcept { broker_.disconnect(); }
+    bool connected() const noexcept { return broker_.connected(); }
+    std::string name() const { return broker_.name(); }
 
     std::string last_error() const { return last_error_; }
 
-    bool using_steam_input() const noexcept {
-        return backend_ == TriggerBackend::steam_input && steam_.connected();
-    }
-
     bool write(const TriggerEffect& left, const TriggerEffect& right) {
-        const bool ok = [this, &left, &right] {
-            if (backend_ == TriggerBackend::hid) return hid_.write(left, right);
-            if (backend_ == TriggerBackend::broker) return broker_.write(left, right);
-            return steam_.write(left, right);
-        }();
+        const bool ok = broker_.write(left, right);
         if (!ok) {
-            if (backend_ == TriggerBackend::hid) {
-                last_error_ = hid_.last_error();
-            } else if (backend_ == TriggerBackend::broker) {
-                last_error_ = broker_.last_error();
-            } else {
-                last_error_ = steam_.last_error();
-            }
+            last_error_ = broker_.last_error();
             disconnect();
         }
         return ok;
     }
 
 private:
-    TriggerBackend backend_ = TriggerBackend::hid;
-    HidWriter hid_;
     BrokerWriter broker_;
-    SteamInputWriter steam_;
     std::string last_error_;
 };
 
@@ -1765,16 +1451,16 @@ int run_controller_broker(const std::wstring& pipe_name, const std::string& lock
     BrokerStatus status;
     status.ok = connected ? 1 : 0;
     const std::string status_message =
-        connected ? hid.name() : ("DualSense broker direct HID failed: " + hid.last_error());
+        connected ? hid.name() : ("DualSense broker controller HID failed: " + hid.last_error());
     std::snprintf(status.message, sizeof(status.message), "%s", status_message.c_str());
     DWORD written = 0;
     WriteFile(pipe.get(), &status, sizeof(status), &written, nullptr);
     if (!connected) {
-        log::warn("[dualsense-broker] direct HID connect failed: {}", hid.last_error());
+        log::warn("[dualsense-broker] controller HID connect failed: {}", hid.last_error());
         return 3;
     }
 
-    log::info("[dualsense-broker] direct HID connected ({})", hid.name());
+    log::info("[dualsense-broker] controller HID connected ({})", hid.name());
     for (;;) {
         BrokerPacket packet;
         DWORD got = 0;
@@ -1810,12 +1496,12 @@ int run_controller_broker_server(const std::string& locked_serial) {
     BrokerStatus status;
     status.ok = connected ? 1 : 0;
     const std::string status_message =
-        connected ? hid.name() : ("DualSense broker direct HID failed: " + hid.last_error());
+        connected ? hid.name() : ("DualSense broker controller HID failed: " + hid.last_error());
     std::snprintf(status.message, sizeof(status.message), "%s", status_message.c_str());
     if (!connected) {
-        log::warn("[dualsense-broker] direct HID connect failed: {}", hid.last_error());
+        log::warn("[dualsense-broker] controller HID connect failed: {}", hid.last_error());
     } else {
-        log::info("[dualsense-broker] direct HID connected ({})", hid.name());
+        log::info("[dualsense-broker] controller HID connected ({})", hid.name());
     }
 
     for (;;) {
@@ -1897,7 +1583,6 @@ void DualSenseService::run() {
     std::pair<TriggerEffect, TriggerEffect> prev{off(), off()};
     auto last_packet                = std::chrono::steady_clock::now();
     auto last_connect_attempt       = std::chrono::steady_clock::time_point{};
-    auto last_hid_promotion_attempt = std::chrono::steady_clock::time_point{};
     std::string active_controller_lock;
     bool ever_connected = false;
 
@@ -1913,7 +1598,6 @@ void DualSenseService::run() {
         prev                       = {off(), off()};
         last_packet                = std::chrono::steady_clock::now();
         last_connect_attempt       = std::chrono::steady_clock::time_point{};
-        last_hid_promotion_attempt = std::chrono::steady_clock::time_point{};
         ever_connected             = false;
     };
 
@@ -2045,20 +1729,6 @@ void DualSenseService::run() {
             } else {
                 std::scoped_lock lk{mu_};
                 status_.last_error = triggers.last_error();
-            }
-        }
-
-        if (triggers.using_steam_input() &&
-            now - last_hid_promotion_attempt >= std::chrono::seconds(15)) {
-            last_hid_promotion_attempt = now;
-            if (triggers.promote_hid(cfg.controller_lock_serial)) {
-                prev = {off(), off()};
-                if (cfg.enable_startup_pulse) {
-                    const auto pulse = rigid(static_cast<float>(cfg.startup_pulse_force));
-                    triggers.write(pulse, pulse);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(120));
-                    triggers.write(off(), off());
-                }
             }
         }
 

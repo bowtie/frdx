@@ -115,5 +115,6 @@ void save_config(const std::filesystem::path& path, const Config& cfg);
 // Broker mode owns the controller separately, so only that path disables the
 // local service copy.
 DualSenseConfig dualsense_service_config(DualSenseConfig cfg);
+bool dualsense_external_helper_should_launch(const DualSenseConfig& cfg) noexcept;
 
 } // namespace frdx

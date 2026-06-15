@@ -198,7 +198,12 @@ struct UiState {
     std::atomic<bool> mouse_capture{false};
     bool is_init = false;
     bool cursor_visible = true;
+    std::chrono::steady_clock::time_point cursor_hidden_since{};
     float interactive_alpha = 1.0f;
+    float interactive_draw_alpha = 1.0f;
+    bool cursor_child_close_elapsed = false;
+    bool cursor_hide_delay_elapsed = false;
+    bool cursor_hide_closed_children = false;
 
     const char* theme_names[2] = {"Bess Dark", "Tokyo Night"};
     int theme_idx              = 0;
@@ -263,18 +268,39 @@ static bool system_cursor_visible() noexcept {
     return (info.flags & CURSOR_SHOWING) != 0;
 }
 
+static float ease_smootherstep(float t) noexcept {
+    t = std::clamp(t, 0.0f, 1.0f);
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
 static float update_interactive_overlay_alpha() {
     g_ui.cursor_visible = system_cursor_visible();
-    const float target  = g_ui.cursor_visible ? 1.0f : 0.0f;
+    if (g_ui.cursor_visible) {
+        g_ui.cursor_hidden_since = {};
+        g_ui.cursor_child_close_elapsed = false;
+        g_ui.cursor_hide_delay_elapsed = false;
+        g_ui.cursor_hide_closed_children = false;
+    } else if (g_ui.cursor_hidden_since == std::chrono::steady_clock::time_point{}) {
+        g_ui.cursor_hidden_since = std::chrono::steady_clock::now();
+    }
+
+    g_ui.cursor_child_close_elapsed =
+        !g_ui.cursor_visible &&
+        std::chrono::steady_clock::now() - g_ui.cursor_hidden_since >= std::chrono::seconds(1);
+    g_ui.cursor_hide_delay_elapsed =
+        !g_ui.cursor_visible &&
+        std::chrono::steady_clock::now() - g_ui.cursor_hidden_since >= std::chrono::seconds(2);
+    const float target = g_ui.cursor_hide_delay_elapsed ? 0.0f : 1.0f;
     const float dt      = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
-    const float speed   = g_ui.cursor_visible ? 10.0f : 7.0f;
-    const float step    = dt * speed;
+    const float duration = g_ui.cursor_visible ? 0.45f : 0.75f;
+    const float step     = dt / duration;
     if (g_ui.interactive_alpha < target) {
         g_ui.interactive_alpha = std::min(target, g_ui.interactive_alpha + step);
     } else if (g_ui.interactive_alpha > target) {
         g_ui.interactive_alpha = std::max(target, g_ui.interactive_alpha - step);
     }
-    return g_ui.interactive_alpha;
+    g_ui.interactive_draw_alpha = ease_smootherstep(g_ui.interactive_alpha);
+    return g_ui.interactive_draw_alpha;
 }
 
 static bool should_draw_imgui_cursor() noexcept {
@@ -1137,30 +1163,32 @@ static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
 
 static float advance_popup_anim(bool opening, float& anim) {
     const float dt         = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
-    const float anim_delta = dt * 8.0f;
+    const float anim_delta = dt * 5.0f;
     if (opening) {
         anim = std::min(1.0f, anim + anim_delta);
     } else {
         anim = std::max(0.0f, anim - anim_delta);
     }
-    return 1.0f - (1.0f - anim) * (1.0f - anim);
+    return ease_smootherstep(anim);
 }
 
 static void close_player_children_except(bool keep_settings, bool keep_dualsense,
-                                         bool keep_stations) {
+                                         bool keep_stations, bool reset_anim = true) {
     if (!keep_settings) {
         g_ui.settings_visible = false;
-        g_ui.settings_anim    = 0.0f;
+        if (reset_anim) g_ui.settings_anim = 0.0f;
     }
     if (!keep_dualsense) {
         g_ui.dualsense_visible = false;
-        g_ui.dualsense_anim    = 0.0f;
+        if (reset_anim) g_ui.dualsense_anim = 0.0f;
     }
     if (!keep_stations) {
         g_ui.stations_visible  = false;
-        g_ui.stations_anim     = 0.0f;
-        g_ui.stations_expanded = false;
-        g_ui.stations_overflow = false;
+        if (reset_anim) {
+            g_ui.stations_anim     = 0.0f;
+            g_ui.stations_expanded = false;
+            g_ui.stations_overflow = false;
+        }
     }
 }
 
@@ -1221,9 +1249,9 @@ static void draw_toasts() {
     for (auto it = g_ui.toasts.rbegin(); it != g_ui.toasts.rend(); ++it, ++idx) {
         const float age =
             std::chrono::duration<float>(now - it->created).count();
-        const float fade_in  = std::clamp(age / 0.18f, 0.0f, 1.0f);
-        const float fade_out = std::clamp((it->lifetime - age) / 0.35f, 0.0f, 1.0f);
-        const float alpha    = std::min(fade_in, fade_out);
+        const float fade_in  = std::clamp(age / 0.45f, 0.0f, 1.0f);
+        const float fade_out = std::clamp((it->lifetime - age) / 0.85f, 0.0f, 1.0f);
+        const float alpha    = ease_smootherstep(std::min(fade_in, fade_out));
         if (alpha <= 0.0f) continue;
 
         ImGui::SetNextWindowBgAlpha(0.88f * alpha);
@@ -1901,7 +1929,7 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
     const float slide_y  = target_y - (1.0f - eased) * 18.0f;
     ImGui::SetNextWindowPos(ImVec2(layout.gear_right, slide_y), ImGuiCond_Always, ImVec2(1.0f, 0));
     ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f, 0), ImVec2(520.0f, 700.0f));
-    ImGui::SetNextWindowBgAlpha(0.82f * eased);
+    ImGui::SetNextWindowBgAlpha(0.82f * eased * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags setFlags =
         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
@@ -1999,7 +2027,7 @@ static void draw_dualsense_window(const PlayerBarLayout& layout) {
     const float slide_y   = target_y - (1.0f - eased) * 18.0f;
     ImGui::SetNextWindowPos(ImVec2(target_x, slide_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.82f * eased);
+    ImGui::SetNextWindowBgAlpha(0.82f * eased * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -2056,7 +2084,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     const ImVec2 vp_pos = viewport->WorkPos;
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + 20.0f), ImGuiCond_Always,
                             ImVec2(0.5f, 0));
-    ImGui::SetNextWindowBgAlpha(0.96f);
+    ImGui::SetNextWindowBgAlpha(0.96f * g_ui.interactive_draw_alpha);
 
     const float rounding = 6.0f;
 
@@ -2257,6 +2285,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // ── Volume progress bar (clickable + scroll) ──
     {
         static bool vol_active = false;
+        static float vol_pending_gain = 1.0f;
         float gain_pct         = g_ctx.bridge->gain() * 100.0f;
         char label[16];
         std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
@@ -2271,6 +2300,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 vol_active = true;
+                vol_pending_gain = g_ctx.bridge->gain();
             }
         }
 
@@ -2279,10 +2309,11 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
             float bar_w   = ImGui::GetItemRectSize().x;
             float mouse_x = ImGui::GetMousePos().x;
             float new_val = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
+            vol_pending_gain = new_val;
             g_ctx.bridge->set_gain(new_val);
         } else if (vol_active) {
             vol_active = false;
-            g_ctx.store->patch([&](Config& c) { c.audio.output_gain = g_ctx.bridge->gain(); });
+            g_ctx.store->patch([&](Config& c) { c.audio.output_gain = vol_pending_gain; });
         }
     }
 
@@ -2361,6 +2392,8 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     const float eased  = advance_popup_anim(opening, g_ui.stations_anim);
     if (!opening && g_ui.stations_anim < 0.01f) {
         g_ui.stations_anim = 0.0f;
+        g_ui.stations_expanded = false;
+        g_ui.stations_overflow = false;
         return;
     }
 
@@ -2389,7 +2422,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     const float slide_y   = target_y - (1.0f - eased) * 18.0f;
     ImGui::SetNextWindowPos(ImVec2(target_x, slide_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.82f * eased);
+    ImGui::SetNextWindowBgAlpha(0.82f * eased * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags stFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -2508,7 +2541,7 @@ static void draw_console_window() {
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f, vp_pos.y + vp_size.y - 16.0f),
                             ImGuiCond_FirstUseEver, ImVec2(1.0f, 1.0f));
     ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.94f);
+    ImGui::SetNextWindowBgAlpha(0.94f * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
@@ -2631,6 +2664,10 @@ void draw_imgui_ui_impl() {
     draw_toasts();
 
     const float interactive_alpha = update_interactive_overlay_alpha();
+    if (g_ui.cursor_child_close_elapsed && !g_ui.cursor_hide_closed_children) {
+        close_player_children_except(false, false, false, false);
+        g_ui.cursor_hide_closed_children = true;
+    }
     if (interactive_alpha <= 0.01f) return;
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, interactive_alpha);
 

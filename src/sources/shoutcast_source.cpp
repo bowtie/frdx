@@ -10,6 +10,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <fstream>
 #include <optional>
@@ -59,6 +60,12 @@ std::optional<int> parse_positive_int(std::string_view text) noexcept {
     const auto [ptr, ec] = std::from_chars(first, last, value);
     if (ec != std::errc{} || ptr != last || value <= 0) return std::nullopt;
     return value;
+}
+
+bool recent_metadata_ms(int64_t timestamp_ms, int64_t now_ms) noexcept {
+    constexpr int64_t kRecentWindowMs = 60'000;
+    return timestamp_ms > 0 && now_ms >= timestamp_ms &&
+           now_ms - timestamp_ms <= kRecentWindowMs;
 }
 
 // Resolve the ffmpeg binary path.  Checks the configured path first, then
@@ -469,6 +476,7 @@ struct ShoutcastSource::Pipe {
     HANDLE stderr_pipe = nullptr;
     std::string stderr_buf;
     std::uint64_t bytes_written = 0;
+    std::uint64_t metadata_epoch = 0;
     bool ended                  = false;
     bool stderr_empty           = false;
 
@@ -485,6 +493,7 @@ struct ShoutcastSource::Pipe {
 ShoutcastSource::ShoutcastSource(ShoutcastConfig cfg) : cfg_{std::move(cfg)} {
     info_        = TrackInfo{};
     info_.artist = "Select a station";
+    clear_pending_metadata_locked();
     info_gen_.fetch_add(1, std::memory_order_release);
 }
 
@@ -705,7 +714,9 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         frdx::ScopedLock lk{mu_};
         // Only install if we're still on the same station (not changed during launch).
         if (active_station_id_ == station_id && active_stream_id_ == stream_id) {
+            const auto metadata_epoch = reset_metadata_sync_locked();
             if (new_pipe) {
+                new_pipe->metadata_epoch = metadata_epoch;
                 pipe_.store(std::shared_ptr<Pipe>(std::move(new_pipe)),
                             std::memory_order_release);
                 has_pipe = true;
@@ -787,6 +798,7 @@ void ShoutcastSource::start_pipe_locked() {
     // returning to the station list or selecting a new station.
     info_         = TrackInfo{};
     info_.artist  = "Select a station";
+    const auto metadata_epoch = reset_metadata_sync_locked();
     info_gen_.fetch_add(1, std::memory_order_release);
     display_name_ = "Online Radio";
     display_name_gen_.fetch_add(1, std::memory_order_release);
@@ -796,28 +808,13 @@ void ShoutcastSource::start_pipe_locked() {
     auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path);
     if (!pipe_result) return;
 
+    (*pipe_result)->metadata_epoch = metadata_epoch;
     pipe_.store(std::shared_ptr<Pipe>(std::move(*pipe_result)),
                 std::memory_order_release);
 
     // Set initial display metadata from the active station before real
     // track info arrives from the background poller / ICY parser.
-    if (!active_station_id_.empty()) {
-        for (const auto& st : stations_) {
-            if (st.id == active_station_id_) {
-                info_.title   = st.name;
-                display_name_ = st.name;
-                display_name_gen_.fetch_add(1, std::memory_order_release);
-                for (const auto& str : st.streams) {
-                    if (str.id == active_stream_id_) {
-                        info_.artist = str.name;
-                        break;
-                    }
-                }
-                info_gen_.fetch_add(1, std::memory_order_release);
-                break;
-            }
-        }
-    }
+    restore_station_display_locked();
     position_ms_.store(0, std::memory_order_release);
     state_.store(PlaybackState::buffering, std::memory_order_release);
 
@@ -829,11 +826,32 @@ void ShoutcastSource::stop_pipe_locked() {
     state_.store(PlaybackState::stopped, std::memory_order_release);
 }
 
+void ShoutcastSource::restore_station_display_locked() {
+    if (active_station_id_.empty()) return;
+    for (const auto& st : stations_) {
+        if (st.id != active_station_id_) continue;
+        info_.title   = st.name;
+        display_name_ = st.name;
+        display_name_gen_.fetch_add(1, std::memory_order_release);
+        info_.artist.clear();
+        for (const auto& str : st.streams) {
+            if (str.id == active_stream_id_) {
+                info_.artist = str.name;
+                break;
+            }
+        }
+        clear_pending_metadata_locked();
+        info_gen_.fetch_add(1, std::memory_order_release);
+        return;
+    }
+}
+
 void ShoutcastSource::play() {
     bool has_pipe = false;
     {
         frdx::ScopedLock lk{mu_};
         if (!pipe_.load(std::memory_order_acquire)) start_pipe_locked();
+        restore_station_display_locked();
         has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
     } // mu_ released before poller restart to avoid deadlock
     // Restart the metadata poller — pause() stops it, so unpausing needs to
@@ -852,9 +870,12 @@ void ShoutcastSource::pause() {
         stop_pipe_locked();
         info_         = TrackInfo{};
         info_.artist  = "Nothing playing";
+        reset_metadata_sync_locked();
         info_gen_.fetch_add(1, std::memory_order_release);
-        display_name_ = "Online Radio";
-        display_name_gen_.fetch_add(1, std::memory_order_release);
+        if (active_station_id_.empty()) {
+            display_name_ = "Online Radio";
+            display_name_gen_.fetch_add(1, std::memory_order_release);
+        }
     }
     state_.store(PlaybackState::paused, std::memory_order_release);
 }
@@ -875,6 +896,7 @@ void ShoutcastSource::cycle_and_restart(int direction) {
                     info_.title =
                         st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
                     info_.artist = st.metadata.static_artist;
+                    clear_pending_metadata_locked();
                     info_gen_.fetch_add(1, std::memory_order_release);
                 }
                 break;
@@ -902,6 +924,92 @@ TrackInfo ShoutcastSource::current_track() const {
     return t;
 }
 
+void ShoutcastSource::queue_timed_metadata_locked(TrackInfo info, int64_t now_ms,
+                                                  uint64_t metadata_epoch) {
+    if (metadata_epoch != metadata_epoch_.load(std::memory_order_acquire)) return;
+    if (info.title.empty() && info.artist.empty()) return;
+    if (info.title == info_.title && info.artist == info_.artist) {
+        clear_pending_metadata_locked();
+        return;
+    }
+    if (pending_info_valid_ && pending_info_epoch_ == metadata_epoch &&
+        info.title == pending_info_.title &&
+        info.artist == pending_info_.artist) {
+        return;
+    }
+    pending_info_        = std::move(info);
+    pending_info_ms_     = now_ms;
+    quiet_started_ms_    = 0;
+    pending_info_epoch_  = metadata_epoch;
+    pending_info_valid_  = true;
+}
+
+void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
+    if (!pending_info_valid_) return;
+    if (pending_info_epoch_ != metadata_epoch_.load(std::memory_order_acquire)) {
+        clear_pending_metadata_locked();
+        return;
+    }
+    info_ = std::move(pending_info_);
+    pending_info_ = {};
+    pending_info_ms_ = 0;
+    quiet_started_ms_ = 0;
+    pending_info_epoch_ = 0;
+    pending_info_valid_ = false;
+    info_gen_.fetch_add(1, std::memory_order_release);
+    log::info("[shoutcast] applied timed metadata after {}: {} - {}", reason, info_.artist,
+              info_.title);
+}
+
+void ShoutcastSource::clear_pending_metadata_locked() {
+    pending_info_ = {};
+    pending_info_ms_ = 0;
+    quiet_started_ms_ = 0;
+    pending_info_epoch_ = 0;
+    pending_info_valid_ = false;
+}
+
+uint64_t ShoutcastSource::reset_metadata_sync_locked() {
+    clear_pending_metadata_locked();
+    return metadata_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+void ShoutcastSource::observe_pcm_for_metadata_sync(const int16_t* samples,
+                                                    std::size_t sample_count,
+                                                    uint64_t metadata_epoch) {
+    constexpr int kQuietPeak = 700;
+    constexpr int64_t kQuietHoldMs = 260;
+    constexpr int64_t kMaxPendingMs = 25'000;
+
+    int peak = 0;
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        const int sample = samples[i] == INT16_MIN ? 32768 : std::abs(static_cast<int>(samples[i]));
+        if (sample > peak) peak = sample;
+    }
+
+    const auto now_ms = steady_ms();
+    frdx::ScopedLock lk{mu_};
+    if (metadata_epoch != metadata_epoch_.load(std::memory_order_acquire) ||
+        !pending_info_valid_ || pending_info_epoch_ != metadata_epoch) {
+        quiet_started_ms_ = 0;
+        return;
+    }
+
+    if (pending_info_ms_ > 0 && now_ms - pending_info_ms_ >= kMaxPendingMs) {
+        apply_pending_metadata_locked("timeout");
+        return;
+    }
+
+    if (peak <= kQuietPeak) {
+        if (quiet_started_ms_ == 0) quiet_started_ms_ = now_ms;
+        if (now_ms - quiet_started_ms_ >= kQuietHoldMs) {
+            apply_pending_metadata_locked("quiet gap");
+        }
+    } else {
+        quiet_started_ms_ = 0;
+    }
+}
+
 // ---- Metadata poller (dispatcher) ----
 
 void ShoutcastSource::restart_metadata_for_current() {
@@ -922,11 +1030,12 @@ void ShoutcastSource::restart_metadata_for_current() {
     // ---- Legacy preset mode (no station selected, raw URL only) ----
     if (active_station_id_.empty()) {
         std::string legacy_url = target_url_;
+        const auto metadata_epoch = metadata_epoch_.load(std::memory_order_acquire);
         lk.unlock();
         if (!legacy_url.empty()) {
             icy_poller_thread_ = std::jthread(
-                [this, url = std::move(legacy_url)](const std::stop_token& stop) {
-                    run_icy_poller(url, stop);
+                [this, url = std::move(legacy_url), metadata_epoch](const std::stop_token& stop) {
+                    run_icy_poller(url, metadata_epoch, stop);
                 });
         }
         return;
@@ -962,6 +1071,7 @@ void ShoutcastSource::restart_metadata_for_current() {
     auto md_type = station->metadata.type;
     auto ws_filter    = station->metadata.ws_filter;
     auto ws_heartbeat = station->metadata.ws_heartbeat;
+    const auto metadata_epoch = metadata_epoch_.load(std::memory_order_acquire);
 
     // Capture stream URL for ICY poller.
     std::string stream_url;
@@ -970,18 +1080,18 @@ void ShoutcastSource::restart_metadata_for_current() {
     if (stream_url.empty() && !station->streams.empty())
         stream_url = station->streams[0].url;
 
-    // Reset ICY timestamp so the first WS/fallback ICY response fills
-    // title/artist until ffmpeg's same-connection ICY proves available.
+    // Reset ICY timestamps so the first WS/fallback ICY response fills
+    // title/artist until ffmpeg's same-connection ICY proves active.
     last_icy_ms_.store(0, std::memory_order_release);
-    ffmpeg_icy_seen_.store(false, std::memory_order_release);
+    last_ffmpeg_icy_ms_.store(0, std::memory_order_release);
 
     lk.unlock();
 
     // 2. Start ICY poller for non-WS, non-static stations.
     if (!stream_url.empty() && md_type != "websocket" && md_type != "static") {
         icy_poller_thread_ = std::jthread(
-            [this, url = std::move(stream_url)](const std::stop_token& stop) {
-                run_icy_poller(url, stop);
+            [this, url = std::move(stream_url), metadata_epoch](const std::stop_token& stop) {
+                run_icy_poller(url, metadata_epoch, stop);
             });
     }
 
@@ -998,15 +1108,17 @@ void ShoutcastSource::restart_metadata_for_current() {
     if (md_type == "websocket") {
         metadata_thread_ = std::jthread(
             [this, url = std::move(url), mapping = std::move(mapping),
-             filter = std::move(ws_filter), hb = std::move(ws_heartbeat)](
-                const std::stop_token& stop) { run_ws_poller(url, mapping, filter, hb, stop); });
+             filter = std::move(ws_filter), hb = std::move(ws_heartbeat), metadata_epoch](
+                const std::stop_token& stop) {
+                    run_ws_poller(url, mapping, filter, hb, metadata_epoch, stop);
+                });
         return;
     }
 }
 
 void ShoutcastSource::run_ws_poller(std::string url, const StationMetadataMapping& mapping,
                                     const StationMetadataWebSocketFilter& filter,
-                                    StationMetadataWebSocketHeartbeat hb,
+                                    StationMetadataWebSocketHeartbeat hb, uint64_t metadata_epoch,
                                     const std::stop_token& stop) {
     auto parsed = ParsedUrl::parse(url);
     if (!parsed) {
@@ -1160,13 +1272,12 @@ void ShoutcastSource::run_ws_poller(std::string url, const StationMetadataMappin
                 resolve_mapped_value(*data_root, mapping.artist, mapping.artist_array_field,
                                      mapping.artist_separator);
 
-            // If ICY metadata has ever been received for this stream
-            // (since the last reset in restart_metadata_for_current),
-            // only let the WS poller update artwork — ICY provides
-            // perfectly-synced title/artist at the audio transition point
-            // and never goes stale (the flag is reset on station change).
-            auto last_icy   = last_icy_ms_.load(std::memory_order_acquire);
-            bool icy_active = (last_icy > 0);
+            // Same-connection ffmpeg ICY is best synchronized, but some
+            // streams only expose the first title there. Let WS recover after
+            // ffmpeg metadata goes quiet instead of freezing on the first song.
+            const auto now_ms = steady_ms();
+            const bool ffmpeg_icy_active = recent_metadata_ms(
+                last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
 
             if (!title.empty() || !artist.empty()) {
                 frdx::ScopedLock lk{mu_};
@@ -1174,13 +1285,18 @@ void ShoutcastSource::run_ws_poller(std::string url, const StationMetadataMappin
                 // we were processing — stop is requested early in
                 // select_station() via stop_metadata_poller().
                 if (!stop.stop_requested()) {
-                    if (!title.empty() && !icy_active)
-                        info_.title = sanitize_brackets(std::move(title));
-                    if (!artist.empty() && !icy_active)
-                        info_.artist = sanitize_brackets(std::move(artist));
-                    info_gen_.fetch_add(1, std::memory_order_release);
-                    log::info("[shoutcast] ws metadata: {} - {} (icy={})", info_.artist,
-                              info_.title, icy_active);
+                    std::string logged_title = title;
+                    std::string logged_artist = artist;
+                    if (!ffmpeg_icy_active) {
+                        TrackInfo queued = info_;
+                        if (!title.empty()) queued.title = sanitize_brackets(std::move(title));
+                        if (!artist.empty()) queued.artist = sanitize_brackets(std::move(artist));
+                        logged_title = queued.title;
+                        logged_artist = queued.artist;
+                        queue_timed_metadata_locked(std::move(queued), now_ms, metadata_epoch);
+                    }
+                    log::info("[shoutcast] ws metadata queued: {} - {} (ffmpeg_icy={})",
+                              logged_artist, logged_title, ffmpeg_icy_active);
                 }
             }
         }
@@ -1242,7 +1358,7 @@ void ShoutcastSource::stop_icy_poller() {
 // the caller (restart_metadata_for_current) will restart the poller on the
 // next station change.
 
-void ShoutcastSource::run_icy_poller(const std::string& stream_url,
+void ShoutcastSource::run_icy_poller(const std::string& stream_url, uint64_t metadata_epoch,
                                      const std::stop_token& stop) {
     // Brief settle so station/stream names are visible in-game before
     // song metadata overwrites them.
@@ -1393,21 +1509,25 @@ void ShoutcastSource::run_icy_poller(const std::string& stream_url,
             std::string val = std::move(*val_opt);
 
             auto dash = val.find(" - ");
+            const auto now_ms = steady_ms();
+            const bool ffmpeg_icy_active = recent_metadata_ms(
+                last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
             {
                 frdx::ScopedLock lk{mu_};
-                if (!stop.stop_requested() && !ffmpeg_icy_seen_.load(std::memory_order_acquire)) {
+                if (!stop.stop_requested() && !ffmpeg_icy_active) {
+                    TrackInfo queued;
                     if (dash != std::string::npos) {
-                        info_.artist = val.substr(0, dash);
-                        info_.title  = val.substr(dash + 3);
+                        queued.artist = val.substr(0, dash);
+                        queued.title  = val.substr(dash + 3);
                     } else {
-                        info_.artist = display_name_;
-                        info_.title  = std::move(val);
+                        queued.artist = display_name_;
+                        queued.title  = std::move(val);
                     }
-                    info_gen_.fetch_add(1, std::memory_order_release);
+                    queue_timed_metadata_locked(std::move(queued), now_ms, metadata_epoch);
                 }
             }
 
-            last_icy_ms_.store(steady_ms(), std::memory_order_release);
+            last_icy_ms_.store(now_ms, std::memory_order_release);
 
             if (first_title) {
                 first_title = false;
@@ -1486,22 +1606,24 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                     const auto dash = title->find(" - ");
                     std::string logged_artist;
                     std::string logged_title;
+                    const auto now_ms = steady_ms();
                     {
                         frdx::ScopedLock lk{mu_};
+                        TrackInfo queued;
                         if (dash != std::string::npos) {
-                            info_.artist = title->substr(0, dash);
-                            info_.title  = title->substr(dash + 3);
+                            queued.artist = title->substr(0, dash);
+                            queued.title  = title->substr(dash + 3);
                         } else {
-                            info_.artist = display_name_;
-                            info_.title  = std::move(*title);
+                            queued.artist = display_name_;
+                            queued.title  = std::move(*title);
                         }
-                        logged_artist = info_.artist;
-                        logged_title  = info_.title;
-                        info_gen_.fetch_add(1, std::memory_order_release);
+                        logged_artist = queued.artist;
+                        logged_title  = queued.title;
+                        queue_timed_metadata_locked(std::move(queued), now_ms, p->metadata_epoch);
                     }
-                    ffmpeg_icy_seen_.store(true, std::memory_order_release);
-                    last_icy_ms_.store(steady_ms(), std::memory_order_release);
-                    log::info("[shoutcast] ffmpeg icy metadata: {} - {}", logged_artist,
+                    last_ffmpeg_icy_ms_.store(now_ms, std::memory_order_release);
+                    last_icy_ms_.store(now_ms, std::memory_order_release);
+                    log::info("[shoutcast] ffmpeg icy metadata queued: {} - {}", logged_artist,
                               logged_title);
                 } else if (line.find("StreamTitle") == std::string_view::npos) {
                     log::warn("[shoutcast] ffmpeg: {}", line);
@@ -1522,6 +1644,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                           attempts + 1);
                 info_.title  = display_name_;
                 info_.artist = "Attempting to reconnect to station";
+                clear_pending_metadata_locked();
                 info_gen_.fetch_add(1, std::memory_order_release);
             } else {
                 reconnect_attempts_.store(0, std::memory_order_release);
@@ -1529,6 +1652,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 if (!cfg_.presets.empty() || !stations_.empty()) {
                     info_.title  = display_name_;
                     info_.artist = "Unable to reach this station";
+                    clear_pending_metadata_locked();
                     info_gen_.fetch_add(1, std::memory_order_release);
                     cycle_preset();
                 }
@@ -1541,6 +1665,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 // Pipe launch failed — restore unreachable status.
                 info_.title   = prev_name;
                 info_.artist  = "Unable to reach this station";
+                clear_pending_metadata_locked();
                 info_gen_.fetch_add(1, std::memory_order_release);
             }
             lk.unlock();
@@ -1569,6 +1694,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             frdx::UniqueLock lk{mu_};
             info_.title  = display_name_;
             info_.artist = "Lost connection to station";
+            clear_pending_metadata_locked();
             info_gen_.fetch_add(1, std::memory_order_release);
         }
         if (p->read_pipe) {
@@ -1601,6 +1727,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             reconnect_attempts_.store(0, std::memory_order_relaxed);
         }
         ring.write(reinterpret_cast<std::byte*>(buf), got);
+        observe_pcm_for_metadata_sync(buf, got / sizeof(int16_t), p->metadata_epoch);
         p->bytes_written += got;
         avail = avail > got ? avail - got : 0;
     }

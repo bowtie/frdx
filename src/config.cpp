@@ -422,4 +422,8 @@ DualSenseConfig dualsense_service_config(DualSenseConfig cfg) {
     return cfg;
 }
 
+bool dualsense_external_helper_should_launch(const DualSenseConfig& cfg) noexcept {
+    return cfg.enabled && cfg.external_helper;
+}
+
 } // namespace frdx
