@@ -197,6 +197,8 @@ struct UiState {
     std::atomic<bool> hud_visible{true};
     std::atomic<bool> mouse_capture{false};
     bool is_init = false;
+    bool cursor_visible = true;
+    float interactive_alpha = 1.0f;
 
     const char* theme_names[2] = {"Bess Dark", "Tokyo Night"};
     int theme_idx              = 0;
@@ -246,11 +248,38 @@ static UiState g_ui;
 static void release_blur_resources();
 
 static void mark_overlay_mouse_region() {
+    if (g_ui.interactive_alpha < 0.05f) return;
     const ImGuiHoveredFlags flags =
         ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem;
     if (ImGui::IsWindowHovered(flags) || ImGui::IsAnyItemActive()) {
         g_ui.mouse_capture.store(true, std::memory_order_release);
     }
+}
+
+static bool system_cursor_visible() noexcept {
+    CURSORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetCursorInfo(&info)) return true;
+    return (info.flags & CURSOR_SHOWING) != 0;
+}
+
+static float update_interactive_overlay_alpha() {
+    g_ui.cursor_visible = system_cursor_visible();
+    const float target  = g_ui.cursor_visible ? 1.0f : 0.0f;
+    const float dt      = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
+    const float speed   = g_ui.cursor_visible ? 10.0f : 7.0f;
+    const float step    = dt * speed;
+    if (g_ui.interactive_alpha < target) {
+        g_ui.interactive_alpha = std::min(target, g_ui.interactive_alpha + step);
+    } else if (g_ui.interactive_alpha > target) {
+        g_ui.interactive_alpha = std::max(target, g_ui.interactive_alpha - step);
+    }
+    return g_ui.interactive_alpha;
+}
+
+static bool should_draw_imgui_cursor() noexcept {
+    return g_ui.cursor_visible && g_ui.interactive_alpha > 0.05f &&
+           g_ui.mouse_capture.load(std::memory_order_acquire);
 }
 
 static bool has_visible_toasts() {
@@ -389,7 +418,8 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     const bool route_to_imgui    = g_ui.player_visible || g_ui.settings_visible ||
                                    g_ui.dualsense_visible || g_ui.stations_visible ||
                                    g_ui.console_visible;
-    const bool block_mouse_input = g_ui.mouse_capture.load(std::memory_order_acquire);
+    const bool block_mouse_input = g_ui.cursor_visible && g_ui.interactive_alpha > 0.05f &&
+                                   g_ui.mouse_capture.load(std::memory_order_acquire);
     if (route_to_imgui) {
         const bool imgui_handled = ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
         if (block_mouse_input && imgui_handled && uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) {
@@ -405,7 +435,7 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ui.player_visible = !g_ui.player_visible;
         if (g_ui.is_init) {
-            ImGui::GetIO().MouseDrawCursor = g_ui.mouse_capture.load(std::memory_order_acquire);
+            ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
         }
         return 0;
     }
@@ -2600,16 +2630,20 @@ void draw_imgui_ui_impl() {
 
     draw_toasts();
 
+    const float interactive_alpha = update_interactive_overlay_alpha();
+    if (interactive_alpha <= 0.01f) return;
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, interactive_alpha);
+
     if (!g_ui.player_visible) {
         draw_console_window();
-        return;
+    } else {
+        auto layout = draw_player_bar(active);
+        draw_settings_window(layout);
+        draw_dualsense_window(layout);
+        draw_stations_browser(active, layout);
+        draw_console_window();
     }
-
-    auto layout = draw_player_bar(active);
-    draw_settings_window(layout);
-    draw_dualsense_window(layout);
-    draw_stations_browser(active, layout);
-    draw_console_window();
+    ImGui::PopStyleVar();
 }
 
 bool wait_for_fence(UINT64 fence_value) {
@@ -3152,7 +3186,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             if (init_imgui(pSwapChain, active_queue)) {
                 ApplyTheme(g_ui.theme_idx);
                 g_ui.is_init                   = true;
-                ImGui::GetIO().MouseDrawCursor = g_ui.mouse_capture.load(std::memory_order_acquire);
+                ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
                 log::info(
                     "[overlay] Direct3D 12 Dear ImGui Overlay context initialized successfully!");
             } else {
@@ -3221,7 +3255,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         g_ui.mouse_capture.store(false, std::memory_order_release);
 
         draw_imgui_ui_impl();
-        ImGui::GetIO().MouseDrawCursor = g_ui.mouse_capture.load(std::memory_order_acquire);
+        ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
 
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
