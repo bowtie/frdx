@@ -657,26 +657,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // ── 1. Config + managers ─────────────────────────────────────────────
     auto cfg_path = data_dir / "config.toml";
     frdx::Config cfg = frdx::load_config(cfg_path);
-    cfg.audio.output_gain        = 0.1f;
-    cfg.audio.force_stereo_audio = true;
     frdx::ConfigStore store(cfg_path, cfg);
 
     frdx::AudioSourceManager mgr(4ull << 20);
-    auto service_dualsense_cfg = [](frdx::DualSenseConfig ds) {
-        if (ds.enabled || ds.external_helper) ds.enabled = false;
-        return ds;
-    };
-    frdx::dualsense::DualSenseService dualsense{service_dualsense_cfg(cfg.dualsense)};
+    frdx::dualsense::DualSenseService dualsense{frdx::dualsense_service_config(cfg.dualsense)};
     dualsense.start();
 
     frdx::fmod_bridge::FMODFns fns{};
     frdx::fmod_bridge::DSPBridge bridge(mgr, fns);
     bridge.set_gain(cfg.audio.output_gain);
     bridge.set_force_stereo_audio(cfg.audio.force_stereo_audio);
-    store.on_change([&bridge, &dualsense, service_dualsense_cfg](const frdx::Config& c) {
+    store.on_change([&bridge, &dualsense](const frdx::Config& c) {
         bridge.set_gain(c.audio.output_gain);
         bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
-        dualsense.update_config(service_dualsense_cfg(c.dualsense));
+        dualsense.update_config(frdx::dualsense_service_config(c.dualsense));
     });
 
     // WASAPI audio output (replaces FMOD for the sandbox)

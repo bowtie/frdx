@@ -1246,12 +1246,7 @@ template <class Fn> void patch_dualsense(Fn&& fn) {
 
 bool dualsense_toggle(const char* label, bool value, bool DualSenseConfig::* field) {
     if (ImGui::Toggle(label, &value)) {
-        patch_dualsense([=](DualSenseConfig& c) {
-            c.*field = value;
-            if (field == &DualSenseConfig::enabled) {
-                c.external_helper = value;
-            }
-        });
+        patch_dualsense([=](DualSenseConfig& c) { c.*field = value; });
         return true;
     }
     return false;

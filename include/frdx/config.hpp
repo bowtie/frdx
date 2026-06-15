@@ -111,4 +111,9 @@ Config load_config(const std::filesystem::path& path);
 // Atomic write (temp + rename). Throws std::system_error on failure.
 void save_config(const std::filesystem::path& path, const Config& cfg);
 
+// The in-process DualSense service should honor persisted trigger settings.
+// Broker mode owns the controller separately, so only that path disables the
+// local service copy.
+DualSenseConfig dualsense_service_config(DualSenseConfig cfg);
+
 } // namespace frdx

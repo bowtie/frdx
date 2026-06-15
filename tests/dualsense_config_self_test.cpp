@@ -164,6 +164,14 @@ int run() {
     ok &= expect(got_overlay.notification_position == cfg.overlay.notification_position,
                  "overlay.notification_position");
 
+    auto service_cfg = loaded.dualsense;
+    service_cfg.external_helper = false;
+    service_cfg = frdx::dualsense_service_config(service_cfg);
+    ok &= expect(service_cfg.enabled, "service preserves enabled triggers");
+    service_cfg.external_helper = true;
+    service_cfg = frdx::dualsense_service_config(service_cfg);
+    ok &= expect(!service_cfg.enabled, "service disables only in external helper mode");
+
     std::filesystem::remove(path, ec);
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

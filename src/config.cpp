@@ -417,4 +417,9 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     if (ec) throw std::system_error{ec};
 }
 
+DualSenseConfig dualsense_service_config(DualSenseConfig cfg) {
+    if (cfg.external_helper) cfg.enabled = false;
+    return cfg;
+}
+
 } // namespace frdx

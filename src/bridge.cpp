@@ -161,11 +161,7 @@ void run_bridge(HMODULE self) noexcept {
 
     const std::size_t ring_bytes = static_cast<std::size_t>(cfg.general.ring_buffer_mb) << 20;
     AudioSourceManager mgr{ring_bytes};
-    auto service_dualsense_cfg = [](DualSenseConfig cfg) {
-        if (cfg.enabled || cfg.external_helper) cfg.enabled = false;
-        return cfg;
-    };
-    dualsense::DualSenseService dualsense{service_dualsense_cfg(cfg.dualsense)};
+    dualsense::DualSenseService dualsense{dualsense_service_config(cfg.dualsense)};
     dualsense.start();
 
     // Own the sole audio source and hand a raw pointer to the manager.
@@ -217,14 +213,14 @@ void run_bridge(HMODULE self) noexcept {
     if (fns.ready())
         ctrl = std::make_unique<fmod_bridge::ControlLoop>(bridge, img, cfg.audio.output_gain);
 
-    store.on_change([dir, &bridge, &mgr, &shoutcast, &dualsense, service_dualsense_cfg,
-                     ctrl_ptr = ctrl.get()](const Config& c) {
+    store.on_change([dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get()](
+                        const Config& c) {
         if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
 
         bridge.set_gain(c.audio.output_gain);
         bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
         maybe_launch_external_helper(dir, c.dualsense);
-        dualsense.update_config(service_dualsense_cfg(c.dualsense));
+        dualsense.update_config(dualsense_service_config(c.dualsense));
         if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
     });
 
