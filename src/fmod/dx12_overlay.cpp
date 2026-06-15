@@ -174,6 +174,20 @@ enum class ConsoleLineKind : uint8_t {
     dualsense,
 };
 
+enum class ToastKind : uint8_t {
+    info,
+    success,
+    warn,
+};
+
+struct Toast {
+    ToastKind kind = ToastKind::info;
+    std::string title;
+    std::string detail;
+    std::chrono::steady_clock::time_point created{};
+    float lifetime = 4.0f;
+};
+
 struct UiState {
     std::atomic<bool> player_visible{true};
     std::atomic<bool> settings_visible{false};
@@ -202,6 +216,7 @@ struct UiState {
     std::vector<std::string> console_lines;
     std::vector<ConsoleLineKind> console_line_kinds;
     uint64_t console_log_generation = 0;
+    std::deque<Toast> toasts;
 
     std::vector<dualsense::ControllerDevice> dualsense_devices;
     dualsense::RuntimeStatus helper_status;
@@ -233,6 +248,25 @@ static void mark_overlay_mouse_region() {
     if (ImGui::IsWindowHovered(flags) || ImGui::IsAnyItemActive()) {
         g_ui.mouse_capture.store(true, std::memory_order_release);
     }
+}
+
+static bool has_visible_toasts() {
+    const auto now = std::chrono::steady_clock::now();
+    return std::ranges::any_of(g_ui.toasts, [&](const Toast& toast) {
+        return now - toast.created < std::chrono::duration<float>(toast.lifetime);
+    });
+}
+
+static void push_toast(ToastKind kind, std::string title, std::string detail = {},
+                       float lifetime = 4.0f) {
+    Toast toast;
+    toast.kind     = kind;
+    toast.title    = std::move(title);
+    toast.detail   = std::move(detail);
+    toast.created  = std::chrono::steady_clock::now();
+    toast.lifetime = lifetime;
+    if (g_ui.toasts.size() >= 4) g_ui.toasts.pop_front();
+    g_ui.toasts.push_back(std::move(toast));
 }
 
 // ── Swapchain map (mutex-guarded) ──────────────────────────────────────
@@ -312,12 +346,12 @@ struct PlayerBarLayout {
     float dualsense_right{};
 };
 
-static void draw_hud(IAudioSource* active, const TrackInfo& track, std::string_view title);
 static void draw_settings_window(const PlayerBarLayout& layout);
 static void draw_dualsense_window(const PlayerBarLayout& layout);
 static PlayerBarLayout draw_player_bar(IAudioSource* active);
 static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout);
 static void draw_console_window();
+static void draw_toasts();
 
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     const bool route_to_imgui    = g_ui.player_visible || g_ui.settings_visible ||
@@ -994,7 +1028,7 @@ static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
                         D3D12_RESOURCE_STATE_RENDER_TARGET);
 }
 
-static void queue_overlay_blur_callback() {
+[[maybe_unused]] static void queue_overlay_blur_callback() {
     g_ui.overlay_blur_ready = false;
     if (!kEnableOverlayBlur || !g_dx.blur_frame_backbuffer ||
         g_dx.blur_frame_format == DXGI_FORMAT_UNKNOWN) {
@@ -1008,8 +1042,8 @@ static void queue_overlay_blur_callback() {
 
 // ── UI section: HUD ───────────────────────────────────────────────────
 
-static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max, float rounding,
-                             ImDrawFlags flags = 0) {
+[[maybe_unused]] static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
+                                              float rounding, ImDrawFlags flags = 0) {
     const bool texture_available =
         g_ui.overlay_blur_texture_id && g_dx.blur.width && g_dx.blur.height;
     if (!texture_available || (!kEnableOverlayBlur && !g_ui.overlay_blur_ready)) {
@@ -1068,45 +1102,61 @@ static void close_player_children_except(bool keep_settings, bool keep_dualsense
     }
 }
 
-static void draw_hud(IAudioSource* active, const TrackInfo& track, std::string_view title) {
-    if (!g_ui.hud_visible) return;
+static ImVec4 toast_color(ToastKind kind) {
+    switch (kind) {
+        case ToastKind::success: return ImVec4(0.45f, 0.85f, 0.55f, 1.0f);
+        case ToastKind::warn: return ImVec4(1.0f, 0.72f, 0.35f, 1.0f);
+        case ToastKind::info: break;
+    }
+    return ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
+}
 
-    ImGui::SetNextWindowBgAlpha(0.0f);
-    ImGuiWindowFlags hudFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                ImGuiWindowFlags_NoSavedSettings |
-                                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
-                                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBackground;
+static void draw_toasts() {
+    const auto now = std::chrono::steady_clock::now();
+    while (!g_ui.toasts.empty() &&
+           now - g_ui.toasts.front().created >=
+               std::chrono::duration<float>(g_ui.toasts.front().lifetime)) {
+        g_ui.toasts.pop_front();
+    }
+    if (g_ui.toasts.empty()) return;
 
-    ImGui::Begin("Radio HUD", nullptr, hudFlags);
-    auto* dl = ImGui::GetWindowDrawList();
-    dl->ChannelsSplit(2);
-    dl->ChannelsSetCurrent(1);
-    if (active) {
-        ImGui::TextColored(ImVec4(0.71f, 1.0f, 0.15f, 1.0f), "%.*s",
-                           static_cast<int>(title.size()), title.data());
-        ImGui::Separator();
-        if (!track.artist.empty() && track.artist != "Select a station") {
-            ImGui::TextColored(ImVec4(0.6f, 0.63f, 0.7f, 1.0f), "%s", track.artist.c_str());
+    auto* viewport       = ImGui::GetMainViewport();
+    const ImVec2 vp_pos  = viewport->WorkPos;
+    const ImVec2 vp_size = viewport->WorkSize;
+    float y              = vp_pos.y + vp_size.y - 28.0f;
+    int idx              = 0;
+
+    for (auto it = g_ui.toasts.rbegin(); it != g_ui.toasts.rend(); ++it, ++idx) {
+        const float age =
+            std::chrono::duration<float>(now - it->created).count();
+        const float fade_in  = std::clamp(age / 0.18f, 0.0f, 1.0f);
+        const float fade_out = std::clamp((it->lifetime - age) / 0.35f, 0.0f, 1.0f);
+        const float alpha    = std::min(fade_in, fade_out);
+        if (alpha <= 0.0f) continue;
+
+        ImGui::SetNextWindowBgAlpha(0.88f * alpha);
+        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 18.0f, y), ImGuiCond_Always,
+                                ImVec2(1.0f, 1.0f));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(420.0f, 180.0f));
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                 ImGuiWindowFlags_NoSavedSettings |
+                                 ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                                 ImGuiWindowFlags_NoMove;
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+        char window_name[32];
+        std::snprintf(window_name, sizeof(window_name), "##frdx_toast_%d", idx);
+        ImGui::Begin(window_name, nullptr, flags);
+        ImGui::PushTextWrapPos(390.0f);
+        ImGui::TextColored(toast_color(it->kind), "%s", it->title.c_str());
+        if (!it->detail.empty()) {
+            ImGui::TextWrapped("%s", it->detail.c_str());
         }
-    } else {
-        ImGui::Text("Radio Station Idle");
+        ImGui::PopTextWrapPos();
+        y -= ImGui::GetWindowSize().y + 8.0f;
+        ImGui::End();
+        ImGui::PopStyleVar(2);
     }
-    const ImVec2 pos  = ImGui::GetWindowPos();
-    const ImVec2 size = ImGui::GetWindowSize();
-    const ImVec2 max(pos.x + size.x, pos.y + size.y);
-    dl->ChannelsSetCurrent(0);
-    const float rounding = 6.0f;
-    if (kEnableOverlayBlur && add_overlay_blur(dl, pos, max, rounding)) {
-        dl->AddRectFilled(pos, max, ImGui::GetColorU32(ImVec4(0.02f, 0.02f, 0.03f, 0.50f)),
-                          rounding);
-    } else {
-        dl->AddRectFilled(pos, max, ImGui::GetColorU32(ImVec4(0.02f, 0.02f, 0.03f, 0.50f)),
-                          rounding);
-    }
-    dl->AddRect(pos, max, ImGui::GetColorU32(ImGuiCol_Border), rounding, 1.0f,
-                ImDrawFlags_RoundCornersAll);
-    dl->ChannelsMerge();
-    ImGui::End();
 }
 
 // Shared helper: draws a rounded, filled background + border with only bottom
@@ -1792,7 +1842,7 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
         ImGui::Spacing();
 
         bool hud = g_ui.hud_visible;
-        if (ImGui::Checkbox("Show Music Overlay", &hud)) {
+        if (ImGui::Checkbox("Show Music Notifications", &hud)) {
             g_ui.hud_visible = hud;
         }
 
@@ -2439,10 +2489,6 @@ void draw_imgui_ui_impl() {
         dl->AddImage(g_ui.bg_texture_id, vp->Pos,
                      ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y));
     }
-    if (g_ui.hud_visible) {
-        queue_overlay_blur_callback();
-    }
-
     auto* active = g_ctx.mgr->active();
 
     // Track info cache - only calls current_track() when source or generation changes.
@@ -2450,6 +2496,9 @@ void draw_imgui_ui_impl() {
     static uint64_t s_track_gen         = 0;
     static TrackInfo s_cached_track;
     static std::string s_cached_hud_title;
+    static IAudioSource* s_toast_source = nullptr;
+    static std::string s_toast_title;
+    static std::string s_toast_artist;
     if (active) {
         uint64_t gen = active->track_generation();
         if (active != s_track_source || gen == 0 || gen != s_track_gen) {
@@ -2458,15 +2507,28 @@ void draw_imgui_ui_impl() {
             s_cached_track     = active->current_track();
             s_cached_hud_title = s_cached_track.title.empty() ? active->display_name()
                                                               : s_cached_track.title;
+            const std::string artist =
+                s_cached_track.artist == "Select a station" ? std::string{} : s_cached_track.artist;
+            if (g_ui.hud_visible && !s_cached_hud_title.empty() &&
+                (active != s_toast_source || s_cached_hud_title != s_toast_title ||
+                 artist != s_toast_artist)) {
+                push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);
+                s_toast_source = active;
+                s_toast_title  = s_cached_hud_title;
+                s_toast_artist = artist;
+            }
         }
     } else {
         s_track_source = nullptr;
         s_track_gen    = 0;
         s_cached_track = {};
         s_cached_hud_title.clear();
+        s_toast_source = nullptr;
+        s_toast_title.clear();
+        s_toast_artist.clear();
     }
 
-    draw_hud(active, s_cached_track, s_cached_hud_title);
+    draw_toasts();
 
     if (!g_ui.player_visible) {
         draw_console_window();
@@ -3032,7 +3094,8 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     if (g_ui.is_init && active_queue) {
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
         if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.dualsense_visible &&
-            !g_ui.stations_visible && !g_ui.console_visible && !g_ui.hud_visible) {
+            !g_ui.stations_visible && !g_ui.console_visible && !g_ui.hud_visible &&
+            !has_visible_toasts()) {
             return original_Present(pSwapChain, SyncInterval, Flags);
         }
         UINT backBufferIdx = 0;
