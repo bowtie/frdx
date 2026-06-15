@@ -36,6 +36,21 @@ const toml::value& section(const toml::value& root, const char* key) {
     return empty;
 }
 
+std::string normalize_notification_position(std::string value) {
+    constexpr std::string_view valid[] = {
+        "top_left",    "top_center",    "top_right",
+        "bottom_left", "bottom_center", "bottom_right",
+    };
+    if (std::ranges::find(valid, std::string_view{value}) != std::ranges::end(valid)) return value;
+    return "top_left";
+}
+
+std::string normalize_overlay_theme(std::string value) {
+    constexpr std::string_view valid[] = {"bess_dark", "tokyo_night"};
+    if (std::ranges::find(valid, std::string_view{value}) != std::ranges::end(valid)) return value;
+    return "bess_dark";
+}
+
 } // namespace
 
 Config load_config(const std::filesystem::path& path) {
@@ -75,6 +90,15 @@ Config load_config(const std::filesystem::path& path) {
         static_cast<float>(pick<double>(au, "output_gain", cfg.audio.output_gain));
     cfg.audio.force_stereo_audio =
         pick<bool>(au, "force_stereo_audio", cfg.audio.force_stereo_audio);
+
+    const auto& ov = section(root, "overlay");
+    cfg.overlay.theme =
+        normalize_overlay_theme(pick<std::string>(ov, "theme", cfg.overlay.theme));
+    cfg.overlay.music_notifications_enabled =
+        pick<bool>(ov, "music_notifications_enabled", cfg.overlay.music_notifications_enabled);
+    cfg.overlay.notification_position =
+        normalize_notification_position(pick<std::string>(ov, "notification_position",
+                                                          cfg.overlay.notification_position));
 
     const auto& ds = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -313,6 +337,11 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.header("audio");
     e.kv("output_gain", static_cast<double>(cfg.audio.output_gain));
     e.kv("force_stereo_audio", cfg.audio.force_stereo_audio);
+
+    e.header("overlay");
+    e.kv("theme", normalize_overlay_theme(cfg.overlay.theme));
+    e.kv("music_notifications_enabled", cfg.overlay.music_notifications_enabled);
+    e.kv("notification_position", normalize_notification_position(cfg.overlay.notification_position));
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);

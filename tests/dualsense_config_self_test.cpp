@@ -78,10 +78,14 @@ int run() {
     ds.enable_reconnect = true;
     ds.reconnect_interval_s = 2.5f;
     ds.controller_lock_serial = "aabbccddeeff";
+    cfg.overlay.theme = "tokyo_night";
+    cfg.overlay.music_notifications_enabled = false;
+    cfg.overlay.notification_position = "bottom_center";
 
     frdx::save_config(path, cfg);
     const auto loaded = frdx::load_config(path);
     const auto& got = loaded.dualsense;
+    const auto& got_overlay = loaded.overlay;
 
     ok &= expect(got.enabled == ds.enabled, "enabled");
     ok &= expect(got.external_helper == ds.external_helper, "external_helper");
@@ -153,6 +157,12 @@ int run() {
                  "reconnect_interval_s");
     ok &= expect(got.controller_lock_serial == ds.controller_lock_serial,
                  "controller_lock_serial");
+    ok &= expect(got_overlay.theme == cfg.overlay.theme, "overlay.theme");
+    ok &= expect(got_overlay.music_notifications_enabled ==
+                     cfg.overlay.music_notifications_enabled,
+                 "overlay.music_notifications_enabled");
+    ok &= expect(got_overlay.notification_position == cfg.overlay.notification_position,
+                 "overlay.notification_position");
 
     std::filesystem::remove(path, ec);
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;

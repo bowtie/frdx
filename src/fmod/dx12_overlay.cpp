@@ -200,6 +200,9 @@ struct UiState {
 
     const char* theme_names[2] = {"Bess Dark", "Tokyo Night"};
     int theme_idx              = 0;
+    const char* notification_position_names[6] = {
+        "Top Left", "Top Center", "Top Right", "Bottom Left", "Bottom Center", "Bottom Right"};
+    int notification_position_idx = 0;
 
     ComPtr<ID3D12Resource> bg_texture;
     ImTextureID bg_texture_id           = 0;
@@ -267,6 +270,35 @@ static void push_toast(ToastKind kind, std::string title, std::string detail = {
     toast.lifetime = lifetime;
     if (g_ui.toasts.size() >= 4) g_ui.toasts.pop_front();
     g_ui.toasts.push_back(std::move(toast));
+}
+
+static int notification_position_index(std::string_view value) noexcept {
+    if (value == "top_center") return 1;
+    if (value == "top_right") return 2;
+    if (value == "bottom_left") return 3;
+    if (value == "bottom_center") return 4;
+    if (value == "bottom_right") return 5;
+    return 0;
+}
+
+static int theme_index(std::string_view value) noexcept {
+    if (value == "tokyo_night") return 1;
+    return 0;
+}
+
+static const char* theme_value(int idx) noexcept {
+    return idx == 1 ? "tokyo_night" : "bess_dark";
+}
+
+static const char* notification_position_value(int idx) noexcept {
+    switch (idx) {
+        case 1: return "top_center";
+        case 2: return "top_right";
+        case 3: return "bottom_left";
+        case 4: return "bottom_center";
+        case 5: return "bottom_right";
+        default: return "top_left";
+    }
 }
 
 // ── Swapchain map (mutex-guarded) ──────────────────────────────────────
@@ -1123,7 +1155,37 @@ static void draw_toasts() {
     auto* viewport       = ImGui::GetMainViewport();
     const ImVec2 vp_pos  = viewport->WorkPos;
     const ImVec2 vp_size = viewport->WorkSize;
-    float y              = vp_pos.y + vp_size.y - 28.0f;
+    const int pos_idx = std::clamp(g_ui.notification_position_idx, 0, 5);
+    const bool top = pos_idx <= 2;
+    ImVec2 anchor;
+    ImVec2 pivot;
+    switch (pos_idx) {
+        case 1:
+            anchor = ImVec2(vp_pos.x + vp_size.x * 0.5f, vp_pos.y + 28.0f);
+            pivot  = ImVec2(0.5f, 0.0f);
+            break;
+        case 2:
+            anchor = ImVec2(vp_pos.x + vp_size.x - 18.0f, vp_pos.y + 28.0f);
+            pivot  = ImVec2(1.0f, 0.0f);
+            break;
+        case 3:
+            anchor = ImVec2(vp_pos.x + 18.0f, vp_pos.y + vp_size.y - 28.0f);
+            pivot  = ImVec2(0.0f, 1.0f);
+            break;
+        case 4:
+            anchor = ImVec2(vp_pos.x + vp_size.x * 0.5f, vp_pos.y + vp_size.y - 28.0f);
+            pivot  = ImVec2(0.5f, 1.0f);
+            break;
+        case 5:
+            anchor = ImVec2(vp_pos.x + vp_size.x - 18.0f, vp_pos.y + vp_size.y - 28.0f);
+            pivot  = ImVec2(1.0f, 1.0f);
+            break;
+        default:
+            anchor = ImVec2(vp_pos.x + 18.0f, vp_pos.y + 28.0f);
+            pivot  = ImVec2(0.0f, 0.0f);
+            break;
+    }
+    float y = anchor.y;
     int idx              = 0;
 
     for (auto it = g_ui.toasts.rbegin(); it != g_ui.toasts.rend(); ++it, ++idx) {
@@ -1135,8 +1197,7 @@ static void draw_toasts() {
         if (alpha <= 0.0f) continue;
 
         ImGui::SetNextWindowBgAlpha(0.88f * alpha);
-        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 18.0f, y), ImGuiCond_Always,
-                                ImVec2(1.0f, 1.0f));
+        ImGui::SetNextWindowPos(ImVec2(anchor.x, y), ImGuiCond_Always, pivot);
         ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(420.0f, 180.0f));
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                  ImGuiWindowFlags_NoSavedSettings |
@@ -1153,7 +1214,7 @@ static void draw_toasts() {
             ImGui::TextWrapped("%s", it->detail.c_str());
         }
         ImGui::PopTextWrapPos();
-        y -= ImGui::GetWindowSize().y + 8.0f;
+        y += (top ? 1.0f : -1.0f) * (ImGui::GetWindowSize().y + 8.0f);
         ImGui::End();
         ImGui::PopStyleVar(2);
     }
@@ -1830,20 +1891,34 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
 
     if (ImGui::Begin("##Settings", nullptr, setFlags)) {
         draw_bordered_background();
+        const auto cfg = g_ctx.store->snapshot();
 
         ImGui::Text("Theme");
+        g_ui.theme_idx = theme_index(cfg.overlay.theme);
         if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
                          IM_ARRAYSIZE(g_ui.theme_names))) {
             ApplyTheme(g_ui.theme_idx);
+            const char* theme = theme_value(g_ui.theme_idx);
+            g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
         }
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
+        g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
         bool hud = g_ui.hud_visible;
         if (ImGui::Checkbox("Show Music Notifications", &hud)) {
             g_ui.hud_visible = hud;
+            g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = hud; });
+        }
+        g_ui.notification_position_idx =
+            notification_position_index(cfg.overlay.notification_position);
+        if (ImGui::Combo("Position", &g_ui.notification_position_idx,
+                         g_ui.notification_position_names,
+                         IM_ARRAYSIZE(g_ui.notification_position_names))) {
+            const char* position = notification_position_value(g_ui.notification_position_idx);
+            g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
         }
 
         ImGui::Spacing();
@@ -3207,6 +3282,10 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     g_ctx.bridge    = &bridge;
     g_ctx.store     = &store;
     g_ctx.dualsense = dualsense;
+    const auto cfg = store.snapshot();
+    g_ui.theme_idx = theme_index(cfg.overlay.theme);
+    g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
+    g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
     start_action_worker();
 
     log::info("[overlay] starting dummy Direct3D 12 device context resolver...");

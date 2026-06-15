@@ -23,6 +23,12 @@ struct AudioConfig {
     bool force_stereo_audio = true; // off => mono + FMOD_2D (clean 3D spatialisation)
 };
 
+struct OverlayConfig {
+    std::string theme = "bess_dark";
+    bool music_notifications_enabled = true;
+    std::string notification_position = "top_left";
+};
+
 struct DualSenseConfig {
     bool enabled = false;
     bool external_helper = false;
@@ -95,6 +101,7 @@ struct Config {
     GeneralConfig general;
     ShoutcastConfig shoutcast;
     AudioConfig audio;
+    OverlayConfig overlay;
     DualSenseConfig dualsense;
 };
 

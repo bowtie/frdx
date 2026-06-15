@@ -17,6 +17,11 @@ presets            = []                          # e.g. ["http://server:8000/str
 output_gain = 1.0
 force_stereo_audio = true   # off => mono + FMOD_2D (clean 3D spatialisation)
 
+[overlay]
+theme = "bess_dark"              # bess_dark, tokyo_night
+music_notifications_enabled = true
+notification_position = "top_left" # top_left, top_center, top_right, bottom_left, bottom_center, bottom_right
+
 [dualsense]
 enabled = false             # native HID adaptive triggers; set Forza Data Out to this UDP port
 udp_port = 5300
