@@ -15,6 +15,7 @@ endif()
 if(MSVC)
     add_compile_options(/W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc /wd4324)
     add_compile_options("$<$<CONFIG:Release>:/MD;/O2;/Gy;/Gw>")
+    set_source_files_properties(third_party/imanim/im_anim.cpp PROPERTIES COMPILE_OPTIONS /W0)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         add_compile_options(-Wthread-safety)
     else()
@@ -64,6 +65,7 @@ add_library(version SHARED
 
     # ImGui Animated
     third_party/imgui-animated/imgui_animated.cpp
+    third_party/imanim/im_anim.cpp
 )
 
 target_include_directories(version PRIVATE
@@ -75,6 +77,7 @@ target_include_directories(version PRIVATE
     third_party/minhook
     third_party/stb
     third_party/imgui-animated
+    third_party/imanim
     third_party/hidapi
     third_party/hidapi/hidapi
 )
@@ -131,6 +134,7 @@ add_executable(frdx_sandbox
 
     # ImGui Animated
     third_party/imgui-animated/imgui_animated.cpp
+    third_party/imanim/im_anim.cpp
 )
 
 target_include_directories(frdx_sandbox PRIVATE
@@ -142,6 +146,7 @@ target_include_directories(frdx_sandbox PRIVATE
     third_party/minhook
     third_party/stb
     third_party/imgui-animated
+    third_party/imanim
     third_party/hidapi
     third_party/hidapi/hidapi
 )

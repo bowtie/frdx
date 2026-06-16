@@ -21,12 +21,12 @@
       },
       {
         "id": "natsukashii",
-        "name": "J-Pop Sakura 懐かしい",
+        "name": "J-Pop Sakura",
         "url": "https://quincy.torontocast.com/SakuraN"
       },
       {
         "id": "jpop_kawaii",
-        "name": "J-Pop Powerplay Kawaii",
+        "name": "J-Pop Kawaii",
         "url": "https://kathy.torontocast.com/kawaii"
       },
       {
@@ -152,7 +152,7 @@
     "streams": [
       {
         "id": "main",
-        "name": "Anime Music (allegedly)",
+        "name": "Your weeaboo station",
         "url": "https://r-a-d.io/main"
       }
     ]

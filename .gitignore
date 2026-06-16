@@ -11,5 +11,6 @@ project_dump.md
 qwen.ps1
 
 # Downloaded by scripts\get-deps.ps1
-third_party/
-
+third_party/*
+!third_party/imanim/
+!third_party/imanim/**

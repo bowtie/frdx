@@ -173,7 +173,7 @@ private:
                        const StationMetadataWebSocketFilter& filter,
                        StationMetadataWebSocketHeartbeat hb, uint64_t metadata_epoch,
                        const std::stop_token& stop); // WebSocket metadata loop body
-    void queue_timed_metadata_locked(TrackInfo info, int64_t now_ms, uint64_t metadata_epoch)
+    bool queue_timed_metadata_locked(TrackInfo info, int64_t now_ms, uint64_t metadata_epoch)
         FRDX_REQUIRES(mu_);
     void apply_pending_metadata_locked(const char* reason) FRDX_REQUIRES(mu_);
     void clear_pending_metadata_locked() FRDX_REQUIRES(mu_);
@@ -202,6 +202,7 @@ private:
     int64_t quiet_started_ms_        FRDX_GUARDED_BY(mu_) = 0;
     uint64_t pending_info_epoch_     FRDX_GUARDED_BY(mu_) = 0;
     bool pending_info_valid_         FRDX_GUARDED_BY(mu_) = false;
+    bool metadata_epoch_has_track_   FRDX_GUARDED_BY(mu_) = false;
     std::atomic<uint64_t> position_ms_{0};
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
 

@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cmath>
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -36,6 +37,14 @@
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx12.h>
 #include <imgui_animated.h>
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#include <im_anim.h>
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -198,6 +207,7 @@ struct UiState {
     std::atomic<bool> mouse_capture{false};
     bool is_init = false;
     bool cursor_visible = true;
+    std::chrono::steady_clock::time_point cursor_hidden_candidate_since{};
     std::chrono::steady_clock::time_point cursor_hidden_since{};
     float interactive_alpha = 1.0f;
     float interactive_draw_alpha = 1.0f;
@@ -222,6 +232,10 @@ struct UiState {
     StationComboCache combo_cache;
     int combo_sel    = 0;
     bool combo_dirty = true;
+    int combo_anim_sel = -1;
+    int combo_switch_dir = 1;
+    float combo_switch_anim = 1.0f;
+    std::string combo_prev_label;
 
     std::vector<std::string> console_lines;
     std::vector<ConsoleLineKind> console_line_kinds;
@@ -236,13 +250,21 @@ struct UiState {
     bool dualsense_devices_dirty     = true;
     bool dualsense_reset_armed       = false;
     float settings_anim              = 0.0f;
+    float settings_content_height    = 220.0f;
     float dualsense_anim             = 0.0f;
     float stations_anim              = 0.0f;
+    float console_anim               = 0.0f;
     bool stations_expanded           = false;
-    bool stations_focus_active_on_open = false;
     float stations_content_height    = 300.0f;
     bool stations_overflow           = false;
     int dualsense_tab                = 0;
+    float dualsense_tab_content_anim = 1.0f;
+    bool dualsense_tab_indicator_ready = false;
+    float dualsense_tab_indicator_from_x = 0.0f;
+    float dualsense_tab_indicator_from_w = 0.0f;
+    float dualsense_tab_indicator_to_x   = 0.0f;
+    float dualsense_tab_indicator_to_w   = 0.0f;
+    float dualsense_tab_indicator_anim   = 1.0f;
     bool dualsense_settings_expanded = false;
     float dualsense_tab_height[3]    = {300.0f, 300.0f, 320.0f};
     bool dualsense_tab_overflow[3]   = {false, false, false};
@@ -274,22 +296,34 @@ static float ease_smootherstep(float t) noexcept {
 }
 
 static float update_interactive_overlay_alpha() {
-    g_ui.cursor_visible = system_cursor_visible();
+    const bool raw_cursor_visible = system_cursor_visible();
+    const auto now               = std::chrono::steady_clock::now();
+    if (raw_cursor_visible) {
+        g_ui.cursor_hidden_candidate_since = {};
+        g_ui.cursor_visible = true;
+    } else {
+        if (g_ui.cursor_hidden_candidate_since == std::chrono::steady_clock::time_point{}) {
+            g_ui.cursor_hidden_candidate_since = now;
+        }
+        g_ui.cursor_visible =
+            now - g_ui.cursor_hidden_candidate_since < std::chrono::milliseconds(250);
+    }
+
     if (g_ui.cursor_visible) {
         g_ui.cursor_hidden_since = {};
         g_ui.cursor_child_close_elapsed = false;
         g_ui.cursor_hide_delay_elapsed = false;
         g_ui.cursor_hide_closed_children = false;
     } else if (g_ui.cursor_hidden_since == std::chrono::steady_clock::time_point{}) {
-        g_ui.cursor_hidden_since = std::chrono::steady_clock::now();
+        g_ui.cursor_hidden_since = now;
     }
 
     g_ui.cursor_child_close_elapsed =
         !g_ui.cursor_visible &&
-        std::chrono::steady_clock::now() - g_ui.cursor_hidden_since >= std::chrono::seconds(1);
+        now - g_ui.cursor_hidden_since >= std::chrono::seconds(1);
     g_ui.cursor_hide_delay_elapsed =
         !g_ui.cursor_visible &&
-        std::chrono::steady_clock::now() - g_ui.cursor_hidden_since >= std::chrono::seconds(2);
+        now - g_ui.cursor_hidden_since >= std::chrono::seconds(2);
     const float target = g_ui.cursor_hide_delay_elapsed ? 0.0f : 1.0f;
     const float dt      = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
     const float duration = g_ui.cursor_visible ? 0.45f : 0.75f;
@@ -304,8 +338,7 @@ static float update_interactive_overlay_alpha() {
 }
 
 static bool should_draw_imgui_cursor() noexcept {
-    return g_ui.cursor_visible && g_ui.interactive_alpha > 0.05f &&
-           g_ui.mouse_capture.load(std::memory_order_acquire);
+    return false;
 }
 
 static bool has_visible_toasts() {
@@ -1201,6 +1234,40 @@ static ImVec4 toast_color(ToastKind kind) {
     return ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
 }
 
+static bool is_status_artist(std::string_view artist) noexcept {
+    return artist.empty() || artist == "Select a station" || artist == "Nothing playing" ||
+           artist == "Attempting to reconnect to station" ||
+           artist == "Unable to reach this station" || artist == "Lost connection to station";
+}
+
+static bool is_station_display_track(IAudioSource* active, std::string_view title,
+                                     std::string_view artist) {
+    if (!active || active->type() != SourceType::shoutcast) return false;
+    auto* sc = static_cast<sources::ShoutcastSource*>(active);
+    const auto [active_station, active_stream] = sc->active_station_stream();
+    for (const auto& station : sc->stations_nolock()) {
+        if (station.id != active_station) continue;
+        if (title == station.name) return true;
+        for (const auto& stream : station.streams) {
+            if (stream.id == active_stream &&
+                (artist == stream.name || title == stream.name)) {
+                return true;
+            }
+        }
+        break;
+    }
+    return false;
+}
+
+static bool should_notify_song_change(IAudioSource* active, const TrackInfo& track,
+                                      std::string_view title,
+                                      std::string_view artist) {
+    if (!active || title.empty() || is_status_artist(artist)) return false;
+    if (track.title.empty()) return false;
+    if (is_station_display_track(active, title, artist)) return false;
+    return true;
+}
+
 static void draw_toasts() {
     const auto now = std::chrono::steady_clock::now();
     while (!g_ui.toasts.empty() &&
@@ -1215,6 +1282,9 @@ static void draw_toasts() {
     const ImVec2 vp_size = viewport->WorkSize;
     const int pos_idx = std::clamp(g_ui.notification_position_idx, 0, 5);
     const bool top = pos_idx <= 2;
+    const bool left = pos_idx == 0 || pos_idx == 3;
+    const bool center = pos_idx == 1 || pos_idx == 4;
+    const bool right = pos_idx == 2 || pos_idx == 5;
     ImVec2 anchor;
     ImVec2 pivot;
     switch (pos_idx) {
@@ -1249,13 +1319,25 @@ static void draw_toasts() {
     for (auto it = g_ui.toasts.rbegin(); it != g_ui.toasts.rend(); ++it, ++idx) {
         const float age =
             std::chrono::duration<float>(now - it->created).count();
-        const float fade_in  = std::clamp(age / 0.45f, 0.0f, 1.0f);
-        const float fade_out = std::clamp((it->lifetime - age) / 0.85f, 0.0f, 1.0f);
-        const float alpha    = ease_smootherstep(std::min(fade_in, fade_out));
+        const float enter_t = std::clamp(age / 0.34f, 0.0f, 1.0f);
+        const float exit_t  = std::clamp((it->lifetime - age) / 0.36f, 0.0f, 1.0f);
+        const float enter   = iam_eval_preset(iam_ease_out_back, enter_t);
+        const float exit    = iam_eval_preset(iam_ease_out_quad, exit_t);
+        const float alpha   = std::clamp(std::min(enter_t, exit), 0.0f, 1.0f);
         if (alpha <= 0.0f) continue;
 
+        ImVec2 slide{};
+        if (center) {
+            slide.y = (top ? -1.0f : 1.0f) * (1.0f - enter) * 44.0f;
+        } else if (left) {
+            slide.x = -(1.0f - enter) * 72.0f;
+        } else if (right) {
+            slide.x = (1.0f - enter) * 72.0f;
+        }
+        slide.y += (top ? 1.0f : -1.0f) * (1.0f - enter) * 6.0f * static_cast<float>(idx);
+
         ImGui::SetNextWindowBgAlpha(0.88f * alpha);
-        ImGui::SetNextWindowPos(ImVec2(anchor.x, y), ImGuiCond_Always, pivot);
+        ImGui::SetNextWindowPos(ImVec2(anchor.x + slide.x, y + slide.y), ImGuiCond_Always, pivot);
         ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(420.0f, 180.0f));
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                  ImGuiWindowFlags_NoSavedSettings |
@@ -1278,32 +1360,15 @@ static void draw_toasts() {
     }
 }
 
-// Shared helper: draws a rounded, filled background + border with only bottom
-// corners rounded (top corners are left sharp, blending into the transparent
-// title bar).  Must be called inside a Begin() / End() pair.
-static void draw_bordered_background(float rounding = 6.0f) {
-    auto* wdl = ImGui::GetWindowDrawList();
-    auto* fdl = ImGui::GetForegroundDrawList();
-    ImVec2 p  = ImGui::GetWindowPos();
-    ImVec2 sz = ImGui::GetWindowSize();
-    const ImVec2 max(p.x + sz.x, p.y + sz.y);
-    ImU32 bg  = ImGui::GetColorU32(ImGuiCol_WindowBg, 0.82f);
-    ImU32 brd = ImGui::GetColorU32(ImGuiCol_Border);
-    wdl->AddRectFilled(p, max, bg, rounding);
-    // Clip 1 px at the top so the top edge is invisible through the titlebar.
-    const float tb = ImGui::GetFrameHeight();
-    fdl->PushClipRect(ImVec2(p.x - 1.0f, p.y + tb), ImVec2(p.x + sz.x + 2.0f, p.y + sz.y + 2.0f));
-    fdl->AddRect(ImVec2(p.x - 1.0f, p.y + tb - 1.0f), ImVec2(p.x + sz.x + 1.0f, p.y + sz.y + 1.0f),
-                 brd, rounding, 1.0f, ImDrawFlags_RoundCornersBottom);
-    fdl->PopClipRect();
-}
-
 template <class Fn> void patch_dualsense(Fn&& fn) {
     g_ctx.store->patch([&](Config& c) { fn(c.dualsense); });
 }
 
 bool dualsense_toggle(const char* label, bool value, bool DualSenseConfig::* field) {
-    if (ImGui::Toggle(label, &value)) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+    const bool changed = ImGui::Toggle(label, &value);
+    ImGui::PopStyleVar();
+    if (changed) {
         patch_dualsense([=](DualSenseConfig& c) { c.*field = value; });
         return true;
     }
@@ -1312,11 +1377,11 @@ bool dualsense_toggle(const char* label, bool value, bool DualSenseConfig::* fie
 
 void dualsense_numeric_layout(float& row_x, float& label_w, float& slider_w, float& input_w) {
     const auto& style = ImGui::GetStyle();
-    row_x             = ImGui::GetCursorPosX() + 18.0f;
+    row_x             = ImGui::GetCursorPosX();
     const float row_r = ImGui::GetWindowContentRegionMax().x - 4.0f;
     const float avail = std::max(96.0f, row_r - row_x);
     input_w           = 62.0f;
-    label_w           = std::min(210.0f, std::max(175.0f, avail * 0.52f));
+    label_w           = std::min(215.0f, std::max(190.0f, avail * 0.58f));
     slider_w          = std::max(72.0f, avail - label_w - input_w - style.ItemSpacing.x * 2.0f);
 }
 
@@ -1417,10 +1482,23 @@ bool dualsense_slider_float(const char* label, float value, float min, float max
     return false;
 }
 
-bool dualsense_section_header(const char* label) {
+struct AccordionState {
+    ImGuiID content_height_id = 0;
+    bool open                = false;
+    bool visible             = false;
+    bool clipped             = false;
+    bool disabled            = false;
+    float amount             = 0.0f;
+    float content_start_y    = 0.0f;
+    float content_width      = 0.0f;
+    ImVec2 content_screen_pos{};
+};
+
+AccordionState dualsense_section_header(const char* label) {
     ImGui::PushID(label);
-    ImGuiID id = ImGui::GetID("open");
-    bool open  = ImGui::GetStateStorage()->GetBool(id, false);
+    ImGuiID id        = ImGui::GetID("open");
+    ImGuiID anim_id   = ImGui::GetID("accordion_amount");
+    bool open         = ImGui::GetStateStorage()->GetBool(id, false);
 
     const auto& style  = ImGui::GetStyle();
     const float inset  = 4.0f;
@@ -1433,29 +1511,93 @@ bool dualsense_section_header(const char* label) {
         ImGui::GetStateStorage()->SetBool(id, open);
     }
 
+    float raw_amount = ImGui::GetStateStorage()->GetFloat(anim_id, open ? 1.0f : 0.0f);
+    const float dir  = open ? 1.0f : -1.0f;
+    raw_amount = std::clamp(raw_amount + dir * ImGui::GetIO().DeltaTime / 0.32f, 0.0f, 1.0f);
+    ImGui::GetStateStorage()->SetFloat(anim_id, raw_amount);
+    const float amount = iam_eval_preset(iam_ease_out_cubic, raw_amount);
+
     const bool hovered = ImGui::IsItemHovered();
     const bool held    = ImGui::IsItemActive();
     const ImU32 bg     = ImGui::GetColorU32(held      ? ImGuiCol_HeaderActive
                                             : hovered ? ImGuiCol_HeaderHovered
                                                       : ImGuiCol_Header);
     const ImU32 text   = ImGui::GetColorU32(ImGuiCol_Text);
+    const ImU32 arrow  = ImGui::GetColorU32(ImGuiCol_TextDisabled);
     const ImVec2 min   = ImGui::GetItemRectMin();
     const ImVec2 max   = ImGui::GetItemRectMax();
     auto* dl           = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(min, max, bg, style.FrameRounding);
-    dl->AddText(ImVec2(min.x + style.FramePadding.x, min.y + style.FramePadding.y), text,
-                open ? "\xE2\x96\xBE" : "\xE2\x96\xB8");
+    dl->AddRectFilled(min, max, bg, style.FrameRounding, ImDrawFlags_RoundCornersAll);
+
+    const ImVec2 arrow_center(min.x + style.FramePadding.x + 8.0f, min.y + height * 0.5f);
+    const float arrow_size = 5.5f;
+    const float angle      = amount * 1.57079632679f;
+    const float s          = std::sin(angle);
+    const float c          = std::cos(angle);
+    const auto rotate_point = [&](ImVec2 p) {
+        return ImVec2(arrow_center.x + p.x * c - p.y * s,
+                      arrow_center.y + p.x * s + p.y * c);
+    };
+    dl->AddTriangleFilled(rotate_point(ImVec2(-arrow_size * 0.45f, -arrow_size)),
+                          rotate_point(ImVec2(-arrow_size * 0.45f, arrow_size)),
+                          rotate_point(ImVec2(arrow_size * 0.75f, 0.0f)), arrow);
     dl->AddText(ImVec2(min.x + style.FramePadding.x + 18.0f, min.y + style.FramePadding.y), text,
                 label);
 
+    AccordionState state;
+    state.content_height_id = ImGui::GetID("content_height");
+    state.open              = open;
+    state.amount            = amount;
+    state.visible           = open || amount > 0.01f;
+    state.content_width     = width;
     ImGui::PopID();
-    return open;
+    return state;
 }
 
-void set_dualsense_section_open(const char* label, bool open) {
-    ImGui::PushID(label);
-    ImGui::GetStateStorage()->SetBool(ImGui::GetID("open"), open);
-    ImGui::PopID();
+bool dualsense_section_content_begin(AccordionState& state) {
+    if (!state.visible) return false;
+
+    const auto& style = ImGui::GetStyle();
+    state.content_screen_pos = ImGui::GetCursorScreenPos();
+    state.content_start_y    = ImGui::GetCursorPosY();
+
+    const float cached_h = std::max(24.0f, ImGui::GetStateStorage()->GetFloat(
+                                               state.content_height_id, 32.0f));
+    const float clip_h = std::max(0.0f, cached_h * std::clamp(state.amount, 0.0f, 1.0f));
+    if (state.amount < 0.995f) {
+        ImGui::PushClipRect(
+            state.content_screen_pos,
+            ImVec2(state.content_screen_pos.x + state.content_width,
+                   state.content_screen_pos.y + clip_h),
+            true);
+        state.clipped = true;
+    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
+                        ImGui::GetStyle().Alpha * std::clamp(state.amount, 0.0f, 1.0f));
+    if (!state.open) {
+        ImGui::BeginDisabled();
+        state.disabled = true;
+    }
+    ImGui::Indent(style.FramePadding.x + 6.0f);
+    return true;
+}
+
+void dualsense_section_content_end(AccordionState& state) {
+    const auto& style = ImGui::GetStyle();
+    ImGui::Unindent(style.FramePadding.x + 6.0f);
+    if (state.disabled) ImGui::EndDisabled();
+
+    const float measured_h = std::max(0.0f, ImGui::GetCursorPosY() - state.content_start_y);
+    if (measured_h > 1.0f) ImGui::GetStateStorage()->SetFloat(state.content_height_id, measured_h);
+    const float visible_h = measured_h * std::clamp(state.amount, 0.0f, 1.0f);
+
+    ImGui::PopStyleVar();
+    if (state.clipped) ImGui::PopClipRect();
+    if (state.amount < 0.995f) {
+        ImGui::SetCursorPosY(state.content_start_y + visible_h);
+        ImGui::Dummy(ImVec2(0.0f, 0.0f));
+    }
 }
 
 static void refresh_dualsense_devices() {
@@ -1626,18 +1768,21 @@ static void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
 static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
     bool any_expanded = false;
 
-    if (dualsense_section_header("Pedal Dead Zones")) {
-        any_expanded = true;
+    auto pedal_dead_zones = dualsense_section_header("Pedal Dead Zones");
+    if (dualsense_section_content_begin(pedal_dead_zones)) {
+        any_expanded = any_expanded || pedal_dead_zones.open;
         ImGui::PushID("Pedal Dead Zones");
         dualsense_slider_int("Gas Trigger Dead Zone", ds.accel_deadzone, 0, 255,
                              &DualSenseConfig::accel_deadzone);
         dualsense_slider_int("Brake Trigger Dead Zone", ds.brake_deadzone, 0, 255,
                              &DualSenseConfig::brake_deadzone);
         ImGui::PopID();
+        dualsense_section_content_end(pedal_dead_zones);
     }
 
-    if (dualsense_section_header("Left Trigger - Brake Force")) {
-        any_expanded = true;
+    auto brake_force = dualsense_section_header("Left Trigger - Brake Force");
+    if (dualsense_section_content_begin(brake_force)) {
+        any_expanded = any_expanded || brake_force.open;
         ImGui::PushID("Left Trigger - Brake Force");
         dualsense_slider_int("Resting Stiffness", ds.brake_baseline_force, 0, 255,
                              &DualSenseConfig::brake_baseline_force);
@@ -1648,10 +1793,12 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_slider_int("Handbrake Extra Stiffness", ds.handbrake_bonus, 0, 255,
                              &DualSenseConfig::handbrake_bonus);
         ImGui::PopID();
+        dualsense_section_content_end(brake_force);
     }
 
-    if (dualsense_section_header("Left Trigger - Static Wall (optional)")) {
-        any_expanded = true;
+    auto brake_wall = dualsense_section_header("Left Trigger - Static Wall (optional)");
+    if (dualsense_section_content_begin(brake_wall)) {
+        any_expanded = any_expanded || brake_wall.open;
         ImGui::PushID("Left Trigger - Static Wall (optional)");
         if (!ds.enable_brake_static_wall) ImGui::BeginDisabled();
         dualsense_slider_int("Wall Position", ds.brake_static_wall_at, 0, 255,
@@ -1660,10 +1807,12 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
                              &DualSenseConfig::brake_static_wall_force);
         if (!ds.enable_brake_static_wall) ImGui::EndDisabled();
         ImGui::PopID();
+        dualsense_section_content_end(brake_wall);
     }
 
-    if (dualsense_section_header("Right Trigger - Gas Force")) {
-        any_expanded = true;
+    auto gas_force = dualsense_section_header("Right Trigger - Gas Force");
+    if (dualsense_section_content_begin(gas_force)) {
+        any_expanded = any_expanded || gas_force.open;
         ImGui::PushID("Right Trigger - Gas Force");
         dualsense_slider_int("Resting Stiffness", ds.throttle_baseline_force, 0, 255,
                              &DualSenseConfig::throttle_baseline_force);
@@ -1672,10 +1821,12 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_slider_float("Stiffness Curve Shape", ds.throttle_curve, 0.1f, 20.0f,
                                &DualSenseConfig::throttle_curve);
         ImGui::PopID();
+        dualsense_section_content_end(gas_force);
     }
 
-    if (dualsense_section_header("ABS Rumble")) {
-        any_expanded = true;
+    auto abs_rumble = dualsense_section_header("ABS Rumble");
+    if (dualsense_section_content_begin(abs_rumble)) {
+        any_expanded = any_expanded || abs_rumble.open;
         ImGui::PushID("ABS Rumble");
         dualsense_slider_int("Only When Braking Harder Than", ds.abs_brake_threshold, 0, 255,
                              &DualSenseConfig::abs_brake_threshold);
@@ -1688,10 +1839,12 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_slider_int("Rumble Speed", ds.abs_freq, 0, 255, &DualSenseConfig::abs_freq);
         dualsense_slider_int("Rumble Strength", ds.abs_amp, 0, 255, &DualSenseConfig::abs_amp);
         ImGui::PopID();
+        dualsense_section_content_end(abs_rumble);
     }
 
-    if (dualsense_section_header("Redline Buzz")) {
-        any_expanded = true;
+    auto redline_buzz = dualsense_section_header("Redline Buzz");
+    if (dualsense_section_content_begin(redline_buzz)) {
+        any_expanded = any_expanded || redline_buzz.open;
         ImGui::PushID("Redline Buzz");
         dualsense_slider_float("Fire Near Redline At", ds.rev_limit_ratio, 0.0f, 1.0f,
                                &DualSenseConfig::rev_limit_ratio);
@@ -1702,26 +1855,32 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_slider_float("Buzz Hold Time", ds.rev_limit_hold_ms, 0.0f, 1000.0f,
                                &DualSenseConfig::rev_limit_hold_ms, "%.0f ms");
         ImGui::PopID();
+        dualsense_section_content_end(redline_buzz);
     }
 
-    if (dualsense_section_header("Wheelspin Buzz")) {
-        any_expanded = true;
+    auto wheelspin_buzz = dualsense_section_header("Wheelspin Buzz");
+    if (dualsense_section_content_begin(wheelspin_buzz)) {
+        any_expanded = any_expanded || wheelspin_buzz.open;
         ImGui::PushID("Wheelspin Buzz");
         dualsense_slider_int("Buzz Strength", ds.wheelspin_amp, 0, 255,
                              &DualSenseConfig::wheelspin_amp);
         ImGui::PopID();
+        dualsense_section_content_end(wheelspin_buzz);
     }
 
-    if (dualsense_section_header("Idle Buzz")) {
-        any_expanded = true;
+    auto idle_buzz = dualsense_section_header("Idle Buzz");
+    if (dualsense_section_content_begin(idle_buzz)) {
+        any_expanded = any_expanded || idle_buzz.open;
         ImGui::PushID("Idle Buzz");
         dualsense_slider_int("Idle Strength", ds.idle_amp_high, 0, 255,
                              &DualSenseConfig::idle_amp_high);
         ImGui::PopID();
+        dualsense_section_content_end(idle_buzz);
     }
 
-    if (dualsense_section_header("Gear Shift Thump")) {
-        any_expanded = true;
+    auto gear_shift = dualsense_section_header("Gear Shift Thump");
+    if (dualsense_section_content_begin(gear_shift)) {
+        any_expanded = any_expanded || gear_shift.open;
         ImGui::PushID("Gear Shift Thump");
         dualsense_slider_int("Thump Speed", ds.gear_shift_freq, 0, 255,
                              &DualSenseConfig::gear_shift_freq);
@@ -1730,6 +1889,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_slider_float("Thump Length", ds.gear_shift_duration_ms, 0.0f, 2000.0f,
                                &DualSenseConfig::gear_shift_duration_ms, "%.0f ms");
         ImGui::PopID();
+        dualsense_section_content_end(gear_shift);
     }
 
     return any_expanded;
@@ -1826,19 +1986,21 @@ static void draw_dualsense_controller_tab(const DualSenseConfig& ds) {
 
     ImGui::Separator();
 
-    const bool startup_open = dualsense_section_header("Startup");
-    if (startup_open) {
+    auto startup = dualsense_section_header("Startup");
+    if (dualsense_section_content_begin(startup)) {
         dualsense_toggle("Startup Pulse", ds.enable_startup_pulse,
                          &DualSenseConfig::enable_startup_pulse);
         dualsense_slider_int("Startup Force", ds.startup_pulse_force, 0, 255,
                              &DualSenseConfig::startup_pulse_force);
+        dualsense_section_content_end(startup);
     }
 
-    const bool reconnect_open = dualsense_section_header("Reconnect");
-    if (reconnect_open) {
+    auto reconnect = dualsense_section_header("Reconnect");
+    if (dualsense_section_content_begin(reconnect)) {
         dualsense_toggle("Auto Reconnect", ds.enable_reconnect, &DualSenseConfig::enable_reconnect);
         dualsense_slider_float("Reconnect Delay", ds.reconnect_interval_s, 0.1f, 60.0f,
                                &DualSenseConfig::reconnect_interval_s, "%.1f s");
+        dualsense_section_content_end(reconnect);
     }
 }
 
@@ -1869,33 +2031,144 @@ static void draw_dualsense_reset_button() {
     if (armed) ImGui::PopStyleColor(3);
 }
 
-static bool dualsense_tab_button(const char* label, int tab) {
-    const bool active = g_ui.dualsense_tab == tab;
-    if (active) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              ImGui::GetStyleColorVec4(ImGuiCol_TabHovered));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
+static bool draw_dualsense_tab_strip() {
+    constexpr int kTabCount = 3;
+    const char* labels[kTabCount] = {"Triggers", "Settings", "Controller"};
+
+    const float dt         = ImGui::GetIO().DeltaTime;
+    const float tab_h      = ImGui::GetFrameHeight() + 4.0f;
+    const float text_pad_x = 9.0f;
+    float tab_widths[kTabCount]{};
+    float total_w = 0.0f;
+    for (int i = 0; i < kTabCount; ++i) {
+        tab_widths[i] = ImGui::CalcTextSize(labels[i]).x + text_pad_x * 2.0f;
+        total_w += tab_widths[i];
     }
-    const bool clicked = ImGui::Button(label);
-    if (active) ImGui::PopStyleColor(3);
-    if (clicked) g_ui.dualsense_tab = tab;
-    return clicked;
+
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    auto* dl         = ImGui::GetWindowDrawList();
+    const float rounding = 5.0f;
+    dl->AddRectFilled(pos, ImVec2(pos.x + total_w, pos.y + tab_h),
+                      ImGui::GetColorU32(ImGuiCol_FrameBg, 0.54f), rounding,
+                      ImDrawFlags_RoundCornersTop);
+
+    const int active_tab = std::clamp(g_ui.dualsense_tab, 0, kTabCount - 1);
+    float target_offset  = 0.0f;
+    for (int i = 0; i < active_tab; ++i) target_offset += tab_widths[i];
+    const float target_w = tab_widths[active_tab];
+
+    if (!g_ui.dualsense_tab_indicator_ready) {
+        g_ui.dualsense_tab_indicator_ready  = true;
+        g_ui.dualsense_tab_indicator_from_x = target_offset;
+        g_ui.dualsense_tab_indicator_from_w = target_w;
+        g_ui.dualsense_tab_indicator_to_x   = target_offset;
+        g_ui.dualsense_tab_indicator_to_w   = target_w;
+        g_ui.dualsense_tab_indicator_anim   = 1.0f;
+    } else if (std::abs(g_ui.dualsense_tab_indicator_to_x - target_offset) > 0.5f ||
+               std::abs(g_ui.dualsense_tab_indicator_to_w - target_w) > 0.5f) {
+        const float t = iam_eval_preset(iam_ease_out_cubic, g_ui.dualsense_tab_indicator_anim);
+        g_ui.dualsense_tab_indicator_from_x =
+            g_ui.dualsense_tab_indicator_from_x +
+            (g_ui.dualsense_tab_indicator_to_x - g_ui.dualsense_tab_indicator_from_x) * t;
+        g_ui.dualsense_tab_indicator_from_w =
+            g_ui.dualsense_tab_indicator_from_w +
+            (g_ui.dualsense_tab_indicator_to_w - g_ui.dualsense_tab_indicator_from_w) * t;
+        g_ui.dualsense_tab_indicator_to_x = target_offset;
+        g_ui.dualsense_tab_indicator_to_w = target_w;
+        g_ui.dualsense_tab_indicator_anim = 0.0f;
+    }
+
+    g_ui.dualsense_tab_indicator_anim =
+        std::min(1.0f, g_ui.dualsense_tab_indicator_anim + dt / 0.38f);
+    const float indicator_t = iam_eval_preset(iam_ease_out_cubic, g_ui.dualsense_tab_indicator_anim);
+    const float indicator_x =
+        pos.x + g_ui.dualsense_tab_indicator_from_x +
+        (g_ui.dualsense_tab_indicator_to_x - g_ui.dualsense_tab_indicator_from_x) * indicator_t;
+    const float indicator_w =
+        g_ui.dualsense_tab_indicator_from_w +
+        (g_ui.dualsense_tab_indicator_to_w - g_ui.dualsense_tab_indicator_from_w) * indicator_t;
+
+    ImGui::PushID("dualsense_tab_strip");
+    ImGui::InvisibleButton("##strip", ImVec2(total_w, tab_h));
+    const bool strip_hovered = ImGui::IsItemHovered();
+    bool changed = false;
+    if (ImGui::IsItemClicked()) {
+        const float local_x = ImGui::GetMousePos().x - pos.x;
+        float edge = 0.0f;
+        for (int i = 0; i < kTabCount; ++i) {
+            edge += tab_widths[i];
+            if (local_x <= edge) {
+                changed = g_ui.dualsense_tab != i;
+                g_ui.dualsense_tab = i;
+                break;
+            }
+        }
+    }
+
+    float x      = pos.x;
+    const float mouse_x = ImGui::GetMousePos().x;
+    for (int i = 0; i < kTabCount; ++i) {
+        const ImVec2 tab_min(x, pos.y);
+        const ImVec2 tab_size(tab_widths[i], tab_h);
+        ImGui::PushID(i);
+        const bool hovered = strip_hovered && mouse_x >= tab_min.x &&
+                             mouse_x < tab_min.x + tab_size.x;
+        const float target_alpha =
+            i == g_ui.dualsense_tab ? 1.0f : (hovered ? 0.82f : 0.52f);
+        const float text_alpha =
+            iam_tween_float(ImGui::GetID("label"), 0x61310003u, target_alpha, 0.15f,
+                            iam_ease_preset(iam_ease_out_cubic), iam_policy_crossfade, dt,
+                            target_alpha);
+
+        const ImVec2 text_size = ImGui::CalcTextSize(labels[i]);
+        const ImVec2 text_pos(tab_min.x + (tab_size.x - text_size.x) * 0.5f,
+                              tab_min.y + (tab_size.y - text_size.y) * 0.5f);
+        ImVec4 text_col = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        text_col.w *= text_alpha;
+        dl->AddText(text_pos, ImGui::GetColorU32(text_col), labels[i]);
+        ImGui::PopID();
+        x += tab_widths[i];
+    }
+
+    const float indicator_y = pos.y + tab_h - 3.0f;
+    dl->AddRectFilled(ImVec2(indicator_x + 8.0f, indicator_y),
+                      ImVec2(indicator_x + indicator_w - 8.0f, indicator_y + 3.0f),
+                      ImGui::GetColorU32(ImGuiCol_SliderGrabActive), 2.0f);
+    ImGui::PopID();
+    return changed;
+}
+
+static void draw_dualsense_tab_header(const DualSenseConfig& ds) {
+    const float row_y     = ImGui::GetCursorPosY();
+    const float content_w = ImGui::GetContentRegionAvail().x;
+    const float toggle_w  = 132.0f;
+    const bool same_row   = content_w >= 360.0f;
+    const float tab_h     = ImGui::GetFrameHeight() + 4.0f;
+    const float toggle_h  = ImGui::GetTextLineHeight() + 4.0f;
+
+    const bool tab_changed = draw_dualsense_tab_strip();
+    if (tab_changed) g_ui.dualsense_tab_content_anim = 0.0f;
+    const float after_tabs_y = ImGui::GetCursorPosY();
+
+    if (same_row) {
+        const float toggle_x = ImGui::GetWindowContentRegionMax().x - toggle_w;
+        const float toggle_y = row_y + std::max(0.0f, (tab_h - toggle_h) * 0.5f);
+        ImGui::SetCursorPos(ImVec2(toggle_x, toggle_y));
+    }
+    dualsense_toggle("Enable Triggers", ds.enabled, &DualSenseConfig::enabled);
+    const float after_toggle_y = ImGui::GetCursorPosY();
+    ImGui::SetCursorPosY(std::max(after_tabs_y, after_toggle_y));
 }
 
 static void draw_dualsense_settings(const DualSenseConfig& ds) {
-    dualsense_tab_button("Triggers", 0);
-    ImGui::SameLine(0.0f, 3.0f);
-    dualsense_tab_button("Settings", 1);
-    ImGui::SameLine(0.0f, 3.0f);
-    dualsense_tab_button("Controller", 2);
-
-    const float toggle_w = 148.0f;
-    const float toggle_x = ImGui::GetWindowContentRegionMax().x - toggle_w;
-    if (ImGui::GetCursorPosX() < toggle_x) ImGui::SameLine(toggle_x);
-    dualsense_toggle("Enable Triggers", ds.enabled, &DualSenseConfig::enabled);
+    draw_dualsense_tab_header(ds);
     ImGui::Separator();
 
+    g_ui.dualsense_tab_content_anim =
+        std::min(1.0f, g_ui.dualsense_tab_content_anim + ImGui::GetIO().DeltaTime / 0.30f);
+    const float content_alpha =
+        iam_eval_preset(iam_ease_out_cubic, g_ui.dualsense_tab_content_anim);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * content_alpha);
     if (g_ui.dualsense_tab == 0) {
         g_ui.dualsense_settings_expanded = false;
         draw_dualsense_controls_tab(ds);
@@ -1912,6 +2185,7 @@ static void draw_dualsense_settings(const DualSenseConfig& ds) {
         draw_dualsense_controller_tab(ds);
         if (!ds.enabled) ImGui::EndDisabled();
     }
+    ImGui::PopStyleVar();
 }
 
 // ── UI section: settings window ────────────────────────────────────────
@@ -1925,71 +2199,85 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
     }
 
     const float set_tb   = ImGui::GetFrameHeight();
+    const auto* vp       = ImGui::GetMainViewport();
     const float target_y = layout.pos.y + layout.size.y - set_tb;
-    const float slide_y  = target_y - (1.0f - eased) * 18.0f;
-    ImGui::SetNextWindowPos(ImVec2(layout.gear_right, slide_y), ImGuiCond_Always, ImVec2(1.0f, 0));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f, 0), ImVec2(520.0f, 700.0f));
-    ImGui::SetNextWindowBgAlpha(0.82f * eased * g_ui.interactive_draw_alpha);
+    const float vp_room  = std::max(180.0f, vp->WorkPos.y + vp->WorkSize.y - target_y - 8.0f);
+    const float target_w = 300.0f;
+    const float target_h = std::clamp(g_ui.settings_content_height, set_tb + 80.0f, vp_room);
+    const float current_h = std::max(set_tb + 4.0f, target_h * eased);
+    ImGui::SetNextWindowPos(ImVec2(layout.gear_right, target_y), ImGuiCond_Always,
+                            ImVec2(1.0f, 0));
+    ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(eased * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags setFlags =
-        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (g_ui.settings_content_height > target_h + 1.0f) {
+        setFlags |= ImGuiWindowFlags_AlwaysVerticalScrollbar;
+    } else {
+        setFlags |= ImGuiWindowFlags_NoScrollbar;
+    }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, setFlags)) {
-        draw_bordered_background();
-        const auto cfg = g_ctx.store->snapshot();
+        if (current_h > set_tb * 2.0f) {
+            const auto cfg = g_ctx.store->snapshot();
 
-        ImGui::Text("Theme");
-        g_ui.theme_idx = theme_index(cfg.overlay.theme);
-        if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
-                         IM_ARRAYSIZE(g_ui.theme_names))) {
-            ApplyTheme(g_ui.theme_idx);
-            const char* theme = theme_value(g_ui.theme_idx);
-            g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
+            ImGui::Text("Theme");
+            g_ui.theme_idx = theme_index(cfg.overlay.theme);
+            if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
+                             IM_ARRAYSIZE(g_ui.theme_names))) {
+                ApplyTheme(g_ui.theme_idx);
+                const char* theme = theme_value(g_ui.theme_idx);
+                g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
+            bool hud = g_ui.hud_visible;
+            if (ImGui::Checkbox("Show Music Notifications", &hud)) {
+                g_ui.hud_visible = hud;
+                g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = hud; });
+            }
+            g_ui.notification_position_idx =
+                notification_position_index(cfg.overlay.notification_position);
+            if (ImGui::Combo("Position", &g_ui.notification_position_idx,
+                             g_ui.notification_position_names,
+                             IM_ARRAYSIZE(g_ui.notification_position_names))) {
+                const char* position = notification_position_value(g_ui.notification_position_idx);
+                g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            bool stereo = g_ctx.bridge->force_stereo_audio();
+            if (ImGui::Checkbox("Force Stereo Audio", &stereo)) {
+                g_ctx.bridge->set_force_stereo_audio(stereo);
+                g_ctx.store->patch([&](Config& c) { c.audio.force_stereo_audio = stereo; });
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            g_ui.settings_content_height =
+                ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y * 0.35f;
         }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
-        bool hud = g_ui.hud_visible;
-        if (ImGui::Checkbox("Show Music Notifications", &hud)) {
-            g_ui.hud_visible = hud;
-            g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = hud; });
-        }
-        g_ui.notification_position_idx =
-            notification_position_index(cfg.overlay.notification_position);
-        if (ImGui::Combo("Position", &g_ui.notification_position_idx,
-                         g_ui.notification_position_names,
-                         IM_ARRAYSIZE(g_ui.notification_position_names))) {
-            const char* position = notification_position_value(g_ui.notification_position_idx);
-            g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        bool stereo = g_ctx.bridge->force_stereo_audio();
-        if (ImGui::Checkbox("Force Stereo Audio", &stereo)) {
-            g_ctx.bridge->set_force_stereo_audio(stereo);
-            g_ctx.store->patch([&](Config& c) { c.audio.force_stereo_audio = stereo; });
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
 
         // Close on click outside
         if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
@@ -2015,19 +2303,17 @@ static void draw_dualsense_window(const PlayerBarLayout& layout) {
     const auto* vp       = ImGui::GetMainViewport();
     const float win_top  = layout.pos.y + layout.size.y - set_tb;
     const float vp_room  = std::max(200.0f, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f);
-    const float target_w = std::clamp(layout.size.x - 28.0f, 320.0f, 480.0f);
+    const float target_w = std::clamp(layout.size.x - 68.0f, 400.0f, 500.0f);
     const int active_tab = std::clamp(g_ui.dualsense_tab, 0, 2);
     const float max_h    = std::min(active_tab == 1 ? 430.0f : vp_room, vp_room);
-    const float measured_target_h =
-        g_ui.dualsense_tab_height[active_tab] + (active_tab == 1 ? 1.0f : 0.0f);
+    const float measured_target_h = g_ui.dualsense_tab_height[active_tab];
     const float target_h  = std::clamp(measured_target_h, set_tb + 80.0f, max_h);
     const float current_h = std::max(set_tb + 4.0f, target_h * eased);
     const float target_x  = layout.pos.x + (layout.size.x - target_w) * 0.5f;
-    const float target_y  = layout.pos.y + layout.size.y - set_tb;
-    const float slide_y   = target_y - (1.0f - eased) * 18.0f;
-    ImGui::SetNextWindowPos(ImVec2(target_x, slide_y), ImGuiCond_Always);
+    const float target_y  = win_top;
+    ImGui::SetNextWindowPos(ImVec2(target_x, target_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.82f * eased * g_ui.interactive_draw_alpha);
+    ImGui::SetNextWindowBgAlpha(eased * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -2041,13 +2327,12 @@ static void draw_dualsense_window(const PlayerBarLayout& layout) {
     }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##DualSenseSettings", nullptr, flags)) {
-        draw_bordered_background();
         if (current_h > set_tb * 2.0f) {
             ImGui::PushItemWidth(180.0f);
             const auto cfg = g_ctx.store->snapshot();
@@ -2073,6 +2358,29 @@ static void draw_dualsense_window(const PlayerBarLayout& layout) {
     ImGui::End();
     ImGui::PopStyleColor(2);
     ImGui::PopStyleVar(3);
+}
+
+static void animate_station_combo_to(int next_idx, int dir) {
+    const int count = static_cast<int>(g_ui.combo_cache.names.size());
+    if (count <= 0) return;
+    next_idx = std::clamp(next_idx, 0, count - 1);
+    const int current_idx = std::clamp(g_ui.combo_sel, 0, count - 1);
+    if (next_idx == current_idx) return;
+
+    g_ui.combo_prev_label    = g_ui.combo_cache.names[static_cast<size_t>(current_idx)];
+    g_ui.combo_sel           = next_idx;
+    g_ui.combo_anim_sel      = next_idx;
+    g_ui.combo_switch_dir    = dir == 0 ? (next_idx > current_idx ? 1 : -1) : dir;
+    g_ui.combo_switch_anim   = 0.0f;
+    g_ui.combo_dirty         = false;
+}
+
+static void animate_station_combo_by(int dir) {
+    const int count = static_cast<int>(g_ui.combo_cache.names.size());
+    if (count <= 0) return;
+    const int current_idx = std::clamp(g_ui.combo_sel, 0, count - 1);
+    const int next_idx    = (current_idx + dir + count) % count;
+    animate_station_combo_to(next_idx, dir);
 }
 
 // ── UI section: player bar ─────────────────────────────────────────────
@@ -2158,12 +2466,64 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
                 std::clamp(g_ui.combo_sel, 0, static_cast<int>(g_ui.combo_cache.names.size()) - 1);
 
             const char* preview = g_ui.combo_cache.names[g_ui.combo_sel].c_str();
-            if (ImGui::ButtonScrollable(preview, ImVec2(130.0f, btn_h))) {
+            if (g_ui.combo_anim_sel != g_ui.combo_sel) {
+                if (g_ui.combo_anim_sel >= 0 &&
+                    g_ui.combo_anim_sel < static_cast<int>(g_ui.combo_cache.names.size())) {
+                    g_ui.combo_prev_label =
+                        g_ui.combo_cache.names[static_cast<size_t>(g_ui.combo_anim_sel)];
+                } else {
+                    g_ui.combo_prev_label.clear();
+                }
+                if (g_ui.combo_anim_sel >= 0 && g_ui.combo_switch_dir == 0) {
+                    g_ui.combo_switch_dir = g_ui.combo_sel > g_ui.combo_anim_sel ? 1 : -1;
+                }
+                g_ui.combo_anim_sel = g_ui.combo_sel;
+                g_ui.combo_switch_anim = 0.0f;
+            }
+            g_ui.combo_switch_anim =
+                std::min(1.0f, g_ui.combo_switch_anim + ImGui::GetIO().DeltaTime / 0.28f);
+            const float combo_t = iam_eval_preset(iam_ease_out_cubic, g_ui.combo_switch_anim);
+            const int combo_dir = g_ui.combo_switch_dir >= 0 ? 1 : -1;
+            const ImVec2 combo_size(130.0f, btn_h);
+            ImGui::InvisibleButton("##station_preview", combo_size);
+            const bool preview_clicked = ImGui::IsItemClicked();
+            const bool preview_hovered = ImGui::IsItemHovered();
+            const bool preview_held    = ImGui::IsItemActive();
+            auto* dl                   = ImGui::GetWindowDrawList();
+            const ImVec2 pmin          = ImGui::GetItemRectMin();
+            const ImVec2 pmax          = ImGui::GetItemRectMax();
+            const ImU32 preview_bg =
+                preview_held && preview_hovered
+                    ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
+                    : preview_hovered ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
+                                      : ImGui::GetColorU32(ImGuiCol_Button);
+            dl->AddRectFilled(pmin, pmax, preview_bg, ImGui::GetStyle().FrameRounding);
+            ImGui::PushClipRect(pmin, pmax, true);
+            const ImVec4 base_preview_col = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            const ImVec2 preview_text_size = ImGui::CalcTextSize(preview);
+            const float text_y = pmin.y + (combo_size.y - ImGui::GetTextLineHeight()) * 0.5f;
+            const float settled_x = pmin.x + (combo_size.x - preview_text_size.x) * 0.5f;
+            const float travel = 34.0f;
+            if (!g_ui.combo_prev_label.empty() && combo_t < 0.995f) {
+                ImVec4 old_col = base_preview_col;
+                old_col.w *= 1.0f - combo_t;
+                const ImVec2 old_size = ImGui::CalcTextSize(g_ui.combo_prev_label.c_str());
+                const float old_settled_x = pmin.x + (combo_size.x - old_size.x) * 0.5f;
+                const float old_x = old_settled_x - static_cast<float>(combo_dir) * combo_t * travel;
+                dl->AddText(ImVec2(old_x, text_y), ImGui::GetColorU32(old_col),
+                            g_ui.combo_prev_label.c_str());
+            }
+            ImVec4 preview_col = base_preview_col;
+            preview_col.w *= combo_t;
+            const float text_x =
+                settled_x + static_cast<float>(combo_dir) * (1.0f - combo_t) * travel;
+            dl->AddText(ImVec2(text_x, text_y), ImGui::GetColorU32(preview_col), preview);
+            ImGui::PopClipRect();
+            if (preview_clicked) {
                 const bool show = !g_ui.stations_visible;
                 if (show) {
                     close_player_children_except(false, false, true);
                     g_ui.stations_visible = true;
-                    g_ui.stations_focus_active_on_open = true;
                 } else {
                     g_ui.stations_visible  = false;
                     g_ui.stations_expanded = false;
@@ -2253,6 +2613,8 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
 
     // ── Transport buttons ──
     if (draw_icon_btn("##prev", "\u23EE") && active) {
+        g_ui.combo_switch_dir = -1;
+        animate_station_combo_by(-1);
         enqueue_action([active] {
             active->previous();
             save_active_shoutcast_station(active);
@@ -2273,6 +2635,8 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     }
     ImGui::SameLine(0, 3);
     if (draw_icon_btn("##next", "\u23ED") && active) {
+        g_ui.combo_switch_dir = 1;
+        animate_station_combo_by(1);
         enqueue_action([active] {
             active->next();
             save_active_shoutcast_station(active);
@@ -2412,17 +2776,15 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     const auto& st_style      = ImGui::GetStyle();
     const auto& stations      = sc_st->stations_nolock();
     const float station_count = static_cast<float>(stations.size());
-    const float collapsed_h   = st_tb + st_style.WindowPadding.y * 2.0f +
-                                station_count * ImGui::GetFrameHeight() +
-                                std::max(0.0f, station_count - 1.0f) * st_style.ItemSpacing.y;
-    const float expanded_h    = std::min(vp_room, std::max(collapsed_h, 360.0f));
-    const float target_h =
-        g_ui.stations_expanded ? expanded_h : std::clamp(collapsed_h, st_tb + 80.0f, vp_room);
+    const float header_h      = ImGui::GetFrameHeight();
+    const float collapsed_body_h =
+        st_style.WindowPadding.y * 2.4f + station_count * header_h +
+        std::max(0.0f, station_count - 1.0f) * st_style.ItemSpacing.y;
+    const float target_h = std::min(st_tb + collapsed_body_h, vp_room);
     const float current_h = std::max(st_tb + 4.0f, target_h * eased);
-    const float slide_y   = target_y - (1.0f - eased) * 18.0f;
-    ImGui::SetNextWindowPos(ImVec2(target_x, slide_y), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(target_x, target_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.82f * eased * g_ui.interactive_draw_alpha);
+    ImGui::SetNextWindowBgAlpha(eased * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags stFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -2435,15 +2797,13 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
 
     if (ImGui::Begin("##Stations", nullptr, stFlags)) {
-        draw_bordered_background();
-
         auto [active_st, active_str] = sc_st->active_station_stream();
         {
             frdx::ScopedLock lk{g_station_switch.mutex};
@@ -2456,13 +2816,9 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
         bool any_expanded = false;
         for (const auto& st : stations) {
             ImGui::PushID(station_idx++);
-            if (g_ui.stations_focus_active_on_open) {
-                set_dualsense_section_open(st.name.c_str(), st.id == active_st);
-            }
-            const bool station_open = dualsense_section_header(st.name.c_str());
-            any_expanded            = any_expanded || station_open;
-            if (station_open) {
-                ImGui::Indent(12.0f);
+            auto station_acc = dualsense_section_header(st.name.c_str());
+            any_expanded     = any_expanded || station_acc.open;
+            if (dualsense_section_content_begin(station_acc)) {
                 int stream_idx = 0;
                 for (const auto& str : st.streams) {
                     const bool is_act = (st.id == active_st && str.id == active_str);
@@ -2482,20 +2838,27 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
                     if (ImGui::GetCursorPosX() < play_x) ImGui::SameLine(play_x);
                     if (is_act) ImGui::BeginDisabled();
                     if (ImGui::Button("\u23F5", ImVec2(play_w, 0.0f))) {
+                        for (size_t combo_idx = 0; combo_idx < g_ui.combo_cache.sids.size();
+                             ++combo_idx) {
+                            if (g_ui.combo_cache.sids[combo_idx] == st.id &&
+                                g_ui.combo_cache.strids[combo_idx] == str.id) {
+                                animate_station_combo_to(static_cast<int>(combo_idx), 0);
+                                break;
+                            }
+                        }
                         enqueue_station_switch(st.id, str.id);
                     }
                     if (is_act) ImGui::EndDisabled();
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip(is_act ? "Now playing" : "Play");
                     ImGui::PopID();
                 }
-                ImGui::Unindent(12.0f);
+                dualsense_section_content_end(station_acc);
             }
             ImGui::PopID();
         }
-        g_ui.stations_focus_active_on_open = false;
         const float measured_h       = ImGui::GetCursorPosY() + st_style.WindowPadding.y * 0.35f;
         g_ui.stations_expanded       = any_expanded;
-        g_ui.stations_content_height = any_expanded ? measured_h : collapsed_h;
+        g_ui.stations_content_height = any_expanded ? measured_h : collapsed_body_h;
         g_ui.stations_overflow       = any_expanded && measured_h > target_h + 1.0f;
         // Close on click outside both browser and player bar
         if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
@@ -2532,7 +2895,12 @@ static ImVec4 console_line_color(ConsoleLineKind kind) {
 }
 
 static void draw_console_window() {
-    if (!g_ui.console_visible) return;
+    const bool opening = g_ui.console_visible;
+    const float eased  = advance_popup_anim(opening, g_ui.console_anim);
+    if (!opening && g_ui.console_anim < 0.01f) {
+        g_ui.console_anim = 0.0f;
+        return;
+    }
 
     auto* viewport       = ImGui::GetMainViewport();
     const ImVec2 vp_pos  = viewport->WorkPos;
@@ -2541,11 +2909,12 @@ static void draw_console_window() {
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f, vp_pos.y + vp_size.y - 16.0f),
                             ImGuiCond_FirstUseEver, ImVec2(1.0f, 1.0f));
     ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.94f * g_ui.interactive_draw_alpha);
+    ImGui::SetNextWindowBgAlpha(0.94f * eased * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     if (ImGui::Begin("FRDX Console", nullptr, flags)) {
         const uint64_t log_generation = log::recent_generation();
         if (g_ui.console_log_generation != log_generation) {
@@ -2609,7 +2978,7 @@ static void draw_console_window() {
         mark_overlay_mouse_region();
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
 }
 
 // ── Main UI orchestrator ────────────────────────────────────────────────
@@ -2642,7 +3011,8 @@ void draw_imgui_ui_impl() {
                                                               : s_cached_track.title;
             const std::string artist =
                 s_cached_track.artist == "Select a station" ? std::string{} : s_cached_track.artist;
-            if (g_ui.hud_visible && !s_cached_hud_title.empty() &&
+            if (g_ui.hud_visible &&
+                should_notify_song_change(active, s_cached_track, s_cached_hud_title, artist) &&
                 (active != s_toast_source || s_cached_hud_title != s_toast_title ||
                  artist != s_toast_artist)) {
                 push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);
@@ -3289,6 +3659,8 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        iam_update_begin_frame();
+        iam_clip_update(ImGui::GetIO().DeltaTime);
         g_ui.mouse_capture.store(false, std::memory_order_release);
 
         draw_imgui_ui_impl();
