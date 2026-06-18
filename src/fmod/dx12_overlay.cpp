@@ -715,7 +715,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     c += src_tex.Sample(src_sampler, uv + float2( o.x, -o.y));
     c += src_tex.Sample(src_sampler, uv + float2(-o.x,  o.y));
     c += src_tex.Sample(src_sampler, uv + float2( o.x,  o.y));
-    return c * 0.25;
+    return float4((c * 0.25).rgb, 1.0);
 }
 )";
 
@@ -733,7 +733,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     c += src_tex.Sample(src_sampler, uv + float2( o.x, -o.y));
     c += src_tex.Sample(src_sampler, uv + float2(-o.x,  o.y));
     c += src_tex.Sample(src_sampler, uv + float2( o.x,  o.y));
-    return c * 0.25;
+    return float4((c * 0.25).rgb, 1.0);
 }
 )";
 
@@ -1159,7 +1159,12 @@ static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
 }
 
 static void queue_overlay_blur_callback() {
-    g_ui.overlay_blur_ready = false;
+    // NOTE: do NOT reset overlay_blur_ready here.  The consumer (add_overlay_blur)
+    // runs during draw_imgui_ui_impl() (the record phase), before this frame's
+    // blur callback fires during RenderDrawData (the replay phase).  Resetting
+    // here would clear the previous frame's result before the consumer can read
+    // it.  render_overlay_blur() resets it at the start of the replay-phase
+    // callback, so a failed blur pass correctly leaves it false.
     if (!g_ui.background_blur_enabled.load(std::memory_order_acquire) ||
         !g_dx.blur_frame_backbuffer ||
         g_dx.blur_frame_format == DXGI_FORMAT_UNKNOWN) {
@@ -1195,7 +1200,7 @@ static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
     uv1.x = std::clamp(uv1.x, 0.0f, 1.0f);
     uv1.y = std::clamp(uv1.y, 0.0f, 1.0f);
 
-    const ImU32 tint = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.55f));
+    const ImU32 tint = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.90f));
     if (rounding > 0.0f) {
         dl->AddImageRounded(g_ui.overlay_blur_texture_id, min, max, uv0, uv1, tint, rounding,
                             flags);
