@@ -1200,7 +1200,8 @@ static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
     uv1.x = std::clamp(uv1.x, 0.0f, 1.0f);
     uv1.y = std::clamp(uv1.y, 0.0f, 1.0f);
 
-    const ImU32 tint = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.90f));
+    // Dark tint so the blur reads as black frosted glass rather than a white wash.
+    const ImU32 tint = ImGui::GetColorU32(ImVec4(0.08f, 0.08f, 0.10f, 0.90f));
     if (rounding > 0.0f) {
         dl->AddImageRounded(g_ui.overlay_blur_texture_id, min, max, uv0, uv1, tint, rounding,
                             flags);
