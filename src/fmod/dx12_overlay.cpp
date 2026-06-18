@@ -166,6 +166,7 @@ struct DxResources {
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> fb_rtvs;
     BlurResources blur;
     ID3D12Resource* blur_frame_backbuffer = nullptr;
+    D3D12_CPU_DESCRIPTOR_HANDLE blur_frame_rtv{};
     DXGI_FORMAT blur_frame_format         = DXGI_FORMAT_UNKNOWN;
 };
 static DxResources g_dx;
@@ -1147,6 +1148,14 @@ static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
 
     render_overlay_blur(g_dx.cmd_list.get(), g_dx.blur_frame_backbuffer, g_dx.blur_frame_format,
                         D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+    // The blur pass clears OMSetRenderTargets (it sets the blur textures as
+    // render targets during the downsample/blur passes).  ImGui's
+    // ImDrawCallback_ResetRenderState restores the pipeline state (shaders,
+    // viewport, blend) but NOT the render target.  Re-bind the backbuffer RTV
+    // so subsequent ImGui draw commands render correctly.
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_dx.blur_frame_rtv;
+    g_dx.cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 }
 
 static void queue_overlay_blur_callback() {
@@ -3551,6 +3560,7 @@ static void cleanup_imgui_resources() {
     g_dx.allocators.clear();
     g_dx.allocator_fence_values.clear();
     g_dx.blur_frame_backbuffer = nullptr;
+    g_dx.blur_frame_rtv        = {};
     g_dx.blur_frame_format     = DXGI_FORMAT_UNKNOWN;
     release_blur_resources();
     g_ui.bg_texture.reset();
@@ -3640,6 +3650,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         g_dx.cmd_list->ResourceBarrier(1, &to_render_target);
         const D3D12_RESOURCE_DESC bb_desc = g_dx.fb_bufs[backBufferIdx]->GetDesc();
         g_dx.blur_frame_backbuffer        = g_dx.fb_bufs[backBufferIdx].get();
+        g_dx.blur_frame_rtv               = g_dx.fb_rtvs[backBufferIdx];
         g_dx.blur_frame_format            = bb_desc.Format;
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
@@ -3658,6 +3669,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
         g_dx.blur_frame_backbuffer = nullptr;
+        g_dx.blur_frame_rtv        = {};
         g_dx.blur_frame_format     = DXGI_FORMAT_UNKNOWN;
 
         // Transition backbuffer back to PRESENT state
