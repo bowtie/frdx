@@ -118,6 +118,8 @@ ResizeBuffers_t original_ResizeBuffers                   = nullptr;
 CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
 
 WNDPROC original_wnd_proc = nullptr;
+bool g_runtime_started    = false;
+bool g_hooks_installed    = false;
 
 // ── Grouped overlay state ───────────────────────────────────────────────
 
@@ -2155,7 +2157,16 @@ static void draw_dualsense_tab_header(const DualSenseConfig& ds) {
         const float toggle_y = row_y + std::max(0.0f, (tab_h - toggle_h) * 0.5f);
         ImGui::SetCursorPos(ImVec2(toggle_x, toggle_y));
     }
-    dualsense_toggle("Enable Triggers", ds.enabled, &DualSenseConfig::enabled);
+    bool enabled = ds.enabled;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+    const bool enabled_changed = ImGui::Toggle("Enable Triggers", &enabled);
+    ImGui::PopStyleVar();
+    if (enabled_changed) {
+        patch_dualsense([enabled](DualSenseConfig& c) {
+            c.enabled = enabled;
+            if (enabled) c.external_helper = true;
+        });
+    }
     const float after_toggle_y = ImGui::GetCursorPosY();
     ImGui::SetCursorPosY(std::max(after_tabs_y, after_toggle_y));
 }
@@ -2339,8 +2350,11 @@ static void draw_dualsense_window(const PlayerBarLayout& layout) {
             draw_dualsense_settings(cfg.dualsense);
             ImGui::PopItemWidth();
 
+            const auto& style = ImGui::GetStyle();
+            constexpr float kDualSenseFooterPaddingY = 10.0f;
             const float measured_h =
-                ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y * 0.35f;
+                ImGui::GetCursorPosY() +
+                std::max(0.0f, kDualSenseFooterPaddingY - style.ItemSpacing.y);
             const int measured_tab = std::clamp(g_ui.dualsense_tab, 0, 2);
             if (measured_tab != 1 || !g_ui.dualsense_settings_expanded) {
                 g_ui.dualsense_tab_height[measured_tab] = measured_h;
@@ -3571,15 +3585,9 @@ static void cleanup_imgui_resources() {
     g_dx.device.reset();
 }
 
-// Hooked DXGI Swap Chain Present callback
-HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
-    ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
-
+static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
+    if (!pSwapChain || !active_queue) return false;
     if (!g_ui.is_init) {
-        if (!active_queue) {
-            return original_Present(pSwapChain, SyncInterval, Flags);
-        }
-
         // Acquire a shared reference to the host's ID3D12Device via the
         // swapchain.  GetDevice() AddRef's — this is the same COM object
         // as the sandbox/game's dx.device pointer.  The overlay releases
@@ -3602,12 +3610,12 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         }
     }
 
-    if (g_ui.is_init && active_queue) {
+    if (g_ui.is_init) {
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
         if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.dualsense_visible &&
             !g_ui.stations_visible && !g_ui.console_visible && !g_ui.hud_visible &&
             !has_visible_toasts()) {
-            return original_Present(pSwapChain, SyncInterval, Flags);
+            return false;
         }
         UINT backBufferIdx = 0;
         {
@@ -3629,14 +3637,14 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
             log::error("[overlay] backBufferIdx {} is out of bounds or backbuffer is NULL! "
                        "size={}, buf_size={}",
                        backBufferIdx, g_dx.allocators.size(), g_dx.fb_bufs.size());
-            return original_Present(pSwapChain, SyncInterval, Flags);
+            return false;
         }
         ID3D12CommandAllocator* allocator = g_dx.allocators[backBufferIdx].get();
 
         if (!wait_for_fence(g_dx.allocator_fence_values[backBufferIdx])) {
             log::warn("[overlay] skipped frame because GPU did not release command allocator {}",
                       backBufferIdx);
-            return original_Present(pSwapChain, SyncInterval, Flags);
+            return false;
         }
 
         allocator->Reset();
@@ -3690,8 +3698,16 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
         } else {
             log::warn("[overlay] failed to signal ImGui GPU fence");
         }
+        return true;
     }
 
+    return false;
+}
+
+// Hooked DXGI Swap Chain Present callback
+HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
+    ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
+    render_overlay_frame(pSwapChain, active_queue);
     return original_Present(pSwapChain, SyncInterval, Flags);
 }
 
@@ -3712,10 +3728,9 @@ void set_flush_audio(std::function<void()> fn) noexcept {
     log::info("[overlay] registered audio flush callback");
 }
 
-// ── Full hook-based init (used by the game) ──────────────────────────────
-
-bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigStore& store,
-                dualsense::DualSenseService* dualsense) noexcept {
+static bool configure_overlay_runtime(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,
+                                      ConfigStore& store,
+                                      dualsense::DualSenseService* dualsense) noexcept {
     g_ctx.mgr       = &mgr;
     g_ctx.bridge    = &bridge;
     g_ctx.store     = &store;
@@ -3724,7 +3739,38 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     g_ui.theme_idx = theme_index(cfg.overlay.theme);
     g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
     g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
-    start_action_worker();
+    if (!g_runtime_started) {
+        start_action_worker();
+        g_runtime_started = true;
+    }
+    return true;
+}
+
+bool initialize_direct(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigStore& store,
+                       dualsense::DualSenseService* dualsense) noexcept {
+    if (!configure_overlay_runtime(mgr, bridge, store, dualsense)) return false;
+    log::info("[overlay] Direct3D 12 overlay runtime initialized in direct render mode");
+    return true;
+}
+
+bool render_direct(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue) noexcept {
+    return render_overlay_frame(swapchain, queue);
+}
+
+void notify_direct_resize_begin() noexcept {
+    if (g_ui.is_init) pre_resize();
+}
+
+void notify_direct_resize_end(IDXGISwapChain* swapchain) noexcept {
+    if (g_ui.is_init && swapchain) post_resize(swapchain);
+}
+
+// ── Full hook-based init (used by the game) ──────────────────────────────
+
+bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigStore& store,
+                dualsense::DualSenseService* dualsense) noexcept {
+    if (!configure_overlay_runtime(mgr, bridge, store, dualsense)) return false;
+    if (g_hooks_installed) return true;
 
     log::info("[overlay] starting dummy Direct3D 12 device context resolver...");
 
@@ -3839,15 +3885,25 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
         return false;
     }
 
+    g_hooks_installed = true;
     log::info("[overlay] D3D12/DXGI Present and Resize hooks established successfully!");
     return true;
 }
 
 void shutdown() noexcept {
-    log::info("[overlay] disabling MinHook overlay detours...");
-    stop_action_worker();
-    MH_DisableHook(MH_ALL_HOOKS);
-    MH_Uninitialize();
+    if (g_runtime_started) {
+        stop_action_worker();
+        g_runtime_started = false;
+    }
+    if (g_hooks_installed) {
+        log::info("[overlay] disabling MinHook overlay detours...");
+        MH_DisableHook(MH_ALL_HOOKS);
+        MH_Uninitialize();
+        g_hooks_installed = false;
+        original_Present = nullptr;
+        original_ResizeBuffers = nullptr;
+        original_CreateSwapChainForHwnd = nullptr;
+    }
 
     if (g_ui.is_init) {
         wait_for_all_overlay_work();

@@ -31,7 +31,7 @@ struct OverlayConfig {
 
 struct DualSenseConfig {
     bool enabled = false;
-    bool external_helper = false;
+    bool external_helper = true;
 
     int udp_port = 5300;
 

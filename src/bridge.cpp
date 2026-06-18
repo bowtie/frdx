@@ -147,6 +147,11 @@ void run_bridge(HMODULE self) noexcept {
 
     ConfigStore store{data_dir / "config.toml", load_config(data_dir / "config.toml")};
     auto cfg = store.snapshot();
+    if (cfg.dualsense.enabled && !cfg.dualsense.external_helper) {
+        log::info("[dualsense] enabling external helper for existing trigger config");
+        store.patch([](Config& c) { c.dualsense.external_helper = true; });
+        cfg = store.snapshot();
+    }
     maybe_launch_external_helper(dir, cfg.dualsense);
 
     auto img = fmod_bridge::parse(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)));
@@ -219,8 +224,8 @@ void run_bridge(HMODULE self) noexcept {
 
         bridge.set_gain(c.audio.output_gain);
         bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
-        maybe_launch_external_helper(dir, c.dualsense);
         dualsense.update_config(dualsense_service_config(c.dualsense));
+        maybe_launch_external_helper(dir, c.dualsense);
         if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
     });
 

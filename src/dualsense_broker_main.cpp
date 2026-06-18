@@ -133,6 +133,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     if (port_override > 0) cfg.dualsense.udp_port = port_override;
     if (!locked_serial.empty()) cfg.dualsense.controller_lock_serial = locked_serial;
     if (cfg.dualsense.reconnect_interval_s <= 0.0f) cfg.dualsense.reconnect_interval_s = 1.0f;
+    cfg.dualsense.enabled          = true;
     cfg.dualsense.enable_reconnect = true;
     cfg.dualsense.external_helper  = true;
 
@@ -196,6 +197,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                 if (next.dualsense.reconnect_interval_s <= 0.0f) {
                     next.dualsense.reconnect_interval_s = 1.0f;
                 }
+                next.dualsense.enabled          = true;
                 next.dualsense.enable_reconnect = true;
                 next.dualsense.external_helper  = true;
                 service.update_config(next.dualsense);

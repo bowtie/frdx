@@ -24,6 +24,7 @@ notification_position = "top_left" # top_left, top_center, top_right, bottom_lef
 
 [dualsense]
 enabled = false             # native HID adaptive triggers; set Forza Data Out to this UDP port
+external_helper = true      # run trigger output outside the game process
 udp_port = 5300
 wall_zones = 2
 enable_brake_resistance = true

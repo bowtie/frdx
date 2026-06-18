@@ -1,5 +1,6 @@
-// Standalone overlay sandbox — creates a dummy DX12 app and lets the
-// overlay hook into it via MinHook, exactly like the game.
+// Standalone overlay sandbox — creates a dummy DX12 app and renders the
+// overlay directly by default. Set FRDX_SANDBOX_HOOKED=1 to force the old
+// self-hooked MinHook path for hook-chain testing.
 //
 // Uses a real ShoutcastSource with stations.json for full feature parity
 // (station selector, stream cycling, ICY metadata, etc).
@@ -269,6 +270,7 @@ static bool init_dx(HWND hwnd, DxContext& dx) {
 // ─── WndProc ─────────────────────────────────────────────────────────────
 
 static DxContext* g_dx = nullptr;
+static bool g_overlay_direct = true;
 
 static LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_DESTROY) {
@@ -286,15 +288,24 @@ static LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                     frdx::log::warn("[sandbox] WM_SIZE fence wait timed out");
                 }
             }
+            if (g_overlay_direct) {
+                frdx::dx12_overlay::notify_direct_resize_begin();
+            }
             for (auto& backbuffer : g_dx->backbuffers) {
                 if (backbuffer) {
                     backbuffer->Release();
                     backbuffer = nullptr;
                 }
             }
-            // The overlay's ResizeBuffers hook fires here and cleans up ImGui resources.
-            g_dx->swapchain->ResizeBuffers(DxContext::kBufferCount, w, h,
-                                            DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+            HRESULT resize_hr = g_dx->swapchain->ResizeBuffers(DxContext::kBufferCount, w, h,
+                                                               DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+            if (FAILED(resize_hr)) {
+                frdx::log::warn("[sandbox] ResizeBuffers failed ({})", resize_hr);
+                return 0;
+            }
+            if (g_overlay_direct) {
+                frdx::dx12_overlay::notify_direct_resize_end(g_dx->swapchain);
+            }
             SIZE_T rtv_inc = g_dx->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
             D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_dx->rtv_heap->GetCPUDescriptorHandleForHeapStart();
             for (UINT i = 0; i < DxContext::kBufferCount; ++i) {
@@ -328,6 +339,15 @@ static std::filesystem::path resolve_path(const std::filesystem::path& relative)
     if (std::filesystem::exists(from_dist, ec)) return from_dist.lexically_normal();
 
     return from_exe; // return the exe-relative path even if missing (for logging)
+}
+
+static bool sandbox_hook_mode_requested() {
+    wchar_t value[32]{};
+    DWORD n = GetEnvironmentVariableW(L"FRDX_SANDBOX_HOOKED", value,
+                                      static_cast<DWORD>(std::size(value)));
+    if (n == 0 || n >= std::size(value)) return false;
+    return value[0] != L'\0' && value[0] != L'0' && value[0] != L'f' &&
+           value[0] != L'F';
 }
 
 // ─── Teardown guard (typestate-enforced cleanup order) ───────────────────
@@ -724,9 +744,17 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     mgr.set_source(src.get());
     src->play();
 
-    // ── 3. Install overlay hooks ─────────────────────────────────────────
-    if (!frdx::dx12_overlay::initialize(mgr, bridge, store, &dualsense)) {
-        frdx::log::error("[sandbox] overlay initialize() failed");
+    // ── 3. Start overlay runtime ─────────────────────────────────────────
+    const bool hooked_overlay = sandbox_hook_mode_requested();
+    g_overlay_direct = !hooked_overlay;
+    frdx::log::info("[sandbox] overlay mode: {}",
+                    g_overlay_direct ? "direct render" : "self-hooked Present");
+    const bool overlay_ok =
+        g_overlay_direct
+            ? frdx::dx12_overlay::initialize_direct(mgr, bridge, store, &dualsense)
+            : frdx::dx12_overlay::initialize(mgr, bridge, store, &dualsense);
+    if (!overlay_ok) {
+        frdx::log::error("[sandbox] overlay initialize failed");
         mgr.shutdown();
         return 1;
     }
@@ -755,7 +783,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    frdx::log::info("[sandbox] ready — overlay will draw on Present()");
+    frdx::log::info("[sandbox] ready — overlay will draw via {}",
+                    g_overlay_direct ? "direct render" : "Present hook");
 
     g_dx = &dx; // expose to WndProc for resize handling
 
@@ -805,7 +834,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         ID3D12CommandList* lists[] = {dx.cmd};
         dx.queue->ExecuteCommandLists(1, lists);
 
-        // The Present hook fires here and draws the overlay
+        if (g_overlay_direct) {
+            frdx::dx12_overlay::render_direct(dx.swapchain, dx.queue);
+        }
+
+        // In hook mode the Present detour fires here and draws the overlay.
         dx.swapchain->Present(1, 0);
 
         dx.fence_val++;
