@@ -1186,7 +1186,7 @@ static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
     uv1.x = std::clamp(uv1.x, 0.0f, 1.0f);
     uv1.y = std::clamp(uv1.y, 0.0f, 1.0f);
 
-    const ImU32 tint = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.95f));
+    const ImU32 tint = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.55f));
     if (rounding > 0.0f) {
         dl->AddImageRounded(g_ui.overlay_blur_texture_id, min, max, uv0, uv1, tint, rounding,
                             flags);
@@ -1203,6 +1203,12 @@ static void apply_window_blur(float rounding = 6.0f) {
     const ImVec2 pos = ImGui::GetWindowPos();
     const ImVec2 max(pos.x + ImGui::GetWindowSize().x, pos.y + ImGui::GetWindowSize().y);
     add_overlay_blur(ImGui::GetWindowDrawList(), pos, max, rounding);
+}
+
+// When blur is active, suppress the solid window background so the frosted
+// glass shows through instead of an opaque dark panel.
+static float window_bg_alpha(float normal) {
+    return g_ui.background_blur_enabled.load(std::memory_order_acquire) ? 0.0f : normal;
 }
 
 static float advance_popup_anim(bool opening, float& anim) {
@@ -2317,7 +2323,7 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::SetNextWindowPos(ImVec2(target_x, win_top), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
     // Slightly more transparent than the player bar (0.96).
-    ImGui::SetNextWindowBgAlpha(eased * 0.92f * g_ui.interactive_draw_alpha);
+    ImGui::SetNextWindowBgAlpha(window_bg_alpha(eased * 0.92f * g_ui.interactive_draw_alpha));
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -2407,7 +2413,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
     const ImVec2 vp_pos = viewport->WorkPos;
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + 20.0f), ImGuiCond_Always,
                             ImVec2(0.5f, 0));
-    ImGui::SetNextWindowBgAlpha(0.96f * g_ui.interactive_draw_alpha);
+    ImGui::SetNextWindowBgAlpha(window_bg_alpha(0.96f * g_ui.interactive_draw_alpha));
 
     const float rounding = 6.0f;
 
@@ -2768,7 +2774,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     ImGui::SetNextWindowPos(ImVec2(target_x, target_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
     // Slightly more transparent than the player bar (0.96).
-    ImGui::SetNextWindowBgAlpha(eased * 0.92f * g_ui.interactive_draw_alpha);
+    ImGui::SetNextWindowBgAlpha(window_bg_alpha(eased * 0.92f * g_ui.interactive_draw_alpha));
 
     ImGuiWindowFlags stFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -2894,7 +2900,7 @@ static void draw_console_window() {
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f, vp_pos.y + vp_size.y - 16.0f),
                             ImGuiCond_FirstUseEver, ImVec2(1.0f, 1.0f));
     ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowBgAlpha(0.94f * eased * g_ui.interactive_draw_alpha);
+    ImGui::SetNextWindowBgAlpha(window_bg_alpha(0.94f * eased * g_ui.interactive_draw_alpha));
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
