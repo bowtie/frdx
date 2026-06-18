@@ -205,6 +205,7 @@ struct UiState {
     std::atomic<bool> stations_visible{false};
     std::atomic<bool> console_visible{false};
     std::atomic<bool> hud_visible{true};
+    std::atomic<bool> background_blur_enabled{false};
     std::atomic<bool> mouse_capture{false};
     bool is_init = false;
     bool cursor_visible = true;
@@ -683,7 +684,6 @@ static void ApplyTheme(int idx) {
 
 // ── UI section: overlay background blur ───────────────────────────────
 
-static constexpr bool kEnableOverlayBlur = false;
 static constexpr UINT kOverlaySrvCount   = 16;
 
 static const char* kBlurVs = R"(
@@ -1098,7 +1098,6 @@ static bool render_overlay_blur(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
     auto bb_to_copy =
         transition_barrier(backbuffer, initial_backbuffer_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     cmd->ResourceBarrier(1, &bb_to_copy);
-    transition_blur_texture(cmd, g_dx.blur.source, D3D12_RESOURCE_STATE_COPY_DEST);
 
     D3D12_TEXTURE_COPY_LOCATION dst = {};
     dst.pResource                   = g_dx.blur.source.resource.get();
@@ -1116,6 +1115,9 @@ static bool render_overlay_blur(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
         bg_source.state       = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         blur_source           = &bg_source;
     } else {
+        // Only transition source to COPY_DEST when we actually copy into it.
+        // The sandbox-bg path samples an existing texture and never touches source.
+        transition_blur_texture(cmd, g_dx.blur.source, D3D12_RESOURCE_STATE_COPY_DEST);
         src.pResource        = backbuffer;
         src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         src.SubresourceIndex = 0;
@@ -1136,7 +1138,8 @@ static bool render_overlay_blur(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
 }
 
 static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
-    if (!kEnableOverlayBlur || !g_dx.cmd_list || !g_dx.blur_frame_backbuffer ||
+    if (!g_ui.background_blur_enabled.load(std::memory_order_acquire) || !g_dx.cmd_list ||
+        !g_dx.blur_frame_backbuffer ||
         g_dx.blur_frame_format == DXGI_FORMAT_UNKNOWN) {
         g_ui.overlay_blur_ready = false;
         return;
@@ -1146,9 +1149,10 @@ static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
                         D3D12_RESOURCE_STATE_RENDER_TARGET);
 }
 
-[[maybe_unused]] static void queue_overlay_blur_callback() {
+static void queue_overlay_blur_callback() {
     g_ui.overlay_blur_ready = false;
-    if (!kEnableOverlayBlur || !g_dx.blur_frame_backbuffer ||
+    if (!g_ui.background_blur_enabled.load(std::memory_order_acquire) ||
+        !g_dx.blur_frame_backbuffer ||
         g_dx.blur_frame_format == DXGI_FORMAT_UNKNOWN) {
         return;
     }
@@ -1160,11 +1164,12 @@ static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
 
 // ── UI section: HUD ───────────────────────────────────────────────────
 
-[[maybe_unused]] static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
-                                              float rounding, ImDrawFlags flags = 0) {
+static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
+                              float rounding, ImDrawFlags flags = 0) {
     const bool texture_available =
         g_ui.overlay_blur_texture_id && g_dx.blur.width && g_dx.blur.height;
-    if (!texture_available || (!kEnableOverlayBlur && !g_ui.overlay_blur_ready)) {
+    if (!texture_available || !g_ui.background_blur_enabled.load(std::memory_order_acquire) ||
+        !g_ui.overlay_blur_ready) {
         return false;
     }
 
@@ -1189,6 +1194,15 @@ static void render_overlay_blur_callback(const ImDrawList*, const ImDrawCmd*) {
         dl->AddImage(g_ui.overlay_blur_texture_id, min, max, uv0, uv1, tint);
     }
     return true;
+}
+
+// Draw a frosted-glass blur rect behind the current ImGui window.  No-op when
+// blur is disabled or the blurred texture isn't ready yet this frame.
+static void apply_window_blur(float rounding = 6.0f) {
+    if (!g_ui.background_blur_enabled.load(std::memory_order_acquire)) return;
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const ImVec2 max(pos.x + ImGui::GetWindowSize().x, pos.y + ImGui::GetWindowSize().y);
+    add_overlay_blur(ImGui::GetWindowDrawList(), pos, max, rounding);
 }
 
 static float advance_popup_anim(bool opening, float& anim) {
@@ -2268,6 +2282,17 @@ static void draw_general_settings_tab() {
         g_ui.console_visible = show_log;
     }
 
+    label_row("Background Blur");
+    g_ui.background_blur_enabled = cfg.overlay.background_blur_enabled;
+    bool blur = g_ui.background_blur_enabled;
+    if (ImGui::Checkbox("##bg_blur", &blur)) {
+        g_ui.background_blur_enabled = blur;
+        g_ctx.store->patch([&](Config& c) { c.overlay.background_blur_enabled = blur; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Frosted glass blur behind overlay panels");
+    }
+
     ImGui::EndTable();
 }
 
@@ -2311,6 +2336,7 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
+        apply_window_blur(6.0f);
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 // DualSense is the primary tab; Settings is secondary.
@@ -2391,6 +2417,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
                                 ImGuiWindowFlags_NoScrollWithMouse;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, rounding);
     ImGui::Begin("Forza Radio DX", nullptr, barFlags);
+    apply_window_blur(rounding);
 
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
     const float btn_w     = 27.0f;
@@ -2761,6 +2788,7 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
 
     if (ImGui::Begin("##Stations", nullptr, stFlags)) {
+        apply_window_blur(6.0f);
         auto [active_st, active_str] = sc_st->active_station_stream();
         {
             frdx::ScopedLock lk{g_station_switch.mutex};
@@ -2873,6 +2901,7 @@ static void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     if (ImGui::Begin("FRDX Console (F10)", nullptr, flags)) {
+        apply_window_blur(6.0f);
         const uint64_t log_generation = log::recent_generation();
         if (g_ui.console_log_generation != log_generation) {
             g_ui.console_lines          = log::recent_lines();
@@ -2997,6 +3026,11 @@ void draw_imgui_ui_impl() {
     }
     if (interactive_alpha <= 0.01f) return;
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, interactive_alpha);
+
+    // Queue the blur render pass onto the background draw list so it produces
+    // the blurred texture before per-window add_overlay_blur() calls consume
+    // it during ImGui_ImplDX12_RenderDrawData.
+    queue_overlay_blur_callback();
 
     if (!g_ui.player_visible) {
         draw_console_window();
@@ -3679,6 +3713,7 @@ static bool configure_overlay_runtime(AudioSourceManager& mgr, fmod_bridge::DSPB
     const auto cfg = store.snapshot();
     g_ui.theme_idx = theme_index(cfg.overlay.theme);
     g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
+    g_ui.background_blur_enabled = cfg.overlay.background_blur_enabled;
     g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
     if (!g_runtime_started) {
         start_action_worker();
