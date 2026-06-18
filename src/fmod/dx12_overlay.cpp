@@ -1316,7 +1316,7 @@ static void draw_toasts() {
         const float exit_t  = std::clamp((it->lifetime - age) / 0.36f, 0.0f, 1.0f);
         const float enter   = iam_eval_preset(iam_ease_out_back, enter_t);
         const float exit    = iam_eval_preset(iam_ease_out_quad, exit_t);
-        const float alpha   = std::clamp(std::min(enter_t, exit), 0.0f, 1.0f);
+        const float alpha   = std::clamp(std::min(enter, exit), 0.0f, 1.0f);
         if (alpha <= 0.0f) continue;
 
         ImVec2 slide{};
