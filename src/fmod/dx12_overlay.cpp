@@ -202,7 +202,6 @@ struct Toast {
 struct UiState {
     std::atomic<bool> player_visible{true};
     std::atomic<bool> settings_visible{false};
-    std::atomic<bool> dualsense_visible{false};
     std::atomic<bool> stations_visible{false};
     std::atomic<bool> console_visible{false};
     std::atomic<bool> hud_visible{true};
@@ -253,7 +252,6 @@ struct UiState {
     bool dualsense_reset_armed       = false;
     float settings_anim              = 0.0f;
     float settings_content_height    = 220.0f;
-    float dualsense_anim             = 0.0f;
     float stations_anim              = 0.0f;
     float console_anim               = 0.0f;
     bool stations_expanded           = false;
@@ -268,8 +266,6 @@ struct UiState {
     float dualsense_tab_indicator_to_w   = 0.0f;
     float dualsense_tab_indicator_anim   = 1.0f;
     bool dualsense_settings_expanded = false;
-    float dualsense_tab_height[3]    = {300.0f, 300.0f, 320.0f};
-    bool dualsense_tab_overflow[3]   = {false, false, false};
 };
 // NOLINTNEXTLINE(bugprone-throwing-static-initialization)
 static UiState g_ui;
@@ -465,20 +461,19 @@ struct PlayerBarLayout {
     ImVec2 pos;
     ImVec2 size;
     float gear_right{};
-    float dualsense_right{};
 };
 
 static void draw_settings_window(const PlayerBarLayout& layout);
-static void draw_dualsense_window(const PlayerBarLayout& layout);
 static PlayerBarLayout draw_player_bar(IAudioSource* active);
 static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout);
 static void draw_console_window();
 static void draw_toasts();
+static ConsoleLineKind classify_console_line(std::string_view line);
+static ImVec4 console_line_color(ConsoleLineKind kind);
 
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    const bool route_to_imgui    = g_ui.player_visible || g_ui.settings_visible ||
-                                   g_ui.dualsense_visible || g_ui.stations_visible ||
-                                   g_ui.console_visible;
+    const bool route_to_imgui = g_ui.player_visible || g_ui.settings_visible ||
+                                g_ui.stations_visible || g_ui.console_visible;
     const bool block_mouse_input = g_ui.cursor_visible && g_ui.interactive_alpha > 0.05f &&
                                    g_ui.mouse_capture.load(std::memory_order_acquire);
     if (route_to_imgui) {
@@ -1207,15 +1202,11 @@ static float advance_popup_anim(bool opening, float& anim) {
     return ease_smootherstep(anim);
 }
 
-static void close_player_children_except(bool keep_settings, bool keep_dualsense,
-                                         bool keep_stations, bool reset_anim = true) {
+static void close_player_children_except(bool keep_settings, bool keep_stations,
+                                         bool reset_anim = true) {
     if (!keep_settings) {
         g_ui.settings_visible = false;
         if (reset_anim) g_ui.settings_anim = 0.0f;
-    }
-    if (!keep_dualsense) {
-        g_ui.dualsense_visible = false;
-        if (reset_anim) g_ui.dualsense_anim = 0.0f;
     }
     if (!keep_stations) {
         g_ui.stations_visible  = false;
@@ -1496,11 +1487,21 @@ struct AccordionState {
     ImVec2 content_screen_pos{};
 };
 
-AccordionState dualsense_section_header(const char* label) {
+AccordionState dualsense_section_header(const char* label, ImGuiID exclusive_group = 0) {
     ImGui::PushID(label);
     ImGuiID id        = ImGui::GetID("open");
     ImGuiID anim_id   = ImGui::GetID("accordion_amount");
     bool open         = ImGui::GetStateStorage()->GetBool(id, false);
+
+    // Mutual exclusion within a group: only the member whose ID matches the
+    // group's active slot may stay open. Others are forced closed.
+    if (exclusive_group != 0) {
+        ImGuiID active_id = ImGui::GetStateStorage()->GetInt(exclusive_group, 0);
+        if (open && active_id != 0 && active_id != id) {
+            open = false;
+            ImGui::GetStateStorage()->SetBool(id, false);
+        }
+    }
 
     const auto& style  = ImGui::GetStyle();
     const float inset  = 4.0f;
@@ -1511,6 +1512,11 @@ AccordionState dualsense_section_header(const char* label) {
     if (ImGui::IsItemClicked()) {
         open = !open;
         ImGui::GetStateStorage()->SetBool(id, open);
+        if (exclusive_group != 0) {
+            // Claim the group slot when opening; release it when closing so a
+            // later-opened sibling can take over.
+            ImGui::GetStateStorage()->SetInt(exclusive_group, open ? static_cast<int>(id) : 0);
+        }
     }
 
     float raw_amount = ImGui::GetStateStorage()->GetFloat(anim_id, open ? 1.0f : 0.0f);
@@ -1769,8 +1775,10 @@ static void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
 
 static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
     bool any_expanded = false;
+    // Only one tuning accordion open at a time.
+    const ImGuiID exclusive_group = ImGui::GetID("dualsense_tuning_exclusive");
 
-    auto pedal_dead_zones = dualsense_section_header("Pedal Dead Zones");
+    auto pedal_dead_zones = dualsense_section_header("Pedal Dead Zones", exclusive_group);
     if (dualsense_section_content_begin(pedal_dead_zones)) {
         any_expanded = any_expanded || pedal_dead_zones.open;
         ImGui::PushID("Pedal Dead Zones");
@@ -1782,7 +1790,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(pedal_dead_zones);
     }
 
-    auto brake_force = dualsense_section_header("Left Trigger - Brake Force");
+    auto brake_force = dualsense_section_header("Left Trigger - Brake Force", exclusive_group);
     if (dualsense_section_content_begin(brake_force)) {
         any_expanded = any_expanded || brake_force.open;
         ImGui::PushID("Left Trigger - Brake Force");
@@ -1798,7 +1806,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(brake_force);
     }
 
-    auto brake_wall = dualsense_section_header("Left Trigger - Static Wall (optional)");
+    auto brake_wall = dualsense_section_header("Left Trigger - Static Wall (optional)", exclusive_group);
     if (dualsense_section_content_begin(brake_wall)) {
         any_expanded = any_expanded || brake_wall.open;
         ImGui::PushID("Left Trigger - Static Wall (optional)");
@@ -1812,7 +1820,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(brake_wall);
     }
 
-    auto gas_force = dualsense_section_header("Right Trigger - Gas Force");
+    auto gas_force = dualsense_section_header("Right Trigger - Gas Force", exclusive_group);
     if (dualsense_section_content_begin(gas_force)) {
         any_expanded = any_expanded || gas_force.open;
         ImGui::PushID("Right Trigger - Gas Force");
@@ -1826,7 +1834,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(gas_force);
     }
 
-    auto abs_rumble = dualsense_section_header("ABS Rumble");
+    auto abs_rumble = dualsense_section_header("ABS Rumble", exclusive_group);
     if (dualsense_section_content_begin(abs_rumble)) {
         any_expanded = any_expanded || abs_rumble.open;
         ImGui::PushID("ABS Rumble");
@@ -1844,7 +1852,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(abs_rumble);
     }
 
-    auto redline_buzz = dualsense_section_header("Redline Buzz");
+    auto redline_buzz = dualsense_section_header("Redline Buzz", exclusive_group);
     if (dualsense_section_content_begin(redline_buzz)) {
         any_expanded = any_expanded || redline_buzz.open;
         ImGui::PushID("Redline Buzz");
@@ -1860,7 +1868,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(redline_buzz);
     }
 
-    auto wheelspin_buzz = dualsense_section_header("Wheelspin Buzz");
+    auto wheelspin_buzz = dualsense_section_header("Wheelspin Buzz", exclusive_group);
     if (dualsense_section_content_begin(wheelspin_buzz)) {
         any_expanded = any_expanded || wheelspin_buzz.open;
         ImGui::PushID("Wheelspin Buzz");
@@ -1870,7 +1878,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(wheelspin_buzz);
     }
 
-    auto idle_buzz = dualsense_section_header("Idle Buzz");
+    auto idle_buzz = dualsense_section_header("Idle Buzz", exclusive_group);
     if (dualsense_section_content_begin(idle_buzz)) {
         any_expanded = any_expanded || idle_buzz.open;
         ImGui::PushID("Idle Buzz");
@@ -1880,7 +1888,7 @@ static bool draw_dualsense_tuning_tab(const DualSenseConfig& ds) {
         dualsense_section_content_end(idle_buzz);
     }
 
-    auto gear_shift = dualsense_section_header("Gear Shift Thump");
+    auto gear_shift = dualsense_section_header("Gear Shift Thump", exclusive_group);
     if (dualsense_section_content_begin(gear_shift)) {
         any_expanded = any_expanded || gear_shift.open;
         ImGui::PushID("Gear Shift Thump");
@@ -2142,9 +2150,7 @@ static bool draw_dualsense_tab_strip() {
 
 static void draw_dualsense_tab_header(const DualSenseConfig& ds) {
     const float row_y     = ImGui::GetCursorPosY();
-    const float content_w = ImGui::GetContentRegionAvail().x;
     const float toggle_w  = 132.0f;
-    const bool same_row   = content_w >= 360.0f;
     const float tab_h     = ImGui::GetFrameHeight() + 4.0f;
     const float toggle_h  = ImGui::GetTextLineHeight() + 4.0f;
 
@@ -2152,11 +2158,12 @@ static void draw_dualsense_tab_header(const DualSenseConfig& ds) {
     if (tab_changed) g_ui.dualsense_tab_content_anim = 0.0f;
     const float after_tabs_y = ImGui::GetCursorPosY();
 
-    if (same_row) {
-        const float toggle_x = ImGui::GetWindowContentRegionMax().x - toggle_w;
-        const float toggle_y = row_y + std::max(0.0f, (tab_h - toggle_h) * 0.5f);
-        ImGui::SetCursorPos(ImVec2(toggle_x, toggle_y));
-    }
+    // Place the enable checkbox on the same row as the tab strip when there's
+    // room; otherwise it wraps to its own line.
+    const float toggle_y = row_y + std::max(0.0f, (tab_h - toggle_h) * 0.5f);
+    const float toggle_x = ImGui::GetWindowContentRegionMax().x - toggle_w;
+    ImGui::SetCursorPos(ImVec2(toggle_x, toggle_y));
+
     bool enabled = ds.enabled;
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
     const bool enabled_changed = ImGui::Toggle("Enable Triggers", &enabled);
@@ -2201,6 +2208,69 @@ static void draw_dualsense_settings(const DualSenseConfig& ds) {
 
 // ── UI section: settings window ────────────────────────────────────────
 
+static void draw_general_settings_tab() {
+    const auto cfg = g_ctx.store->snapshot();
+
+    // Compact two-column form: label | control.
+    ImGui::BeginTable("##general_settings", 2, ImGuiTableFlags_None);
+    ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 168.0f);
+    ImGui::TableSetupColumn("widget", ImGuiTableColumnFlags_WidthStretch);
+
+    auto label_row = [](const char* text) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(text);
+        ImGui::TableSetColumnIndex(1);
+    };
+
+    label_row("Theme");
+    g_ui.theme_idx = theme_index(cfg.overlay.theme);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
+                     IM_ARRAYSIZE(g_ui.theme_names))) {
+        ApplyTheme(g_ui.theme_idx);
+        const char* theme = theme_value(g_ui.theme_idx);
+        g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
+    }
+
+    label_row("Music Notifications");
+    g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
+    bool hud = g_ui.hud_visible;
+    if (ImGui::Checkbox("##hud", &hud)) {
+        g_ui.hud_visible = hud;
+        g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = hud; });
+    }
+
+    label_row("Notification Position");
+    g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##notification_position", &g_ui.notification_position_idx,
+                     g_ui.notification_position_names,
+                     IM_ARRAYSIZE(g_ui.notification_position_names))) {
+        const char* position = notification_position_value(g_ui.notification_position_idx);
+        g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
+    }
+
+    label_row("Force Stereo Audio");
+    bool stereo = g_ctx.bridge->force_stereo_audio();
+    if (ImGui::Checkbox("##stereo", &stereo)) {
+        g_ctx.bridge->set_force_stereo_audio(stereo);
+        g_ctx.store->patch([&](Config& c) { c.audio.force_stereo_audio = stereo; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
+    }
+
+    label_row("Log Window");
+    bool show_log = g_ui.console_visible;
+    if (ImGui::Checkbox("##log_window", &show_log)) {
+        g_ui.console_visible = show_log;
+    }
+
+    ImGui::EndTable();
+}
+
 static void draw_settings_window(const PlayerBarLayout& layout) {
     const bool opening = g_ui.settings_visible;
     const float eased  = advance_popup_anim(opening, g_ui.settings_anim);
@@ -2209,163 +2279,68 @@ static void draw_settings_window(const PlayerBarLayout& layout) {
         return;
     }
 
-    const float set_tb   = ImGui::GetFrameHeight();
-    const auto* vp       = ImGui::GetMainViewport();
-    const float target_y = layout.pos.y + layout.size.y - set_tb;
-    const float vp_room  = std::max(180.0f, vp->WorkPos.y + vp->WorkSize.y - target_y - 8.0f);
-    const float target_w = 300.0f;
-    const float target_h = std::clamp(g_ui.settings_content_height, set_tb + 80.0f, vp_room);
+    const float set_tb  = ImGui::GetFrameHeight();
+    const auto* vp      = ImGui::GetMainViewport();
+    const float win_top = layout.pos.y + layout.size.y - set_tb;
+    const float vp_room = std::max(220.0f, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f);
+    // Match the stations browser width so both pop-overs share a footprint.
+    // Floor is a touch higher so DualSense slider rows aren't squeezed.
+    const float target_w = std::clamp(layout.size.x - 28.0f, 360.0f, 480.0f);
+    const float target_h = std::clamp(g_ui.settings_content_height, set_tb + 130.0f, vp_room);
     const float current_h = std::max(set_tb + 4.0f, target_h * eased);
-    ImGui::SetNextWindowPos(ImVec2(layout.gear_right, target_y), ImGuiCond_Always,
-                            ImVec2(1.0f, 0));
+    const float target_x = layout.pos.x + (layout.size.x - target_w) * 0.5f;
+    ImGui::SetNextWindowPos(ImVec2(target_x, win_top), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(eased * g_ui.interactive_draw_alpha);
-
-    ImGuiWindowFlags setFlags =
-        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoFocusOnAppearing |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
-    if (g_ui.settings_content_height > target_h + 1.0f) {
-        setFlags |= ImGuiWindowFlags_AlwaysVerticalScrollbar;
-    } else {
-        setFlags |= ImGuiWindowFlags_NoScrollbar;
-    }
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
-    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
-
-    if (ImGui::Begin("##Settings", nullptr, setFlags)) {
-        if (current_h > set_tb * 2.0f) {
-            const auto cfg = g_ctx.store->snapshot();
-
-            ImGui::Text("Theme");
-            g_ui.theme_idx = theme_index(cfg.overlay.theme);
-            if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
-                             IM_ARRAYSIZE(g_ui.theme_names))) {
-                ApplyTheme(g_ui.theme_idx);
-                const char* theme = theme_value(g_ui.theme_idx);
-                g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
-            bool hud = g_ui.hud_visible;
-            if (ImGui::Checkbox("Show Music Notifications", &hud)) {
-                g_ui.hud_visible = hud;
-                g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = hud; });
-            }
-            g_ui.notification_position_idx =
-                notification_position_index(cfg.overlay.notification_position);
-            if (ImGui::Combo("Position", &g_ui.notification_position_idx,
-                             g_ui.notification_position_names,
-                             IM_ARRAYSIZE(g_ui.notification_position_names))) {
-                const char* position = notification_position_value(g_ui.notification_position_idx);
-                g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            bool stereo = g_ctx.bridge->force_stereo_audio();
-            if (ImGui::Checkbox("Force Stereo Audio", &stereo)) {
-                g_ctx.bridge->set_force_stereo_audio(stereo);
-                g_ctx.store->patch([&](Config& c) { c.audio.force_stereo_audio = stereo; });
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
-            }
-
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            g_ui.settings_content_height =
-                ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y * 0.35f;
-        }
-
-        // Close on click outside
-        if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
-            !ImGui::GetIO().WantCaptureMouse) {
-            g_ui.settings_visible = false;
-        }
-        mark_overlay_mouse_region();
-    }
-    ImGui::End();
-    ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar(3);
-}
-
-static void draw_dualsense_window(const PlayerBarLayout& layout) {
-    const bool opening = g_ui.dualsense_visible;
-    const float eased  = advance_popup_anim(opening, g_ui.dualsense_anim);
-    if (!opening && g_ui.dualsense_anim < 0.01f) {
-        g_ui.dualsense_anim = 0.0f;
-        return;
-    }
-
-    const float set_tb   = ImGui::GetFrameHeight();
-    const auto* vp       = ImGui::GetMainViewport();
-    const float win_top  = layout.pos.y + layout.size.y - set_tb;
-    const float vp_room  = std::max(200.0f, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f);
-    const float target_w = std::clamp(layout.size.x - 68.0f, 400.0f, 500.0f);
-    const int active_tab = std::clamp(g_ui.dualsense_tab, 0, 2);
-    const float max_h    = std::min(active_tab == 1 ? 430.0f : vp_room, vp_room);
-    const float measured_target_h = g_ui.dualsense_tab_height[active_tab];
-    const float target_h  = std::clamp(measured_target_h, set_tb + 80.0f, max_h);
-    const float current_h = std::max(set_tb + 4.0f, target_h * eased);
-    const float target_x  = layout.pos.x + (layout.size.x - target_w) * 0.5f;
-    const float target_y  = win_top;
-    ImGui::SetNextWindowPos(ImVec2(target_x, target_y), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(eased * g_ui.interactive_draw_alpha);
+    // Slightly more transparent than the player bar (0.96).
+    ImGui::SetNextWindowBgAlpha(eased * 0.92f * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
                              ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoBringToFrontOnFocus;
-    if (active_tab == 1 && g_ui.dualsense_settings_expanded &&
-        g_ui.dualsense_tab_overflow[active_tab]) {
-        flags |= ImGuiWindowFlags_AlwaysVerticalScrollbar;
-    } else {
+    // Let ImGui show a vertical scrollbar automatically when the tab content
+    // (e.g. expanded DualSense accordions) overflows the window.
+    if (g_ui.settings_content_height <= target_h + 1.0f) {
         flags |= ImGuiWindowFlags_NoScrollbar;
     }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
 
-    if (ImGui::Begin("##DualSenseSettings", nullptr, flags)) {
+    if (ImGui::Begin("##Settings", nullptr, flags)) {
         if (current_h > set_tb * 2.0f) {
-            ImGui::PushItemWidth(180.0f);
-            const auto cfg = g_ctx.store->snapshot();
-            draw_dualsense_settings(cfg.dualsense);
-            ImGui::PopItemWidth();
+            if (ImGui::BeginTabBar("##settings_tabs")) {
+                // DualSense is the primary tab; Settings is secondary.
+                if (ImGui::BeginTabItem("DualSense")) {
+                    ImGui::PushItemWidth(180.0f);
+                    const auto cfg = g_ctx.store->snapshot();
+                    draw_dualsense_settings(cfg.dualsense);
+                    ImGui::PopItemWidth();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Settings")) {
+                    draw_general_settings_tab();
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
 
             const auto& style = ImGui::GetStyle();
-            constexpr float kDualSenseFooterPaddingY = 10.0f;
-            const float measured_h =
+            constexpr float kSettingsFooterPaddingY = 10.0f;
+            g_ui.settings_content_height =
                 ImGui::GetCursorPosY() +
-                std::max(0.0f, kDualSenseFooterPaddingY - style.ItemSpacing.y);
-            const int measured_tab = std::clamp(g_ui.dualsense_tab, 0, 2);
-            if (measured_tab != 1 || !g_ui.dualsense_settings_expanded) {
-                g_ui.dualsense_tab_height[measured_tab] = measured_h;
-            }
-            g_ui.dualsense_tab_overflow[measured_tab] =
-                measured_h > g_ui.dualsense_tab_height[measured_tab] + 1.0f;
+                std::max(0.0f, kSettingsFooterPaddingY - style.ItemSpacing.y);
         }
 
-        if (ImGui::IsMouseClicked(0) && !ImGui::IsWindowHovered(ImGuiHoveredFlags_None) &&
+        // Close on click outside. AllowWhenBlockedByActiveItem keeps the window open while
+        // interacting with items inside it (e.g. clicking a tab, which becomes the active item).
+        if (ImGui::IsMouseClicked(0) &&
+            !ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
             !ImGui::GetIO().WantCaptureMouse) {
-            g_ui.dualsense_visible = false;
+            g_ui.settings_visible = false;
         }
         mark_overlay_mouse_region();
     }
@@ -2536,7 +2511,7 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
             if (preview_clicked) {
                 const bool show = !g_ui.stations_visible;
                 if (show) {
-                    close_player_children_except(false, false, true);
+                    close_player_children_except(false, true);
                     g_ui.stations_visible = true;
                 } else {
                     g_ui.stations_visible  = false;
@@ -2697,7 +2672,8 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
 
     ImGui::SameLine(0, 3);
 
-    // ── Settings gear icon ──
+    // ── Unified settings window ──
+    float gear_right = 0.0f;
     {
         const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
         const ImU32 hl_u32 = ImGui::GetColorU32(hl_col);
@@ -2706,55 +2682,21 @@ static PlayerBarLayout draw_player_bar(IAudioSource* active) {
         if (draw_icon_btn("##gear", "\uF8F0", gear_rest, hl_u32)) {
             const bool show = !g_ui.settings_visible;
             if (show) {
-                close_player_children_except(true, false, false);
+                close_player_children_except(true, false);
                 g_ui.settings_visible = true;
             } else {
                 g_ui.settings_visible = false;
             }
         }
+        gear_right = ImGui::GetItemRectMax().x;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
-    }
-    const float gear_right = ImGui::GetItemRectMax().x;
-
-    ImGui::SameLine(0, 3);
-
-    // ── DualSense settings button ──
-    {
-        const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
-        const ImU32 hl_u32  = ImGui::GetColorU32(hl_col);
-        const ImU32 ds_rest = g_ui.dualsense_visible ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
-        if (draw_icon_btn("##dualsense", "DS", ds_rest, hl_u32)) {
-            const bool show = !g_ui.dualsense_visible;
-            if (show) {
-                close_player_children_except(false, true, false);
-                g_ui.dualsense_visible = true;
-            } else {
-                g_ui.dualsense_visible = false;
-            }
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("DualSense");
-    }
-
-    const float dualsense_right = ImGui::GetItemRectMax().x;
-    ImGui::SameLine(0, 3);
-
-    // ── Debug console button ──
-    {
-        const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
-        const ImU32 hl_u32   = ImGui::GetColorU32(hl_col);
-        const ImU32 log_rest = g_ui.console_visible ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
-        if (draw_icon_btn("##console", "LOG", log_rest, hl_u32)) {
-            g_ui.console_visible = !g_ui.console_visible;
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Console");
     }
 
     // Capture layout data for the stations browser and settings before closing the window.
     PlayerBarLayout layout;
-    layout.gear_right      = gear_right;
-    layout.dualsense_right = dualsense_right;
-    layout.pos             = ImGui::GetWindowPos();
-    layout.size            = ImGui::GetWindowSize();
+    layout.gear_right = gear_right;
+    layout.pos        = ImGui::GetWindowPos();
+    layout.size       = ImGui::GetWindowSize();
 
     mark_overlay_mouse_region();
     ImGui::End();
@@ -2798,7 +2740,8 @@ static void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& l
     const float current_h = std::max(st_tb + 4.0f, target_h * eased);
     ImGui::SetNextWindowPos(ImVec2(target_x, target_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(eased * g_ui.interactive_draw_alpha);
+    // Slightly more transparent than the player bar (0.96).
+    ImGui::SetNextWindowBgAlpha(eased * 0.92f * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags stFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -2929,7 +2872,7 @@ static void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
-    if (ImGui::Begin("FRDX Console", nullptr, flags)) {
+    if (ImGui::Begin("FRDX Console (F10)", nullptr, flags)) {
         const uint64_t log_generation = log::recent_generation();
         if (g_ui.console_log_generation != log_generation) {
             g_ui.console_lines          = log::recent_lines();
@@ -3049,7 +2992,7 @@ void draw_imgui_ui_impl() {
 
     const float interactive_alpha = update_interactive_overlay_alpha();
     if (g_ui.cursor_child_close_elapsed && !g_ui.cursor_hide_closed_children) {
-        close_player_children_except(false, false, false, false);
+        close_player_children_except(false, false, false);
         g_ui.cursor_hide_closed_children = true;
     }
     if (interactive_alpha <= 0.01f) return;
@@ -3060,7 +3003,6 @@ void draw_imgui_ui_impl() {
     } else {
         auto layout = draw_player_bar(active);
         draw_settings_window(layout);
-        draw_dualsense_window(layout);
         draw_stations_browser(active, layout);
         draw_console_window();
     }
@@ -3612,9 +3554,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
     if (g_ui.is_init) {
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
-        if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.dualsense_visible &&
-            !g_ui.stations_visible && !g_ui.console_visible && !g_ui.hud_visible &&
-            !has_visible_toasts()) {
+        if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible &&
+            !g_ui.console_visible && !g_ui.hud_visible && !has_visible_toasts()) {
             return false;
         }
         UINT backBufferIdx = 0;
