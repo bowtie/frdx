@@ -1204,9 +1204,9 @@ static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
     uv1.x = std::clamp(uv1.x, 0.0f, 1.0f);
     uv1.y = std::clamp(uv1.y, 0.0f, 1.0f);
 
-    // Slight dark tint so the blur reads as smoked glass.  Too dark crushes
+    // Dark tint so the blur reads as black frosted glass.  Too dark crushes
     // the blurred content to black and it looks like flat transparency.
-    const ImU32 tint = ImGui::GetColorU32(ImVec4(0.55f, 0.55f, 0.60f, 0.80f));
+    const ImU32 tint = ImGui::GetColorU32(ImVec4(0.30f, 0.30f, 0.34f, 0.88f));
     if (rounding > 0.0f) {
         dl->AddImageRounded(g_ui.overlay_blur_texture_id, min, max, uv0, uv1, tint, rounding,
                             flags);
