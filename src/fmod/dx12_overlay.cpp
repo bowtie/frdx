@@ -1225,13 +1225,10 @@ static void apply_window_blur(float rounding = 6.0f) {
     add_overlay_blur(ImGui::GetWindowDrawList(), pos, max, rounding);
 }
 
-// When blur is active, reduce the solid window background so the frosted
-// glass shows through, but keep it non-zero so the window border and a
-// subtle dark backing remain visible.
+// When blur is active, keep the original window background alpha so each
+// window retains its distinct base.  The frosted blur draws on top via
+// apply_window_blur(), providing the glass effect without homogenizing.
 static float window_bg_alpha(float normal) {
-    if (g_ui.background_blur_enabled.load(std::memory_order_acquire)) {
-        return std::min(normal, 0.35f);
-    }
     return normal;
 }
 
