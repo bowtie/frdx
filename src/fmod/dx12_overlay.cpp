@@ -1131,8 +1131,12 @@ static bool render_overlay_blur(ID3D12GraphicsCommandList* cmd, ID3D12Resource* 
 
     draw_blur_pass(cmd, *blur_source, g_dx.blur.half, g_dx.blur.downsample_pso.get(), 1.0f);
     draw_blur_pass(cmd, g_dx.blur.half, g_dx.blur.quarter, g_dx.blur.downsample_pso.get(), 1.0f);
+    // Multiple Kawase blur passes with increasing offsets for a stronger
+    // frosted effect.  Ping-pong between ping and pong.
     draw_blur_pass(cmd, g_dx.blur.quarter, g_dx.blur.ping, g_dx.blur.blur_pso.get(), 1.0f);
     draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.pong, g_dx.blur.blur_pso.get(), 2.0f);
+    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.ping, g_dx.blur.blur_pso.get(), 3.0f);
+    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.pong, g_dx.blur.blur_pso.get(), 4.0f);
 
     g_ui.overlay_blur_ready = true;
     return true;
@@ -1201,7 +1205,7 @@ static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
     uv1.y = std::clamp(uv1.y, 0.0f, 1.0f);
 
     // Dark tint so the blur reads as black frosted glass rather than a white wash.
-    const ImU32 tint = ImGui::GetColorU32(ImVec4(0.08f, 0.08f, 0.10f, 0.90f));
+    const ImU32 tint = ImGui::GetColorU32(ImVec4(0.15f, 0.15f, 0.18f, 0.85f));
     if (rounding > 0.0f) {
         dl->AddImageRounded(g_ui.overlay_blur_texture_id, min, max, uv0, uv1, tint, rounding,
                             flags);
@@ -1220,10 +1224,14 @@ static void apply_window_blur(float rounding = 6.0f) {
     add_overlay_blur(ImGui::GetWindowDrawList(), pos, max, rounding);
 }
 
-// When blur is active, suppress the solid window background so the frosted
-// glass shows through instead of an opaque dark panel.
+// When blur is active, reduce the solid window background so the frosted
+// glass shows through, but keep it non-zero so the window border and a
+// subtle dark backing remain visible.
 static float window_bg_alpha(float normal) {
-    return g_ui.background_blur_enabled.load(std::memory_order_acquire) ? 0.0f : normal;
+    if (g_ui.background_blur_enabled.load(std::memory_order_acquire)) {
+        return std::min(normal, 0.35f);
+    }
+    return normal;
 }
 
 static float advance_popup_anim(bool opening, float& anim) {
