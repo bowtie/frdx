@@ -1216,13 +1216,15 @@ static bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max,
     return true;
 }
 
-// Draw a frosted-glass blur rect behind the current ImGui window.  No-op when
-// blur is disabled or the blurred texture isn't ready yet this frame.
+// Draw a frosted-glass blur rect behind the current ImGui window.  Drawing on
+// the background draw list (not the window draw list) puts the blur BEHIND the
+// window's own background, so each window keeps its original bg alpha/color
+// while the frosted glass shows through the semi-transparent background.
 static void apply_window_blur(float rounding = 6.0f) {
     if (!g_ui.background_blur_enabled.load(std::memory_order_acquire)) return;
     const ImVec2 pos = ImGui::GetWindowPos();
     const ImVec2 max(pos.x + ImGui::GetWindowSize().x, pos.y + ImGui::GetWindowSize().y);
-    add_overlay_blur(ImGui::GetWindowDrawList(), pos, max, rounding);
+    add_overlay_blur(ImGui::GetBackgroundDrawList(), pos, max, rounding);
 }
 
 // When blur is active, keep the original window background alpha so each
