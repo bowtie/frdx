@@ -43,7 +43,16 @@ add_library(version SHARED
     src/fmod/radio_discovery.cpp
     src/fmod/dsp_bridge.cpp
     src/fmod/dsp_control_loop.cpp
-    src/fmod/dx12_overlay.cpp
+    src/overlay/overlay.cpp
+    src/overlay/blur.cpp
+    src/overlay/toasts.cpp
+    src/overlay/console.cpp
+    src/overlay/dualsense.cpp
+    src/overlay/themes.cpp
+    src/overlay/textures.cpp
+    src/overlay/hooks.cpp
+    src/overlay/player_bar.cpp
+    src/overlay/settings.cpp
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp
@@ -112,7 +121,16 @@ add_executable(frdx_sandbox
     src/fmod/radio_discovery.cpp
     src/fmod/dsp_bridge.cpp
     src/fmod/dsp_control_loop.cpp
-    src/fmod/dx12_overlay.cpp
+    src/overlay/overlay.cpp
+    src/overlay/blur.cpp
+    src/overlay/toasts.cpp
+    src/overlay/console.cpp
+    src/overlay/dualsense.cpp
+    src/overlay/themes.cpp
+    src/overlay/textures.cpp
+    src/overlay/hooks.cpp
+    src/overlay/player_bar.cpp
+    src/overlay/settings.cpp
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp

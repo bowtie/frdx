@@ -38,8 +38,7 @@ const toml::value& section(const toml::value& root, const char* key) {
 
 std::string normalize_notification_position(std::string value) {
     constexpr std::string_view valid[] = {
-        "top_left",    "top_center",    "top_right",
-        "bottom_left", "bottom_center", "bottom_right",
+        "top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right",
     };
     if (std::ranges::find(valid, std::string_view{value}) != std::ranges::end(valid)) return value;
     return "top_left";
@@ -91,23 +90,23 @@ Config load_config(const std::filesystem::path& path) {
     cfg.audio.force_stereo_audio =
         pick<bool>(au, "force_stereo_audio", cfg.audio.force_stereo_audio);
 
-    const auto& ov = section(root, "overlay");
-    cfg.overlay.theme =
-        normalize_overlay_theme(pick<std::string>(ov, "theme", cfg.overlay.theme));
+    const auto& ov    = section(root, "overlay");
+    cfg.overlay.theme = normalize_overlay_theme(pick<std::string>(ov, "theme", cfg.overlay.theme));
     cfg.overlay.music_notifications_enabled =
         pick<bool>(ov, "music_notifications_enabled", cfg.overlay.music_notifications_enabled);
-    cfg.overlay.notification_position =
-        normalize_notification_position(pick<std::string>(ov, "notification_position",
-                                                          cfg.overlay.notification_position));
+    cfg.overlay.notification_position = normalize_notification_position(
+        pick<std::string>(ov, "notification_position", cfg.overlay.notification_position));
     cfg.overlay.background_blur_enabled =
         pick<bool>(ov, "background_blur_enabled", cfg.overlay.background_blur_enabled);
+    cfg.overlay.drop_shadow_enabled =
+        pick<bool>(ov, "drop_shadow_enabled", cfg.overlay.drop_shadow_enabled);
 
-    const auto& ds = section(root, "dualsense");
+    const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
     cfg.dualsense.external_helper =
         pick<bool>(ds, "external_helper", cfg.dualsense.external_helper);
-    cfg.dualsense.udp_port = std::clamp(pick<int>(ds, "udp_port", cfg.dualsense.udp_port), 1,
-                                        65535);
+    cfg.dualsense.udp_port =
+        std::clamp(pick<int>(ds, "udp_port", cfg.dualsense.udp_port), 1, 65535);
     cfg.dualsense.wall_zones =
         std::clamp(pick<int>(ds, "wall_zones", cfg.dualsense.wall_zones), 1, 9);
 
@@ -139,23 +138,21 @@ Config load_config(const std::filesystem::path& path) {
         std::clamp(pick<int>(ds, "handbrake_bonus", cfg.dualsense.handbrake_bonus), 0, 255);
 
     cfg.dualsense.enable_abs = pick<bool>(ds, "enable_abs", cfg.dualsense.enable_abs);
-    cfg.dualsense.abs_brake_threshold = std::clamp(
-        pick<int>(ds, "abs_brake_threshold", cfg.dualsense.abs_brake_threshold), 0, 255);
+    cfg.dualsense.abs_brake_threshold =
+        std::clamp(pick<int>(ds, "abs_brake_threshold", cfg.dualsense.abs_brake_threshold), 0, 255);
     cfg.dualsense.abs_min_speed_kmh = std::clamp(
         static_cast<float>(pick<double>(ds, "abs_min_speed_kmh", cfg.dualsense.abs_min_speed_kmh)),
         0.0f, 500.0f);
     cfg.dualsense.abs_slip_ratio_threshold =
         std::clamp(static_cast<float>(pick<double>(ds, "abs_slip_ratio_threshold",
-                                                  cfg.dualsense.abs_slip_ratio_threshold)),
+                                                   cfg.dualsense.abs_slip_ratio_threshold)),
                    0.0f, 10.0f);
     cfg.dualsense.abs_combined_slip_threshold =
         std::clamp(static_cast<float>(pick<double>(ds, "abs_combined_slip_threshold",
-                                                  cfg.dualsense.abs_combined_slip_threshold)),
+                                                   cfg.dualsense.abs_combined_slip_threshold)),
                    0.0f, 10.0f);
-    cfg.dualsense.abs_freq =
-        std::clamp(pick<int>(ds, "abs_freq", cfg.dualsense.abs_freq), 0, 255);
-    cfg.dualsense.abs_amp =
-        std::clamp(pick<int>(ds, "abs_amp", cfg.dualsense.abs_amp), 0, 255);
+    cfg.dualsense.abs_freq = std::clamp(pick<int>(ds, "abs_freq", cfg.dualsense.abs_freq), 0, 255);
+    cfg.dualsense.abs_amp  = std::clamp(pick<int>(ds, "abs_amp", cfg.dualsense.abs_amp), 0, 255);
 
     cfg.dualsense.enable_throttle_resistance =
         pick<bool>(ds, "enable_throttle_resistance", cfg.dualsense.enable_throttle_resistance);
@@ -163,34 +160,28 @@ Config load_config(const std::filesystem::path& path) {
         std::clamp(pick<int>(ds, "accel_deadzone", cfg.dualsense.accel_deadzone), 0, 255);
     cfg.dualsense.throttle_baseline_force = std::clamp(
         pick<int>(ds, "throttle_baseline_force", cfg.dualsense.throttle_baseline_force), 0, 255);
-    cfg.dualsense.throttle_max_force = std::clamp(
-        pick<int>(ds, "throttle_max_force", cfg.dualsense.throttle_max_force), 0, 255);
+    cfg.dualsense.throttle_max_force =
+        std::clamp(pick<int>(ds, "throttle_max_force", cfg.dualsense.throttle_max_force), 0, 255);
     cfg.dualsense.throttle_curve = std::clamp(
-        static_cast<float>(pick<double>(ds, "throttle_curve", cfg.dualsense.throttle_curve)),
-        0.1f, 20.0f);
-    cfg.dualsense.throttle_wall_engage_at =
-        std::clamp(pick<int>(ds, "throttle_wall_engage_at",
-                             cfg.dualsense.throttle_wall_engage_at),
-                   0, 255);
-    cfg.dualsense.throttle_wall_release_at =
-        std::clamp(pick<int>(ds, "throttle_wall_release_at",
-                             cfg.dualsense.throttle_wall_release_at),
-                   0, 255);
+        static_cast<float>(pick<double>(ds, "throttle_curve", cfg.dualsense.throttle_curve)), 0.1f,
+        20.0f);
+    cfg.dualsense.throttle_wall_engage_at = std::clamp(
+        pick<int>(ds, "throttle_wall_engage_at", cfg.dualsense.throttle_wall_engage_at), 0, 255);
+    cfg.dualsense.throttle_wall_release_at = std::clamp(
+        pick<int>(ds, "throttle_wall_release_at", cfg.dualsense.throttle_wall_release_at), 0, 255);
 
     cfg.dualsense.enable_rev_limiter =
         pick<bool>(ds, "enable_rev_limiter", cfg.dualsense.enable_rev_limiter);
-    cfg.dualsense.rev_limit_ratio =
-        std::clamp(static_cast<float>(pick<double>(ds, "rev_limit_ratio",
-                                                   cfg.dualsense.rev_limit_ratio)),
-                   0.0f, 1.0f);
+    cfg.dualsense.rev_limit_ratio = std::clamp(
+        static_cast<float>(pick<double>(ds, "rev_limit_ratio", cfg.dualsense.rev_limit_ratio)),
+        0.0f, 1.0f);
     cfg.dualsense.rev_limit_freq =
         std::clamp(pick<int>(ds, "rev_limit_freq", cfg.dualsense.rev_limit_freq), 0, 255);
     cfg.dualsense.rev_limit_amp =
         std::clamp(pick<int>(ds, "rev_limit_amp", cfg.dualsense.rev_limit_amp), 0, 255);
-    cfg.dualsense.rev_limit_hold_ms =
-        std::clamp(static_cast<float>(pick<double>(ds, "rev_limit_hold_ms",
-                                                   cfg.dualsense.rev_limit_hold_ms)),
-                   0.0f, 1000.0f);
+    cfg.dualsense.rev_limit_hold_ms = std::clamp(
+        static_cast<float>(pick<double>(ds, "rev_limit_hold_ms", cfg.dualsense.rev_limit_hold_ms)),
+        0.0f, 1000.0f);
 
     cfg.dualsense.enable_wheelspin_buzz =
         pick<bool>(ds, "enable_wheelspin_buzz", cfg.dualsense.enable_wheelspin_buzz);
@@ -200,8 +191,8 @@ Config load_config(const std::filesystem::path& path) {
     cfg.dualsense.enable_idle_buzz =
         pick<bool>(ds, "enable_idle_buzz", cfg.dualsense.enable_idle_buzz);
     cfg.dualsense.idle_max_speed_kmh =
-        std::clamp(static_cast<float>(pick<double>(ds, "idle_max_speed_kmh",
-                                                   cfg.dualsense.idle_max_speed_kmh)),
+        std::clamp(static_cast<float>(
+                       pick<double>(ds, "idle_max_speed_kmh", cfg.dualsense.idle_max_speed_kmh)),
                    0.0f, 100.0f);
     cfg.dualsense.idle_accel_max =
         std::clamp(pick<int>(ds, "idle_accel_max", cfg.dualsense.idle_accel_max), 0, 255);
@@ -211,10 +202,9 @@ Config load_config(const std::filesystem::path& path) {
         std::clamp(pick<int>(ds, "idle_amp_low", cfg.dualsense.idle_amp_low), 0, 255);
     cfg.dualsense.idle_amp_high =
         std::clamp(pick<int>(ds, "idle_amp_high", cfg.dualsense.idle_amp_high), 0, 255);
-    cfg.dualsense.idle_period_s =
-        std::clamp(static_cast<float>(pick<double>(ds, "idle_period_s",
-                                                   cfg.dualsense.idle_period_s)),
-                   0.05f, 5.0f);
+    cfg.dualsense.idle_period_s = std::clamp(
+        static_cast<float>(pick<double>(ds, "idle_period_s", cfg.dualsense.idle_period_s)), 0.05f,
+        5.0f);
 
     cfg.dualsense.enable_gear_shift =
         pick<bool>(ds, "enable_gear_shift", cfg.dualsense.enable_gear_shift);
@@ -232,8 +222,7 @@ Config load_config(const std::filesystem::path& path) {
     cfg.dualsense.enable_startup_pulse =
         pick<bool>(ds, "enable_startup_pulse", cfg.dualsense.enable_startup_pulse);
     cfg.dualsense.startup_pulse_force =
-        std::clamp(pick<int>(ds, "startup_pulse_force", cfg.dualsense.startup_pulse_force), 0,
-                   255);
+        std::clamp(pick<int>(ds, "startup_pulse_force", cfg.dualsense.startup_pulse_force), 0, 255);
     cfg.dualsense.enable_reconnect =
         pick<bool>(ds, "enable_reconnect", cfg.dualsense.enable_reconnect);
     cfg.dualsense.reconnect_interval_s =
@@ -343,8 +332,10 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.header("overlay");
     e.kv("theme", normalize_overlay_theme(cfg.overlay.theme));
     e.kv("music_notifications_enabled", cfg.overlay.music_notifications_enabled);
-    e.kv("notification_position", normalize_notification_position(cfg.overlay.notification_position));
+    e.kv("notification_position",
+         normalize_notification_position(cfg.overlay.notification_position));
     e.kv("background_blur_enabled", cfg.overlay.background_blur_enabled);
+    e.kv("drop_shadow_enabled", cfg.overlay.drop_shadow_enabled);
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);
@@ -366,22 +357,18 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("enable_abs", cfg.dualsense.enable_abs);
     e.kv("abs_brake_threshold", static_cast<int64_t>(cfg.dualsense.abs_brake_threshold));
     e.kv("abs_min_speed_kmh", static_cast<double>(cfg.dualsense.abs_min_speed_kmh));
-    e.kv("abs_slip_ratio_threshold",
-         static_cast<double>(cfg.dualsense.abs_slip_ratio_threshold));
+    e.kv("abs_slip_ratio_threshold", static_cast<double>(cfg.dualsense.abs_slip_ratio_threshold));
     e.kv("abs_combined_slip_threshold",
          static_cast<double>(cfg.dualsense.abs_combined_slip_threshold));
     e.kv("abs_freq", static_cast<int64_t>(cfg.dualsense.abs_freq));
     e.kv("abs_amp", static_cast<int64_t>(cfg.dualsense.abs_amp));
     e.kv("enable_throttle_resistance", cfg.dualsense.enable_throttle_resistance);
     e.kv("accel_deadzone", static_cast<int64_t>(cfg.dualsense.accel_deadzone));
-    e.kv("throttle_baseline_force",
-         static_cast<int64_t>(cfg.dualsense.throttle_baseline_force));
+    e.kv("throttle_baseline_force", static_cast<int64_t>(cfg.dualsense.throttle_baseline_force));
     e.kv("throttle_max_force", static_cast<int64_t>(cfg.dualsense.throttle_max_force));
     e.kv("throttle_curve", static_cast<double>(cfg.dualsense.throttle_curve));
-    e.kv("throttle_wall_engage_at",
-         static_cast<int64_t>(cfg.dualsense.throttle_wall_engage_at));
-    e.kv("throttle_wall_release_at",
-         static_cast<int64_t>(cfg.dualsense.throttle_wall_release_at));
+    e.kv("throttle_wall_engage_at", static_cast<int64_t>(cfg.dualsense.throttle_wall_engage_at));
+    e.kv("throttle_wall_release_at", static_cast<int64_t>(cfg.dualsense.throttle_wall_release_at));
     e.kv("enable_rev_limiter", cfg.dualsense.enable_rev_limiter);
     e.kv("rev_limit_ratio", static_cast<double>(cfg.dualsense.rev_limit_ratio));
     e.kv("rev_limit_freq", static_cast<int64_t>(cfg.dualsense.rev_limit_freq));

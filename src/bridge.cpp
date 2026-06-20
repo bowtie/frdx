@@ -10,7 +10,7 @@
 #include "frdx/fmod/dsp_control_loop.hpp"
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
-#include "frdx/fmod/dx12_overlay.hpp"
+#include "frdx/overlay/overlay.hpp"
 
 #include "frdx/subprocess.hpp"
 
@@ -92,30 +92,29 @@ bool launch_external_helper_task(const std::filesystem::path& module_dir, int ud
         out << "Set sh = CreateObject(\"WScript.Shell\")\r\n";
         out << "sh.CurrentDirectory = \"" << module_dir.string() << "\"\r\n";
         out << "sh.Run \"\"\"" << exe.string() << "\"\" --external --port "
-            << std::clamp(udp_port, 1, 65535) << " --watch-process ForzaHorizon6.exe\", 0, False\r\n";
+            << std::clamp(udp_port, 1, 65535)
+            << " --watch-process ForzaHorizon6.exe\", 0, False\r\n";
     }
 
     std::wstring system_dir(MAX_PATH, L'\0');
-    const UINT system_len = GetSystemDirectoryW(system_dir.data(), static_cast<UINT>(system_dir.size()));
+    const UINT system_len =
+        GetSystemDirectoryW(system_dir.data(), static_cast<UINT>(system_dir.size()));
     if (system_len == 0) {
         log::warn("[dualsense] failed to resolve System32 path for helper launcher");
         return false;
     }
     system_dir.resize(system_len);
-    auto system_path = std::filesystem::path(system_dir);
-    const std::wstring schtasks = quote_task_arg((system_path / L"schtasks.exe").wstring());
-    const std::wstring wscript  = quote_task_arg((system_path / L"wscript.exe").wstring());
+    auto system_path             = std::filesystem::path(system_dir);
+    const std::wstring schtasks  = quote_task_arg((system_path / L"schtasks.exe").wstring());
+    const std::wstring wscript   = quote_task_arg((system_path / L"wscript.exe").wstring());
     const std::wstring task_name = L"FRDX_DualSenseHelper";
-    const std::wstring task_cmd =
-        wscript + L" //B //NoLogo " + quote_task_arg(launcher.wstring());
-    const std::wstring create_cmd =
-        schtasks + L" /Create /TN " + quote_task_arg(task_name) +
-        L" /SC ONCE /ST " + time_buf + L" /TR " + quote_task_arg(task_cmd) +
-        L" /F";
+    const std::wstring task_cmd  = wscript + L" //B //NoLogo " + quote_task_arg(launcher.wstring());
+    const std::wstring create_cmd = schtasks + L" /Create /TN " + quote_task_arg(task_name) +
+                                    L" /SC ONCE /ST " + time_buf + L" /TR " +
+                                    quote_task_arg(task_cmd) + L" /F";
     if (!run_hidden_process(create_cmd, 8000)) return false;
 
-    const std::wstring run_cmd =
-        schtasks + L" /Run /TN " + quote_task_arg(task_name);
+    const std::wstring run_cmd = schtasks + L" /Run /TN " + quote_task_arg(task_name);
     if (!run_hidden_process(run_cmd, 8000)) return false;
 
     log::info("[dualsense] requested external helper launch through Task Scheduler: {}",
@@ -181,7 +180,7 @@ void run_bridge(HMODULE self) noexcept {
     if (shoutcast) {
         auto stations_path = data_dir / "stations.json";
         shoutcast->load_stations(stations_path);
-        auto stations = shoutcast->stations();
+        auto stations           = shoutcast->stations();
         std::string sel_station = cfg.shoutcast.last_station_id;
         std::string sel_stream  = cfg.shoutcast.last_stream_id;
         bool found              = false;
@@ -218,19 +217,19 @@ void run_bridge(HMODULE self) noexcept {
     if (fns.ready())
         ctrl = std::make_unique<fmod_bridge::ControlLoop>(bridge, img, cfg.audio.output_gain);
 
-    store.on_change([dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get()](
-                        const Config& c) {
-        if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
+    store.on_change(
+        [dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get()](const Config& c) {
+            if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
 
-        bridge.set_gain(c.audio.output_gain);
-        bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
-        dualsense.update_config(dualsense_service_config(c.dualsense));
-        maybe_launch_external_helper(dir, c.dualsense);
-        if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
-    });
+            bridge.set_gain(c.audio.output_gain);
+            bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
+            dualsense.update_config(dualsense_service_config(c.dualsense));
+            maybe_launch_external_helper(dir, c.dualsense);
+            if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
+        });
 
     // Start the Direct3D 12 ImGui overlay detours
-    dx12_overlay::initialize(mgr, bridge, store, &dualsense);
+    overlay::initialize(mgr, bridge, store, &dualsense);
 
     for (;;) Sleep(60'000);
 }

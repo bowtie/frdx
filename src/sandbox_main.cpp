@@ -9,7 +9,7 @@
 #include "frdx/config_store.hpp"
 #include "frdx/dualsense.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
-#include "frdx/fmod/dx12_overlay.hpp"
+#include "frdx/overlay/overlay.hpp"
 #include "frdx/log.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 
@@ -41,17 +41,26 @@ public:
         IMMDeviceEnumerator* enumerator = nullptr;
         HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(&enumerator));
-        if (FAILED(hr)) { frdx::log::warn("[wasapi] CoCreateInstance failed ({})", hr); return false; }
+        if (FAILED(hr)) {
+            frdx::log::warn("[wasapi] CoCreateInstance failed ({})", hr);
+            return false;
+        }
 
         IMMDevice* device = nullptr;
-        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        hr                = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
         enumerator->Release();
-        if (FAILED(hr)) { frdx::log::warn("[wasapi] GetDefaultAudioEndpoint failed ({})", hr); return false; }
+        if (FAILED(hr)) {
+            frdx::log::warn("[wasapi] GetDefaultAudioEndpoint failed ({})", hr);
+            return false;
+        }
 
         hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                               reinterpret_cast<void**>(&client_));
         device->Release();
-        if (FAILED(hr)) { frdx::log::warn("[wasapi] Activate failed ({})", hr); return false; }
+        if (FAILED(hr)) {
+            frdx::log::warn("[wasapi] Activate failed ({})", hr);
+            return false;
+        }
 
         WAVEFORMATEX* mix_fmt = nullptr;
         client_->GetMixFormat(&mix_fmt);
@@ -68,18 +77,37 @@ public:
         sample_rate_ = fmt.nSamplesPerSec;
 
         hEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!hEvent_) { frdx::log::warn("[wasapi] CreateEvent failed"); client_->Release(); client_ = nullptr; return false; }
+        if (!hEvent_) {
+            frdx::log::warn("[wasapi] CreateEvent failed");
+            client_->Release();
+            client_ = nullptr;
+            return false;
+        }
 
         // 20ms buffer + EVENTCALLBACK for zero-CPU blocking
         REFERENCE_TIME buf_dur = 200000; // 20ms
         hr = client_->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                  buf_dur, 0, &fmt, nullptr);
-        if (FAILED(hr)) { frdx::log::warn("[wasapi] Initialize failed ({})", hr); CloseHandle(hEvent_); hEvent_ = nullptr; client_->Release(); client_ = nullptr; return false; }
+        if (FAILED(hr)) {
+            frdx::log::warn("[wasapi] Initialize failed ({})", hr);
+            CloseHandle(hEvent_);
+            hEvent_ = nullptr;
+            client_->Release();
+            client_ = nullptr;
+            return false;
+        }
 
         client_->GetBufferSize(&buffer_frames_);
         tmp_buf_.resize(static_cast<std::size_t>(buffer_frames_) * 2);
         hr = client_->GetService(IID_PPV_ARGS(&render_));
-        if (FAILED(hr)) { frdx::log::warn("[wasapi] GetService failed ({})", hr); CloseHandle(hEvent_); hEvent_ = nullptr; client_->Release(); client_ = nullptr; return false; }
+        if (FAILED(hr)) {
+            frdx::log::warn("[wasapi] GetService failed ({})", hr);
+            CloseHandle(hEvent_);
+            hEvent_ = nullptr;
+            client_->Release();
+            client_ = nullptr;
+            return false;
+        }
 
         client_->SetEventHandle(hEvent_);
         client_->Start();
@@ -92,9 +120,9 @@ public:
 
             // RAII COM initializer — ensures CoUninitialize is called on any exit path.
             struct ComGuard {
-                ComGuard()  { CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
+                ComGuard() { CoInitializeEx(nullptr, COINIT_MULTITHREADED); }
                 ~ComGuard() { CoUninitialize(); }
-                ComGuard(const ComGuard&) = delete;
+                ComGuard(const ComGuard&)            = delete;
                 ComGuard& operator=(const ComGuard&) = delete;
             } com_guard;
 
@@ -112,20 +140,20 @@ public:
 
                 BYTE* data = nullptr;
                 if (SUCCEEDED(render_->GetBuffer(avail, &data))) {
-                    auto& ring = mgr_->ring();
+                    auto& ring             = mgr_->ring();
                     const std::size_t need = static_cast<std::size_t>(avail) * 2 * sizeof(int16_t);
                     const std::size_t readable = ring.readable();
                     auto* out                  = reinterpret_cast<float*>(data);
-                    const float g     = bridge_->gain();
-                    const float scale = g * (1.0f / 32768.0f);
+                    const float g              = bridge_->gain();
+                    const float scale          = g * (1.0f / 32768.0f);
 
                     if (readable >= need) {
                         ring.read(tmp_buf_.data(), need);
-                        for (UINT32 i = 0; i < avail * 2; i++)
-                            out[i] = tmp_buf_[i] * scale;
+                        for (UINT32 i = 0; i < avail * 2; i++) out[i] = tmp_buf_[i] * scale;
                         if (!logged_first) {
-                            frdx::log::info("[wasapi] first audio: {} frames, gain={:.2f}, ring_readable={}",
-                                            avail, g, readable);
+                            frdx::log::info(
+                                "[wasapi] first audio: {} frames, gain={:.2f}, ring_readable={}",
+                                avail, g, readable);
                             logged_first = true;
                         }
                     } else {
@@ -139,10 +167,25 @@ public:
     }
 
     void stop() {
-        if (thread_.joinable()) { SetEvent(hEvent_); thread_.request_stop(); thread_.join(); }
-        if (client_) { client_->Stop(); client_->Reset(); client_->Release(); client_ = nullptr; }
-        if (render_) { render_->Release(); render_ = nullptr; }
-        if (hEvent_) { CloseHandle(hEvent_); hEvent_ = nullptr; }
+        if (thread_.joinable()) {
+            SetEvent(hEvent_);
+            thread_.request_stop();
+            thread_.join();
+        }
+        if (client_) {
+            client_->Stop();
+            client_->Reset();
+            client_->Release();
+            client_ = nullptr;
+        }
+        if (render_) {
+            render_->Release();
+            render_ = nullptr;
+        }
+        if (hEvent_) {
+            CloseHandle(hEvent_);
+            hEvent_ = nullptr;
+        }
     }
 
     void flush() {
@@ -156,15 +199,15 @@ public:
     ~WasapiOutput() { stop(); }
 
 private:
-    frdx::AudioSourceManager* mgr_     = nullptr;
+    frdx::AudioSourceManager* mgr_        = nullptr;
     frdx::fmod_bridge::DSPBridge* bridge_ = nullptr;
     std::jthread thread_;
     std::vector<int16_t> tmp_buf_;
-    IAudioClient* client_         = nullptr;
-    IAudioRenderClient* render_   = nullptr;
-    HANDLE hEvent_                = nullptr;
-    UINT32 buffer_frames_         = 0;
-    uint32_t sample_rate_         = 48000;
+    IAudioClient* client_       = nullptr;
+    IAudioRenderClient* render_ = nullptr;
+    HANDLE hEvent_              = nullptr;
+    UINT32 buffer_frames_       = 0;
+    uint32_t sample_rate_       = 48000;
 };
 
 // ─── Minimal DX12 Context ────────────────────────────────────────────────
@@ -172,34 +215,58 @@ private:
 struct DxContext {
     static constexpr UINT kBufferCount = 2;
 
-    ID3D12Device* device          = nullptr;
-    ID3D12CommandQueue* queue     = nullptr;
-    IDXGISwapChain3* swapchain    = nullptr;
-    ID3D12DescriptorHeap* rtv_heap = nullptr;
-    ID3D12CommandAllocator* alloc = nullptr;
-    ID3D12GraphicsCommandList* cmd = nullptr;
-    ID3D12Resource* backbuffers[kBufferCount] = {};
+    ID3D12Device* device                           = nullptr;
+    ID3D12CommandQueue* queue                      = nullptr;
+    IDXGISwapChain3* swapchain                     = nullptr;
+    ID3D12DescriptorHeap* rtv_heap                 = nullptr;
+    ID3D12CommandAllocator* alloc                  = nullptr;
+    ID3D12GraphicsCommandList* cmd                 = nullptr;
+    ID3D12Resource* backbuffers[kBufferCount]      = {};
     D3D12_CPU_DESCRIPTOR_HANDLE rtvs[kBufferCount] = {};
-    ID3D12Fence* fence            = nullptr;
-    HANDLE fence_evt              = nullptr;
-    UINT64 fence_val              = 0;
+    ID3D12Fence* fence                             = nullptr;
+    HANDLE fence_evt                               = nullptr;
+    UINT64 fence_val                               = 0;
 };
 
 static void destroy_dx(DxContext& dx) {
-    if (dx.fence) { dx.fence->Release(); dx.fence = nullptr; }
-    if (dx.fence_evt) { CloseHandle(dx.fence_evt); dx.fence_evt = nullptr; }
+    if (dx.fence) {
+        dx.fence->Release();
+        dx.fence = nullptr;
+    }
+    if (dx.fence_evt) {
+        CloseHandle(dx.fence_evt);
+        dx.fence_evt = nullptr;
+    }
     for (auto& backbuffer : dx.backbuffers) {
         if (backbuffer) {
             backbuffer->Release();
             backbuffer = nullptr;
         }
     }
-    if (dx.cmd) { dx.cmd->Release(); dx.cmd = nullptr; }
-    if (dx.alloc) { dx.alloc->Release(); dx.alloc = nullptr; }
-    if (dx.rtv_heap) { dx.rtv_heap->Release(); dx.rtv_heap = nullptr; }
-    if (dx.swapchain) { dx.swapchain->Release(); dx.swapchain = nullptr; }
-    if (dx.queue) { dx.queue->Release(); dx.queue = nullptr; }
-    if (dx.device) { dx.device->Release(); dx.device = nullptr; }
+    if (dx.cmd) {
+        dx.cmd->Release();
+        dx.cmd = nullptr;
+    }
+    if (dx.alloc) {
+        dx.alloc->Release();
+        dx.alloc = nullptr;
+    }
+    if (dx.rtv_heap) {
+        dx.rtv_heap->Release();
+        dx.rtv_heap = nullptr;
+    }
+    if (dx.swapchain) {
+        dx.swapchain->Release();
+        dx.swapchain = nullptr;
+    }
+    if (dx.queue) {
+        dx.queue->Release();
+        dx.queue = nullptr;
+    }
+    if (dx.device) {
+        dx.device->Release();
+        dx.device = nullptr;
+    }
     // NOTE: dx.device is the same COM object as the overlay's d3d12_device
     // (acquired via pSwapChain->GetDevice in hook_Present).  This Release()
     // drops the final reference — the overlay must have already released its
@@ -212,8 +279,7 @@ static bool init_dx(HWND hwnd, DxContext& dx) {
 
     D3D12_COMMAND_QUEUE_DESC qd{};
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    if (FAILED(dx.device->CreateCommandQueue(&qd, IID_PPV_ARGS(&dx.queue))))
-        return false;
+    if (FAILED(dx.device->CreateCommandQueue(&qd, IID_PPV_ARGS(&dx.queue)))) return false;
 
     IDXGIFactory4* factory = nullptr;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
@@ -241,14 +307,13 @@ static bool init_dx(HWND hwnd, DxContext& dx) {
     D3D12_DESCRIPTOR_HEAP_DESC rtv_d{};
     rtv_d.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     rtv_d.NumDescriptors = DxContext::kBufferCount;
-    if (FAILED(dx.device->CreateDescriptorHeap(&rtv_d, IID_PPV_ARGS(&dx.rtv_heap))))
-        return false;
+    if (FAILED(dx.device->CreateDescriptorHeap(&rtv_d, IID_PPV_ARGS(&dx.rtv_heap)))) return false;
 
     if (FAILED(dx.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                  IID_PPV_ARGS(&dx.alloc))))
+                                                 IID_PPV_ARGS(&dx.alloc))))
         return false;
     if (FAILED(dx.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, dx.alloc, nullptr,
-                                             IID_PPV_ARGS(&dx.cmd))))
+                                            IID_PPV_ARGS(&dx.cmd))))
         return false;
     dx.cmd->Close();
 
@@ -261,15 +326,15 @@ static bool init_dx(HWND hwnd, DxContext& dx) {
     for (UINT i = 0; i < DxContext::kBufferCount; ++i) {
         dx.swapchain->GetBuffer(i, IID_PPV_ARGS(&dx.backbuffers[i]));
         dx.device->CreateRenderTargetView(dx.backbuffers[i], nullptr, rtv);
-        dx.rtvs[i] = rtv;
-        rtv.ptr += rtv_inc;
+        dx.rtvs[i]  = rtv;
+        rtv.ptr    += rtv_inc;
     }
     return true;
 }
 
 // ─── WndProc ─────────────────────────────────────────────────────────────
 
-static DxContext* g_dx = nullptr;
+static DxContext* g_dx       = nullptr;
 static bool g_overlay_direct = true;
 
 static LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -289,7 +354,7 @@ static LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 }
             }
             if (g_overlay_direct) {
-                frdx::dx12_overlay::notify_direct_resize_begin();
+                frdx::overlay::notify_direct_resize_begin();
             }
             for (auto& backbuffer : g_dx->backbuffers) {
                 if (backbuffer) {
@@ -304,15 +369,16 @@ static LRESULT CALLBACK wnd_proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 return 0;
             }
             if (g_overlay_direct) {
-                frdx::dx12_overlay::notify_direct_resize_end(g_dx->swapchain);
+                frdx::overlay::notify_direct_resize_end(g_dx->swapchain);
             }
-            SIZE_T rtv_inc = g_dx->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            SIZE_T rtv_inc =
+                g_dx->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
             D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_dx->rtv_heap->GetCPUDescriptorHandleForHeapStart();
             for (UINT i = 0; i < DxContext::kBufferCount; ++i) {
                 g_dx->swapchain->GetBuffer(i, IID_PPV_ARGS(&g_dx->backbuffers[i]));
                 g_dx->device->CreateRenderTargetView(g_dx->backbuffers[i], nullptr, rtv);
-                g_dx->rtvs[i] = rtv;
-                rtv.ptr += rtv_inc;
+                g_dx->rtvs[i]  = rtv;
+                rtv.ptr       += rtv_inc;
             }
         }
     }
@@ -346,8 +412,7 @@ static bool sandbox_hook_mode_requested() {
     DWORD n = GetEnvironmentVariableW(L"FRDX_SANDBOX_HOOKED", value,
                                       static_cast<DWORD>(std::size(value)));
     if (n == 0 || n >= std::size(value)) return false;
-    return value[0] != L'\0' && value[0] != L'0' && value[0] != L'f' &&
-           value[0] != L'F';
+    return value[0] != L'\0' && value[0] != L'0' && value[0] != L'f' && value[0] != L'F';
 }
 
 // ─── Teardown guard (typestate-enforced cleanup order) ───────────────────
@@ -366,19 +431,16 @@ namespace {
 
 enum class TeardownPhase : uint8_t { Init, OverlayDown, WasapiDown, SourceDown };
 
-template <TeardownPhase P>
-class TeardownGuard;
+template <TeardownPhase P> class TeardownGuard;
 
 // ── Phase declarations ────────────────────────────────────────────────
 // Each phase holds the components it needs for its transition and exposes
 // exactly one transition method.  Components are shed as they are torn down.
 
-template <>
-class TeardownGuard<TeardownPhase::Init> {
+template <> class TeardownGuard<TeardownPhase::Init> {
 public:
     TeardownGuard(DxContext& dx, UINT64 fence_val, WasapiOutput& wasapi,
-                  frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className,
-                  HINSTANCE hInst);
+                  frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className, HINSTANCE hInst);
     ~TeardownGuard() noexcept;
 
     TeardownGuard(const TeardownGuard&)            = delete;
@@ -396,12 +458,10 @@ private:
     bool abandoned_ = true;
 };
 
-template <>
-class TeardownGuard<TeardownPhase::OverlayDown> {
+template <> class TeardownGuard<TeardownPhase::OverlayDown> {
 public:
-    TeardownGuard(DxContext& dx, WasapiOutput& wasapi,
-                  frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className,
-                  HINSTANCE hInst);
+    TeardownGuard(DxContext& dx, WasapiOutput& wasapi, frdx::AudioSourceManager& mgr, HWND hwnd,
+                  LPCWSTR className, HINSTANCE hInst);
     ~TeardownGuard() noexcept;
 
     TeardownGuard(const TeardownGuard&)            = delete;
@@ -419,11 +479,10 @@ private:
     bool abandoned_ = true;
 };
 
-template <>
-class TeardownGuard<TeardownPhase::WasapiDown> {
+template <> class TeardownGuard<TeardownPhase::WasapiDown> {
 public:
-    TeardownGuard(DxContext& dx, frdx::AudioSourceManager& mgr, HWND hwnd,
-                  LPCWSTR className, HINSTANCE hInst);
+    TeardownGuard(DxContext& dx, frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className,
+                  HINSTANCE hInst);
     ~TeardownGuard() noexcept;
 
     TeardownGuard(const TeardownGuard&)            = delete;
@@ -440,8 +499,7 @@ private:
     bool abandoned_ = true;
 };
 
-template <>
-class TeardownGuard<TeardownPhase::SourceDown> {
+template <> class TeardownGuard<TeardownPhase::SourceDown> {
 public:
     TeardownGuard(DxContext& dx, HWND hwnd, LPCWSTR className, HINSTANCE hInst);
     ~TeardownGuard() noexcept;
@@ -464,11 +522,11 @@ private:
 // Phase 1 → 2: Stop the overlay action worker + uninstall MinHook detours.
 // This must happen first: the action worker can mutate the source and ring
 // buffer, so it must be stopped before either is torn down.
-inline TeardownGuard<TeardownPhase::Init>::TeardownGuard(
-    DxContext& dx, UINT64 fence_val, WasapiOutput& wasapi,
-    frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className, HINSTANCE hInst)
-    : dx_(&dx), wasapi_(&wasapi), mgr_(&mgr), hwnd_(hwnd),
-      className_(className), hInst_(hInst) {
+inline TeardownGuard<TeardownPhase::Init>::TeardownGuard(DxContext& dx, UINT64 fence_val,
+                                                         WasapiOutput& wasapi,
+                                                         frdx::AudioSourceManager& mgr, HWND hwnd,
+                                                         LPCWSTR className, HINSTANCE hInst)
+    : dx_(&dx), wasapi_(&wasapi), mgr_(&mgr), hwnd_(hwnd), className_(className), hInst_(hInst) {
     // Prevent WndProc from touching DX during teardown.
     g_dx = nullptr;
 
@@ -481,7 +539,7 @@ inline TeardownGuard<TeardownPhase::Init>::TeardownGuard(
 
 inline TeardownGuard<TeardownPhase::OverlayDown>
 TeardownGuard<TeardownPhase::Init>::shutdown_overlay() && {
-    frdx::dx12_overlay::shutdown();
+    frdx::overlay::shutdown();
     abandoned_ = false;
     return {*dx_, *wasapi_, *mgr_, hwnd_, className_, hInst_};
 }
@@ -489,11 +547,11 @@ TeardownGuard<TeardownPhase::Init>::shutdown_overlay() && {
 // Phase 2 → 3: Stop the WASAPI audio thread.  At this point the overlay
 // action worker is dead, so no new UI-triggered mutations can race with
 // the audio thread's final pump callbacks.
-inline TeardownGuard<TeardownPhase::OverlayDown>::TeardownGuard(
-    DxContext& dx, WasapiOutput& wasapi, frdx::AudioSourceManager& mgr,
-    HWND hwnd, LPCWSTR className, HINSTANCE hInst)
-    : dx_(&dx), wasapi_(&wasapi), mgr_(&mgr), hwnd_(hwnd),
-      className_(className), hInst_(hInst) {}
+inline TeardownGuard<TeardownPhase::OverlayDown>::TeardownGuard(DxContext& dx, WasapiOutput& wasapi,
+                                                                frdx::AudioSourceManager& mgr,
+                                                                HWND hwnd, LPCWSTR className,
+                                                                HINSTANCE hInst)
+    : dx_(&dx), wasapi_(&wasapi), mgr_(&mgr), hwnd_(hwnd), className_(className), hInst_(hInst) {}
 
 inline TeardownGuard<TeardownPhase::WasapiDown>
 TeardownGuard<TeardownPhase::OverlayDown>::stop_wasapi() && {
@@ -505,9 +563,10 @@ TeardownGuard<TeardownPhase::OverlayDown>::stop_wasapi() && {
 // Phase 3 → 4: Deactivate the source and shut it down (kills ffmpeg, joins
 // metadata poller threads).  Both consumers (overlay + WASAPI) have already
 // released it, so this is safe.
-inline TeardownGuard<TeardownPhase::WasapiDown>::TeardownGuard(
-    DxContext& dx, frdx::AudioSourceManager& mgr, HWND hwnd,
-    LPCWSTR className, HINSTANCE hInst)
+inline TeardownGuard<TeardownPhase::WasapiDown>::TeardownGuard(DxContext& dx,
+                                                               frdx::AudioSourceManager& mgr,
+                                                               HWND hwnd, LPCWSTR className,
+                                                               HINSTANCE hInst)
     : dx_(&dx), mgr_(&mgr), hwnd_(hwnd), className_(className), hInst_(hInst) {}
 
 inline TeardownGuard<TeardownPhase::SourceDown>
@@ -520,8 +579,8 @@ TeardownGuard<TeardownPhase::WasapiDown>::shutdown_source() && {
 // Phase 4 → done: Release the DX12 context.  Must happen after overlay
 // shutdown because the overlay acquired its device ref from the swapchain.
 // Also destroys the window and unregisters its class.
-inline TeardownGuard<TeardownPhase::SourceDown>::TeardownGuard(
-    DxContext& dx, HWND hwnd, LPCWSTR className, HINSTANCE hInst)
+inline TeardownGuard<TeardownPhase::SourceDown>::TeardownGuard(DxContext& dx, HWND hwnd,
+                                                               LPCWSTR className, HINSTANCE hInst)
     : dx_(&dx), hwnd_(hwnd), className_(className), hInst_(hInst) {}
 
 inline void TeardownGuard<TeardownPhase::SourceDown>::destroy_dx_and_window() && {
@@ -533,10 +592,9 @@ inline void TeardownGuard<TeardownPhase::SourceDown>::destroy_dx_and_window() &&
 
 // Factory — constructs the initial phase and immediately performs the
 // pre-teardown steps (null g_dx, GPU fence wait).
-[[nodiscard]] inline TeardownGuard<TeardownPhase::Init> begin_teardown(
-    DxContext& dx, UINT64 fence_val, WasapiOutput& wasapi,
-    frdx::AudioSourceManager& mgr, HWND hwnd, LPCWSTR className,
-    HINSTANCE hInst) {
+[[nodiscard]] inline TeardownGuard<TeardownPhase::Init>
+begin_teardown(DxContext& dx, UINT64 fence_val, WasapiOutput& wasapi, frdx::AudioSourceManager& mgr,
+               HWND hwnd, LPCWSTR className, HINSTANCE hInst) {
     return {dx, fence_val, wasapi, mgr, hwnd, className, hInst};
 }
 
@@ -551,7 +609,7 @@ inline void TeardownGuard<TeardownPhase::SourceDown>::destroy_dx_and_window() &&
 inline TeardownGuard<TeardownPhase::Init>::~TeardownGuard() noexcept {
     if (!abandoned_) return;
     try {
-        frdx::dx12_overlay::shutdown();
+        frdx::overlay::shutdown();
         wasapi_->stop();
         mgr_->shutdown();
         destroy_dx(*dx_);
@@ -572,8 +630,7 @@ inline TeardownGuard<TeardownPhase::OverlayDown>::~TeardownGuard() noexcept {
         destroy_dx(*dx_);
         DestroyWindow(hwnd_);
         UnregisterClassW(className_, hInst_);
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 inline TeardownGuard<TeardownPhase::WasapiDown>::~TeardownGuard() noexcept {
@@ -583,8 +640,7 @@ inline TeardownGuard<TeardownPhase::WasapiDown>::~TeardownGuard() noexcept {
         destroy_dx(*dx_);
         DestroyWindow(hwnd_);
         UnregisterClassW(className_, hInst_);
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 inline TeardownGuard<TeardownPhase::SourceDown>::~TeardownGuard() noexcept {
@@ -593,8 +649,7 @@ inline TeardownGuard<TeardownPhase::SourceDown>::~TeardownGuard() noexcept {
         destroy_dx(*dx_);
         DestroyWindow(hwnd_);
         UnregisterClassW(className_, hInst_);
-    } catch (...) {
-    }
+    } catch (...) {}
 }
 
 // ── Compile-time typestate verification ───────────────────────────────
@@ -602,29 +657,26 @@ inline TeardownGuard<TeardownPhase::SourceDown>::~TeardownGuard() noexcept {
 // method and nothing else.  If a future change accidentally adds or
 // removes a method, the static_assert below catches it at compile time.
 
-template <typename T, typename = void>
-struct has_shutdown_overlay : std::false_type {};
+template <typename T, typename = void> struct has_shutdown_overlay : std::false_type {};
 template <typename T>
-struct has_shutdown_overlay<T,
-    std::void_t<decltype(std::declval<T&&>().shutdown_overlay())>> : std::true_type {};
+struct has_shutdown_overlay<T, std::void_t<decltype(std::declval<T&&>().shutdown_overlay())>>
+    : std::true_type {};
 
-template <typename T, typename = void>
-struct has_stop_wasapi : std::false_type {};
+template <typename T, typename = void> struct has_stop_wasapi : std::false_type {};
 template <typename T>
-struct has_stop_wasapi<T,
-    std::void_t<decltype(std::declval<T&&>().stop_wasapi())>> : std::true_type {};
+struct has_stop_wasapi<T, std::void_t<decltype(std::declval<T&&>().stop_wasapi())>>
+    : std::true_type {};
 
-template <typename T, typename = void>
-struct has_shutdown_source : std::false_type {};
+template <typename T, typename = void> struct has_shutdown_source : std::false_type {};
 template <typename T>
-struct has_shutdown_source<T,
-    std::void_t<decltype(std::declval<T&&>().shutdown_source())>> : std::true_type {};
+struct has_shutdown_source<T, std::void_t<decltype(std::declval<T&&>().shutdown_source())>>
+    : std::true_type {};
 
-template <typename T, typename = void>
-struct has_destroy_dx_and_window : std::false_type {};
+template <typename T, typename = void> struct has_destroy_dx_and_window : std::false_type {};
 template <typename T>
 struct has_destroy_dx_and_window<T,
-    std::void_t<decltype(std::declval<T&&>().destroy_dx_and_window())>> : std::true_type {};
+                                 std::void_t<decltype(std::declval<T&&>().destroy_dx_and_window())>>
+    : std::true_type {};
 
 using TGInit        = TeardownGuard<TeardownPhase::Init>;
 using TGOverlayDown = TeardownGuard<TeardownPhase::OverlayDown>;
@@ -632,28 +684,37 @@ using TGWasapiDown  = TeardownGuard<TeardownPhase::WasapiDown>;
 using TGSourceDown  = TeardownGuard<TeardownPhase::SourceDown>;
 
 // Init: only shutdown_overlay
-static_assert( has_shutdown_overlay<TGInit>::value,        "Init must expose shutdown_overlay()");
-static_assert(!has_stop_wasapi<TGInit>::value,              "Init must NOT expose stop_wasapi()");
-static_assert(!has_shutdown_source<TGInit>::value,          "Init must NOT expose shutdown_source()");
-static_assert(!has_destroy_dx_and_window<TGInit>::value,    "Init must NOT expose destroy_dx_and_window()");
+static_assert(has_shutdown_overlay<TGInit>::value, "Init must expose shutdown_overlay()");
+static_assert(!has_stop_wasapi<TGInit>::value, "Init must NOT expose stop_wasapi()");
+static_assert(!has_shutdown_source<TGInit>::value, "Init must NOT expose shutdown_source()");
+static_assert(!has_destroy_dx_and_window<TGInit>::value,
+              "Init must NOT expose destroy_dx_and_window()");
 
 // OverlayDown: only stop_wasapi
-static_assert(!has_shutdown_overlay<TGOverlayDown>::value,  "OverlayDown must NOT expose shutdown_overlay()");
-static_assert( has_stop_wasapi<TGOverlayDown>::value,       "OverlayDown must expose stop_wasapi()");
-static_assert(!has_shutdown_source<TGOverlayDown>::value,   "OverlayDown must NOT expose shutdown_source()");
-static_assert(!has_destroy_dx_and_window<TGOverlayDown>::value, "OverlayDown must NOT expose destroy_dx_and_window()");
+static_assert(!has_shutdown_overlay<TGOverlayDown>::value,
+              "OverlayDown must NOT expose shutdown_overlay()");
+static_assert(has_stop_wasapi<TGOverlayDown>::value, "OverlayDown must expose stop_wasapi()");
+static_assert(!has_shutdown_source<TGOverlayDown>::value,
+              "OverlayDown must NOT expose shutdown_source()");
+static_assert(!has_destroy_dx_and_window<TGOverlayDown>::value,
+              "OverlayDown must NOT expose destroy_dx_and_window()");
 
 // WasapiDown: only shutdown_source
-static_assert(!has_shutdown_overlay<TGWasapiDown>::value,   "WasapiDown must NOT expose shutdown_overlay()");
-static_assert(!has_stop_wasapi<TGWasapiDown>::value,         "WasapiDown must NOT expose stop_wasapi()");
-static_assert( has_shutdown_source<TGWasapiDown>::value,     "WasapiDown must expose shutdown_source()");
-static_assert(!has_destroy_dx_and_window<TGWasapiDown>::value, "WasapiDown must NOT expose destroy_dx_and_window()");
+static_assert(!has_shutdown_overlay<TGWasapiDown>::value,
+              "WasapiDown must NOT expose shutdown_overlay()");
+static_assert(!has_stop_wasapi<TGWasapiDown>::value, "WasapiDown must NOT expose stop_wasapi()");
+static_assert(has_shutdown_source<TGWasapiDown>::value, "WasapiDown must expose shutdown_source()");
+static_assert(!has_destroy_dx_and_window<TGWasapiDown>::value,
+              "WasapiDown must NOT expose destroy_dx_and_window()");
 
 // SourceDown: only destroy_dx_and_window
-static_assert(!has_shutdown_overlay<TGSourceDown>::value,   "SourceDown must NOT expose shutdown_overlay()");
-static_assert(!has_stop_wasapi<TGSourceDown>::value,         "SourceDown must NOT expose stop_wasapi()");
-static_assert(!has_shutdown_source<TGSourceDown>::value,     "SourceDown must NOT expose shutdown_source()");
-static_assert( has_destroy_dx_and_window<TGSourceDown>::value, "SourceDown must expose destroy_dx_and_window()");
+static_assert(!has_shutdown_overlay<TGSourceDown>::value,
+              "SourceDown must NOT expose shutdown_overlay()");
+static_assert(!has_stop_wasapi<TGSourceDown>::value, "SourceDown must NOT expose stop_wasapi()");
+static_assert(!has_shutdown_source<TGSourceDown>::value,
+              "SourceDown must NOT expose shutdown_source()");
+static_assert(has_destroy_dx_and_window<TGSourceDown>::value,
+              "SourceDown must expose destroy_dx_and_window()");
 
 } // namespace
 
@@ -675,7 +736,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     // ── 1. Config + managers ─────────────────────────────────────────────
-    auto cfg_path = data_dir / "config.toml";
+    auto cfg_path    = data_dir / "config.toml";
     frdx::Config cfg = frdx::load_config(cfg_path);
     frdx::ConfigStore store(cfg_path, cfg);
 
@@ -696,14 +757,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // WASAPI audio output (replaces FMOD for the sandbox)
     WasapiOutput wasapi;
     wasapi.start(mgr, bridge);
-    frdx::dx12_overlay::set_flush_audio([&wasapi] { wasapi.flush(); });
+    frdx::overlay::set_flush_audio([&wasapi] { wasapi.flush(); });
 
     // ── 2. Real ShoutcastSource with stations ────────────────────────────
-    auto ffmpeg_path = resolve_path("mods/frdx/ffmpeg/ffmpeg.exe");
+    auto ffmpeg_path   = resolve_path("mods/frdx/ffmpeg/ffmpeg.exe");
     auto stations_path = resolve_path("mods/frdx/stations.json");
 
     frdx::ShoutcastConfig sc_cfg = cfg.shoutcast;
-    sc_cfg.ffmpeg_path = ffmpeg_path;
+    sc_cfg.ffmpeg_path           = ffmpeg_path;
 
     auto src = std::make_unique<frdx::sources::ShoutcastSource>(sc_cfg);
     src->initialize();
@@ -716,9 +777,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
                         stations_path.string());
 
         // Auto-select last played station, or fall back to first
-        std::string sel_sid  = cfg.shoutcast.last_station_id;
-        std::string sel_str  = cfg.shoutcast.last_stream_id;
-        bool found           = false;
+        std::string sel_sid = cfg.shoutcast.last_station_id;
+        std::string sel_str = cfg.shoutcast.last_stream_id;
+        bool found          = false;
         for (const auto& st : stations) {
             for (const auto& str : st.streams) {
                 if (st.id == sel_sid && str.id == sel_str) {
@@ -746,13 +807,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
 
     // ── 3. Start overlay runtime ─────────────────────────────────────────
     const bool hooked_overlay = sandbox_hook_mode_requested();
-    g_overlay_direct = !hooked_overlay;
+    g_overlay_direct          = !hooked_overlay;
     frdx::log::info("[sandbox] overlay mode: {}",
                     g_overlay_direct ? "direct render" : "self-hooked Present");
-    const bool overlay_ok =
-        g_overlay_direct
-            ? frdx::dx12_overlay::initialize_direct(mgr, bridge, store, &dualsense)
-            : frdx::dx12_overlay::initialize(mgr, bridge, store, &dualsense);
+    const bool overlay_ok = g_overlay_direct
+                              ? frdx::overlay::initialize_direct(mgr, bridge, store, &dualsense)
+                              : frdx::overlay::initialize(mgr, bridge, store, &dualsense);
     if (!overlay_ok) {
         frdx::log::error("[sandbox] overlay initialize failed");
         mgr.shutdown();
@@ -768,9 +828,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     wc.lpszClassName = L"FrdxSandbox";
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"FRDX Sandbox — Hooked Overlay",
-                               WS_OVERLAPPEDWINDOW, 100, 100, 1300, 760,
-                               nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd =
+        CreateWindowW(wc.lpszClassName, L"FRDX Sandbox — Hooked Overlay", WS_OVERLAPPEDWINDOW, 100,
+                      100, 1300, 760, nullptr, nullptr, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -793,7 +853,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     bool running = true;
     while (running) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) { running = false; break; }
+            if (msg.message == WM_QUIT) {
+                running = false;
+                break;
+            }
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
@@ -835,7 +898,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         dx.queue->ExecuteCommandLists(1, lists);
 
         if (g_overlay_direct) {
-            frdx::dx12_overlay::render_direct(dx.swapchain, dx.queue);
+            frdx::overlay::render_direct(dx.swapchain, dx.queue);
         }
 
         // In hook mode the Present detour fires here and draws the overlay.
@@ -850,13 +913,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // the chain completes, the Init destructor runs all remaining steps via
     // the abandoned_ flag.  Normal completion sets abandoned_ = false at
     // each phase, so the destructors become no-ops.
-    auto teardown = begin_teardown(dx, dx.fence_val, wasapi, mgr, hwnd,
-                                   wc.lpszClassName, wc.hInstance);
-    std::move(teardown)
-        .shutdown_overlay()
-        .stop_wasapi()
-        .shutdown_source()
-        .destroy_dx_and_window();
+    auto teardown =
+        begin_teardown(dx, dx.fence_val, wasapi, mgr, hwnd, wc.lpszClassName, wc.hInstance);
+    std::move(teardown).shutdown_overlay().stop_wasapi().shutdown_source().destroy_dx_and_window();
 
     frdx::log::info("[sandbox] exiting");
     frdx::log::shutdown();
