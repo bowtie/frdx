@@ -48,9 +48,11 @@ void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     if (ImGui::Begin("##FRDX Console (F10)", nullptr, flags)) {
-        apply_window_blur(6.0f, 0.65f, ImGui::GetFrameHeight());
+        apply_window_blur(6.0f);
         const uint64_t log_generation = log::recent_generation();
         if (g_ui.console_log_generation != log_generation) {
             g_ui.console_lines = log::recent_lines();
@@ -113,7 +115,7 @@ void draw_console_window() {
         mark_overlay_mouse_region();
     }
     ImGui::End();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(4);
 }
 

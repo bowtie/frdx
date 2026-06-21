@@ -447,11 +447,13 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
 		    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
 		    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 		    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
+		    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
+		    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
 		    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
 		    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
 	    if (ImGui::Begin("##Stations", nullptr, stFlags)) {
-	        apply_window_blur(6.0f, 0.65f, ImGui::GetFrameHeight());
+	        apply_window_blur(6.0f);
         auto [active_st, active_str] = sc_st->active_station_stream();
         {
             frdx::ScopedLock lk{g_station_switch.mutex};
@@ -519,7 +521,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
         mark_overlay_mouse_region();
     }
     ImGui::End();
-	    ImGui::PopStyleColor(2);
+	    ImGui::PopStyleColor(4);
 	    ImGui::PopStyleVar(3);
 }
 

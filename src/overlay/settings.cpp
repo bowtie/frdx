@@ -115,10 +115,12 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
-        apply_window_blur(6.0f, 0.65f, ImGui::GetFrameHeight());
+        apply_window_blur(6.0f);
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {
@@ -154,7 +156,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
         mark_overlay_mouse_region();
     }
     ImGui::End();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(3);
 }
 
