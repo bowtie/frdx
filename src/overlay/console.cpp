@@ -49,7 +49,6 @@ void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     if (ImGui::Begin("FRDX Console (F10)", nullptr, flags)) {
         apply_window_blur(6.0f);
-        BlurWidgetScope blur_scope;
         const uint64_t log_generation = log::recent_generation();
         if (g_ui.console_log_generation != log_generation) {
             g_ui.console_lines = log::recent_lines();

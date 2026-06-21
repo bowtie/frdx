@@ -226,12 +226,8 @@ float advance_popup_anim(bool opening, float& anim);
 float window_bg_alpha(float normal);
 int push_blur_widget_style();
 void pop_blur_widget_style(int n);
-
-struct BlurWidgetScope {
-    int pushed = 0;
-    BlurWidgetScope() { pushed = push_blur_widget_style(); }
-    ~BlurWidgetScope() { pop_blur_widget_style(pushed); }
-};
+void save_theme_widget_colors();
+void apply_blur_widget_alpha();
 
 void mark_overlay_mouse_region();
 void apply_window_blur(float rounding, float tint_alpha = 0.65f);

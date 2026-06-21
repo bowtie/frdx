@@ -146,7 +146,6 @@ void draw_toasts() {
         std::snprintf(window_name, sizeof(window_name), "##frdx_toast_%d", idx);
         ImGui::Begin(window_name, nullptr, flags);
         apply_window_blur(6.0f);
-        int blur_pushed = push_blur_widget_style();
         ImGui::PushTextWrapPos(390.0f);
         ImGui::TextColored(toast_color(it->kind), "%s", it->title.c_str());
         if (!it->detail.empty()) {
@@ -154,7 +153,6 @@ void draw_toasts() {
         }
         ImGui::PopTextWrapPos();
         y += (top ? 1.0f : -1.0f) * (ImGui::GetWindowSize().y + 8.0f);
-        pop_blur_widget_style(blur_pushed);
         ImGui::End();
         ImGui::PopStyleVar(2);
     }

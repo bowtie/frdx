@@ -83,7 +83,6 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, rounding);
     ImGui::Begin("Forza Radio DX", nullptr, barFlags);
     apply_window_blur(rounding);
-    int blur_pushed = push_blur_widget_style();
 
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
     const float btn_w     = 27.0f;
@@ -392,7 +391,6 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     layout.size       = ImGui::GetWindowSize();
 
     mark_overlay_mouse_region();
-    pop_blur_widget_style(blur_pushed);
     ImGui::End();
     ImGui::PopStyleVar();
 
@@ -456,7 +454,6 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
 
     if (ImGui::Begin("##Stations", nullptr, stFlags)) {
         apply_window_blur(6.0f);
-        BlurWidgetScope blur_scope;
         auto [active_st, active_str] = sc_st->active_station_stream();
         {
             frdx::ScopedLock lk{g_station_switch.mutex};

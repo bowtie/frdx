@@ -74,6 +74,7 @@ void draw_general_settings_tab() {
     bool blur                    = g_ui.background_blur_enabled;
     if (ImGui::Checkbox("##bg_blur", &blur)) {
         g_ui.background_blur_enabled = blur;
+        apply_blur_widget_alpha();
         g_ctx.store->patch([&](Config& c) { c.overlay.background_blur_enabled = blur; });
     }
     if (ImGui::IsItemHovered()) {
@@ -120,7 +121,6 @@ void draw_settings_window(const PlayerBarLayout& layout) {
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
         apply_window_blur(6.0f);
-        BlurWidgetScope blur_scope;
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {
@@ -181,7 +181,9 @@ void draw_blur_debug_tab() {
 
     ImGui::Separator();
     ImGui::TextUnformatted("Widget Transparency");
-    ImGui::SliderFloat("Widget alpha", &g_blur_debug_widget_alpha, 0.0f, 1.0f, "%.2f");
+    if (ImGui::SliderFloat("Widget alpha", &g_blur_debug_widget_alpha, 0.0f, 1.0f, "%.2f")) {
+        apply_blur_widget_alpha();
+    }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("How opaque widget backgrounds (buttons, frames, tabs) are."
                           "  Lower = softer blend into the blur, 1.0 = fully opaque.");

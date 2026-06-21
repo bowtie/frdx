@@ -1,6 +1,8 @@
 #include "frdx/overlay/overlay.hpp"
 #include "frdx/overlay/overlay_priv.hpp"
 
+#include <array>
+
 namespace frdx::overlay {
 using namespace frdx;
 
@@ -651,10 +653,14 @@ float window_bg_alpha(float normal) {
 
 // ── Widget transparency for blur blending ────────────────────────────
 //
-// When blur is enabled we push reduced-alpha versions of widget background
-// colours so buttons, frames, tabs, etc. blend softly into the frosted
-// blur layer instead of sitting on it as opaque blocks.  Use the RAII
-// BlurWidgetScope struct in each window right after apply_window_blur().
+// When blur is enabled we reduce the alpha of widget background colours
+// (buttons, frames, tabs, …) so they blend softly into the frosted blur
+// layer instead of sitting on it as opaque blocks.
+//
+// Unlike per-frame push/pop (which clobbers ApplyTheme() changes because
+// ImGui::PopStyleColor restores the saved backup, not the current style),
+// we modify the base style colours *once* at theme-apply time and keep
+// a copy of the original theme values for restoration.
 
 // Colours whose alpha we scale (widget fills — not text or highlights).
 static constexpr ImGuiCol kBlurWidgetCols[] = {
@@ -671,22 +677,35 @@ static constexpr ImGuiCol kBlurWidgetCols[] = {
     ImGuiCol_CheckMark,
     ImGuiCol_Separator,       ImGuiCol_SeparatorHovered, ImGuiCol_SeparatorActive,
 };
+static constexpr int kBlurWidgetColCount = static_cast<int>(sizeof(kBlurWidgetCols) / sizeof(kBlurWidgetCols[0]));
+static std::array<ImVec4, kBlurWidgetColCount> s_orig_widget_cols;
+static bool s_orig_widget_cols_saved = false;
 
-int push_blur_widget_style() {
-    if (!g_ui.background_blur_enabled.load(std::memory_order_acquire)) return 0;
-    const float wa = g_blur_debug_widget_alpha;
-    int n = 0;
-    for (ImGuiCol col : kBlurWidgetCols) {
-        ImVec4 c = ImGui::GetStyleColorVec4(col);
-        c.w *= wa;
-        ImGui::PushStyleColor(col, c);
-        ++n;
+void save_theme_widget_colors() {
+    for (int i = 0; i < kBlurWidgetColCount; ++i) {
+        s_orig_widget_cols[i] = ImGui::GetStyle().Colors[kBlurWidgetCols[i]];
     }
-    return n;
+    s_orig_widget_cols_saved = true;
 }
 
-void pop_blur_widget_style(int n) {
-    if (n > 0) ImGui::PopStyleColor(n);
+void apply_blur_widget_alpha() {
+    if (!s_orig_widget_cols_saved) return;
+
+    // Restore originals first so re-applying with a different alpha works.
+    for (int i = 0; i < kBlurWidgetColCount; ++i) {
+        ImGui::GetStyle().Colors[kBlurWidgetCols[i]] = s_orig_widget_cols[i];
+    }
+
+    if (g_ui.background_blur_enabled.load(std::memory_order_acquire)) {
+        const float wa = g_blur_debug_widget_alpha;
+        for (int i = 0; i < kBlurWidgetColCount; ++i) {
+            ImGui::GetStyle().Colors[kBlurWidgetCols[i]].w *= wa;
+        }
+    }
 }
+
+// Legacy helpers kept for compatibility — no-ops now.
+int push_blur_widget_style() { return 0; }
+void pop_blur_widget_style(int) {}
 
 } // namespace frdx::overlay
