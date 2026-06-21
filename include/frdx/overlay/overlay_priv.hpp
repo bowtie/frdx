@@ -51,7 +51,7 @@ struct BlurTexture {
 };
 
 struct BlurResources {
-    static constexpr UINT kTextureCount = 5;
+    static constexpr UINT kTextureCount = 4;
     static constexpr UINT kSrvBase      = 2;
     wil::com_ptr<ID3D12DescriptorHeap> rtv_heap;
     wil::com_ptr<ID3D12RootSignature> root_signature;

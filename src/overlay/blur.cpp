@@ -5,6 +5,12 @@ namespace frdx::overlay {
 using namespace frdx;
 
 // ── UI section: overlay background blur ───────────────────────────────
+//
+// Dual Kawase blur implemented per KWin's approach:
+//   - Downsample through multiple levels with a 5-tap center-weighted box
+//   - Upsample back through each level with a 12-tap tent filter
+//   - The upsampling IS the blur — the tent filter both enlarges and spreads
+//     the lower-res content smoothly.
 
 const char* kBlurVs = R"(
 struct VSOut {
@@ -20,60 +26,56 @@ VSOut main(uint id : SV_VertexID) {
 }
 )";
 
+// 5-tap center-weighted box downsample (KWin downsample.frag).
+// Samples the center ×4 plus the 4 corners at halfpixel offset, /8.
 const char* kDownsamplePs = R"(
 Texture2D src_tex : register(t0);
 SamplerState src_sampler : register(s0);
 cbuffer Constants : register(b0) {
-    float2 texel;
+    float2 halfpixel;
     float offset;
     float pad;
 };
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float2 o = texel * 0.5;
-    float4 c = src_tex.Sample(src_sampler, uv + float2(-o.x, -o.y));
-    c += src_tex.Sample(src_sampler, uv + float2( o.x, -o.y));
-    c += src_tex.Sample(src_sampler, uv + float2(-o.x,  o.y));
-    c += src_tex.Sample(src_sampler, uv + float2( o.x,  o.y));
-    return float4((c * 0.25).rgb, 1.0);
+    float2 o = halfpixel * offset;
+    float4 sum = src_tex.Sample(src_sampler, uv) * 4.0;
+    sum += src_tex.Sample(src_sampler, uv + float2(-o.x, -o.y));
+    sum += src_tex.Sample(src_sampler, uv + float2( o.x, -o.y));
+    sum += src_tex.Sample(src_sampler, uv + float2(-o.x,  o.y));
+    sum += src_tex.Sample(src_sampler, uv + float2( o.x,  o.y));
+    return sum / 8.0;
 }
 )";
 
-const char* kKawasePs = R"(
-Texture2D src_tex : register(t0);
-SamplerState src_sampler : register(s0);
-cbuffer Constants : register(b0) {
-    float2 texel;
-    float offset;
-    float pad;
-};
-float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    float2 o = texel * offset;
-    float4 c = src_tex.Sample(src_sampler, uv + float2(-o.x, -o.y));
-    c += src_tex.Sample(src_sampler, uv + float2( o.x, -o.y));
-    c += src_tex.Sample(src_sampler, uv + float2(-o.x,  o.y));
-    c += src_tex.Sample(src_sampler, uv + float2( o.x,  o.y));
-    return float4((c * 0.25).rgb, 1.0);
-}
-)";
-
-// Simple bilinear upsample: the D3D12_FILTER_MIN_MAG_MIP_LINEAR sampler
-// on the root signature handles sub-texel interpolation.  KWin's dual-
-// Kawase blends the blurred lower-res image with the unblurred content at
-// the current resolution level; a single bilinear upsample is a reasonable
-// approximation that avoids an extra full-size texture.
+// 12-tap tent filter for upsampling+blur (KWin upsample.frag / onscreen.frag).
+// Samples a cross-shaped ring around the pixel with weighted taps, /12.
 const char* kUpsamplePs = R"(
 Texture2D src_tex : register(t0);
 SamplerState src_sampler : register(s0);
+cbuffer Constants : register(b0) {
+    float2 halfpixel;
+    float offset;
+    float pad;
+};
 float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-    return src_tex.Sample(src_sampler, uv);
+    float2 hp = halfpixel * offset;
+    float4 sum = src_tex.Sample(src_sampler, uv + float2(-hp.x * 2.0, 0.0));
+    sum += src_tex.Sample(src_sampler, uv + float2(-hp.x, hp.y)) * 2.0;
+    sum += src_tex.Sample(src_sampler, uv + float2(0.0, hp.y * 2.0));
+    sum += src_tex.Sample(src_sampler, uv + float2( hp.x, hp.y)) * 2.0;
+    sum += src_tex.Sample(src_sampler, uv + float2( hp.x * 2.0, 0.0));
+    sum += src_tex.Sample(src_sampler, uv + float2( hp.x, -hp.y)) * 2.0;
+    sum += src_tex.Sample(src_sampler, uv + float2(0.0, -hp.y * 2.0));
+    sum += src_tex.Sample(src_sampler, uv + float2(-hp.x, -hp.y)) * 2.0;
+    return sum / 12.0;
 }
 )";
 
 struct BlurConstants {
-    float texel_x = 1.0f;
-    float texel_y = 1.0f;
-    float offset  = 1.0f;
-    float pad     = 0.0f;
+    float halfpixel_x = 1.0f;
+    float halfpixel_y = 1.0f;
+    float offset      = 1.0f;
+    float pad         = 0.0f;
 };
 
 D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
@@ -149,8 +151,8 @@ bool compile_blur_shader(const char* source, const char* target, ID3DBlob** out_
 }
 
 bool create_blur_pipeline(DXGI_FORMAT format) {
-    if (g_dx.blur.root_signature && g_dx.blur.downsample_pso && g_dx.blur.blur_pso &&
-        g_dx.blur.upsample_pso && g_dx.blur.format == format) {
+    if (g_dx.blur.root_signature && g_dx.blur.downsample_pso && g_dx.blur.upsample_pso &&
+        g_dx.blur.format == format) {
         return true;
     }
 
@@ -216,12 +218,10 @@ bool create_blur_pipeline(DXGI_FORMAT format) {
 
     wil::com_ptr<ID3DBlob> vs;
     wil::com_ptr<ID3DBlob> down_ps;
-    wil::com_ptr<ID3DBlob> blur_ps;
-    wil::com_ptr<ID3DBlob> upsample_ps;
+    wil::com_ptr<ID3DBlob> up_ps;
     if (!compile_blur_shader(kBlurVs, "vs_5_0", vs.put()) ||
         !compile_blur_shader(kDownsamplePs, "ps_5_0", down_ps.put()) ||
-        !compile_blur_shader(kKawasePs, "ps_5_0", blur_ps.put()) ||
-        !compile_blur_shader(kUpsamplePs, "ps_5_0", upsample_ps.put())) {
+        !compile_blur_shader(kUpsamplePs, "ps_5_0", up_ps.put())) {
         return false;
     }
 
@@ -252,15 +252,15 @@ bool create_blur_pipeline(DXGI_FORMAT format) {
         log::warn("[overlay] failed to create blur downsample pipeline");
         return false;
     }
-    pso.PS = {blur_ps->GetBufferPointer(), blur_ps->GetBufferSize()};
-    if (FAILED(g_dx.device->CreateGraphicsPipelineState(&pso,
-                                                        IID_PPV_ARGS(g_dx.blur.blur_pso.put())))) {
+    // Both blur_pso and upsample_pso use the same 12-tap tent filter.
+    pso.PS = {up_ps->GetBufferPointer(), up_ps->GetBufferSize()};
+    if (FAILED(g_dx.device->CreateGraphicsPipelineState(
+            &pso, IID_PPV_ARGS(g_dx.blur.blur_pso.put())))) {
         log::warn("[overlay] failed to create blur pipeline");
         return false;
     }
-    pso.PS = {upsample_ps->GetBufferPointer(), upsample_ps->GetBufferSize()};
-    if (FAILED(g_dx.device->CreateGraphicsPipelineState(&pso,
-                                                        IID_PPV_ARGS(g_dx.blur.upsample_pso.put())))) {
+    if (FAILED(g_dx.device->CreateGraphicsPipelineState(
+            &pso, IID_PPV_ARGS(g_dx.blur.upsample_pso.put())))) {
         log::warn("[overlay] failed to create upsample pipeline");
         return false;
     }
@@ -361,22 +361,29 @@ bool ensure_blur_resources(UINT width, UINT height, DXGI_FORMAT format) {
         return std::tuple{out_rtv, out_cpu, out_gpu};
     };
 
-    const UINT half_w    = std::max(2u, (width + 1u) / 2u);
-    const UINT half_h    = std::max(2u, (height + 1u) / 2u);
+    // Four texture levels: source (1/1), half (1/2), ping (1/4), pong (1/8).
+    // Each level is half the previous, rounded up.
+    const UINT l1_w = std::max(2u, (width + 1u) / 2u);
+    const UINT l1_h = std::max(2u, (height + 1u) / 2u);
+    const UINT l2_w = std::max(1u, (l1_w + 1u) / 2u);
+    const UINT l2_h = std::max(1u, (l1_h + 1u) / 2u);
+    const UINT l3_w = std::max(1u, (l2_w + 1u) / 2u);
+    const UINT l3_h = std::max(1u, (l2_h + 1u) / 2u);
 
     auto [source_rtv, source_cpu, source_gpu] = handles(0);
     auto [half_rtv, half_cpu, half_gpu]       = handles(1);
     auto [ping_rtv, ping_cpu, ping_gpu]       = handles(2);
     auto [pong_rtv, pong_cpu, pong_gpu]       = handles(3);
 
-    if (        !create_blur_texture(g_dx.blur.source, width, height, format, source_rtv, source_cpu,
+    // source (full-res) needs an RTV so the final upsample writes to it.
+    if (!create_blur_texture(g_dx.blur.source, width, height, format, source_rtv, source_cpu,
                              source_gpu, true) ||
-        !create_blur_texture(g_dx.blur.half, half_w, half_h, format, half_rtv, half_cpu, half_gpu,
+        !create_blur_texture(g_dx.blur.half, l1_w, l1_h, format, half_rtv, half_cpu, half_gpu,
                              true) ||
-        !create_blur_texture(g_dx.blur.ping, half_w, half_h, format, ping_rtv, ping_cpu,
-                             ping_gpu, true) ||
-        !create_blur_texture(g_dx.blur.pong, half_w, half_h, format, pong_rtv, pong_cpu,
-                             pong_gpu, true)) {
+        !create_blur_texture(g_dx.blur.ping, l2_w, l2_h, format, ping_rtv, ping_cpu, ping_gpu,
+                             true) ||
+        !create_blur_texture(g_dx.blur.pong, l3_w, l3_h, format, pong_rtv, pong_cpu, pong_gpu,
+                             true)) {
         log::warn("[overlay] failed to create blur textures");
         release_blur_textures();
         return false;
@@ -407,14 +414,27 @@ void draw_blur_pass(ID3D12GraphicsCommandList* cmd, BlurTexture& src, BlurTextur
     cmd->SetGraphicsRootDescriptorTable(0, src.srv_gpu);
 
     BlurConstants constants;
-    constants.texel_x = 1.0f / static_cast<float>(src.width);
-    constants.texel_y = 1.0f / static_cast<float>(src.height);
-    constants.offset  = offset;
+    constants.halfpixel_x = 0.5f / static_cast<float>(src.width);
+    constants.halfpixel_y = 0.5f / static_cast<float>(src.height);
+    constants.offset      = offset;
     cmd->SetGraphicsRoot32BitConstants(1, 4, &constants, 0);
     cmd->DrawInstanced(3, 1, 0, 0);
 
     transition_blur_texture(cmd, dst, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
+
+// ── Dual-Kawase blur pipeline ─────────────────────────────────────────
+//
+//  1. Copy backbuffer → source (1/1)
+//  2. Downsample: source → half   (1/2)  5-tap box,  offset=1.0
+//  3. Downsample: half   → ping   (1/4)  5-tap box,  offset=1.0
+//  4. Downsample: ping   → pong   (1/8)  5-tap box,  offset=1.0
+//  5. Upsample+blur: pong → ping  (1/4)  12-tap tent, offset=3.0
+//  6. Upsample+blur: ping → half  (1/2)  12-tap tent, offset=2.0
+//  7. Upsample+blur: half → source(1/1)  12-tap tent, offset=1.0
+//
+// The upsampling IS the blur — the 12-tap tent filter smoothly spreads
+// the lower-res content back up through each level.
 
 bool render_overlay_blur(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuffer,
                          DXGI_FORMAT format, D3D12_RESOURCE_STATES initial_backbuffer_state) {
@@ -429,58 +449,53 @@ bool render_overlay_blur(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuf
 
     cmd->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
 
+    // ── Copy backbuffer into level 0 (source) ──────────────────────────
     auto bb_to_copy =
         transition_barrier(backbuffer, initial_backbuffer_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     cmd->ResourceBarrier(1, &bb_to_copy);
 
-    D3D12_TEXTURE_COPY_LOCATION dst = {};
-    dst.pResource                   = g_dx.blur.source.resource.get();
-    dst.Type                        = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst.SubresourceIndex            = 0;
-    D3D12_TEXTURE_COPY_LOCATION src = {};
-    BlurTexture bg_source;
-    BlurTexture* blur_source = &g_dx.blur.source;
-    const bool use_sandbox_bg =
+    bool use_sandbox_bg =
         g_ui.bg_texture && g_ui.bg_texture_width >= 4 && g_ui.bg_texture_height >= 4;
-    if (use_sandbox_bg) {
-        bg_source.srv_gpu.ptr = static_cast<UINT64>(g_ui.bg_texture_id);
-        bg_source.width       = g_ui.bg_texture_width;
-        bg_source.height      = g_ui.bg_texture_height;
-        bg_source.state       = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        blur_source           = &bg_source;
-    } else {
-        // Only transition source to COPY_DEST when we actually copy into it.
-        // The sandbox-bg path samples an existing texture and never touches source.
+    if (!use_sandbox_bg) {
         transition_blur_texture(cmd, g_dx.blur.source, D3D12_RESOURCE_STATE_COPY_DEST);
-        src.pResource        = backbuffer;
-        src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        src.SubresourceIndex = 0;
-        cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        D3D12_TEXTURE_COPY_LOCATION dst_loc = {};
+        dst_loc.pResource                   = g_dx.blur.source.resource.get();
+        dst_loc.Type                        = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst_loc.SubresourceIndex            = 0;
+        D3D12_TEXTURE_COPY_LOCATION src_loc = {};
+        src_loc.pResource                   = backbuffer;
+        src_loc.Type                        = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src_loc.SubresourceIndex            = 0;
+        cmd->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
         transition_blur_texture(cmd, g_dx.blur.source, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     auto bb_to_rt = transition_barrier(backbuffer, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
     cmd->ResourceBarrier(1, &bb_to_rt);
 
-    draw_blur_pass(cmd, *blur_source, g_dx.blur.half, g_dx.blur.downsample_pso.get(), 1.0f);
-    // Kawase blur at half resolution (source → half downsample done above).
-    // Half-res has 4× the texels of quarter, producing smooth frosted glass
-    // instead of blocky pixelation.  Offsets doubled vs previous quarter-res
-    // values to compensate (1 texel at half = 2 full px, 1 at quarter = 4 px).
-    draw_blur_pass(cmd, g_dx.blur.half, g_dx.blur.ping, g_dx.blur.blur_pso.get(), 2.0f);
-    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.pong, g_dx.blur.blur_pso.get(), 4.0f);
-    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.ping, g_dx.blur.blur_pso.get(), 6.0f);
-    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.pong, g_dx.blur.blur_pso.get(), 8.0f);
-    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.ping, g_dx.blur.blur_pso.get(), 10.0f);
-    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.pong, g_dx.blur.blur_pso.get(), 12.0f);
-    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.ping, g_dx.blur.blur_pso.get(), 16.0f);
-    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.pong, g_dx.blur.blur_pso.get(), 20.0f);
-    // Upsample the half-res blurred result back to full resolution so
-    // ImGui's AddImageRounded samples at native res with bilinear filtering
-    // — no blocky quarter-res artifacts.  KWin's dual-Kawase upsamples
-    // through every level; a single half→full upsample is a fast
-    // approximation.
-    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.source, g_dx.blur.upsample_pso.get(), 0.0f);
+    // ── Downsample chain: three levels, each ½ the previous ─────────────
+    if (use_sandbox_bg) {
+        // Sandbox mode: create a temporary BlurTexture wrapping the bg texture.
+        BlurTexture bg_src;
+        bg_src.srv_gpu.ptr = static_cast<UINT64>(g_ui.bg_texture_id);
+        bg_src.width       = g_ui.bg_texture_width;
+        bg_src.height      = g_ui.bg_texture_height;
+        bg_src.state       = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        draw_blur_pass(cmd, bg_src, g_dx.blur.half, g_dx.blur.downsample_pso.get(), 1.0f);
+    } else {
+        draw_blur_pass(cmd, g_dx.blur.source, g_dx.blur.half, g_dx.blur.downsample_pso.get(), 1.0f);
+    }
+    // The downsample chain continues from half → ping → pong regardless.
+    draw_blur_pass(cmd, g_dx.blur.half, g_dx.blur.ping, g_dx.blur.downsample_pso.get(), 1.0f);
+    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.pong, g_dx.blur.downsample_pso.get(), 1.0f);
+
+    // ── Upsample chain: blur back up through each level ─────────────────
+    // The 12-tap tent filter both upsamples AND blurs: sampling a lower-res
+    // texture with the tent kernel at a higher output resolution spreads
+    // each input texel smoothly across the larger output — this IS the blur.
+    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.ping, g_dx.blur.upsample_pso.get(), 3.0f);
+    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.half, g_dx.blur.upsample_pso.get(), 2.0f);
+    draw_blur_pass(cmd, g_dx.blur.half, g_dx.blur.source, g_dx.blur.upsample_pso.get(), 1.0f);
 
     g_ui.overlay_blur_ready = true;
     return true;
