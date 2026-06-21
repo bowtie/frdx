@@ -13,7 +13,7 @@ float g_blur_debug_tint_r       = 0.70f;
 float g_blur_debug_tint_g       = 0.72f;
 float g_blur_debug_tint_b       = 0.77f;
 float g_blur_debug_bg_alpha     = 0.85f;
-float g_blur_debug_widget_alpha = 0.78f;
+float g_blur_debug_widget_alpha = 0.55f;
 
 // ── UI section: overlay background blur ───────────────────────────────
 //
