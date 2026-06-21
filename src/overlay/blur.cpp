@@ -626,10 +626,14 @@ void apply_window_blur(float rounding, float tint_alpha /* = 0.65f */) {
     const ImVec2 max(pos.x + ImGui::GetWindowSize().x, pos.y + ImGui::GetWindowSize().y);
 
     render_drop_shadow(g_ui.shadow_texture_id, 200, rounding);
+    // Draw the blur on the background draw list (behind the window
+    // background) so widgets render on a clean window base instead of
+    // directly on the blur layer.  The window bg alpha (controlled by
+    // Settings > Blur > Bg opacity) controls how much blur shows through.
     // Expand the blur rect outward by 1 px so it covers the window border
     // area — without this, the 1 px ImGui border leaves a visible gap
     // where the game background peeks through between adjacent windows.
-    add_overlay_blur(ImGui::GetWindowDrawList(), ImVec2(pos.x - 1.0f, pos.y - 1.0f),
+    add_overlay_blur(ImGui::GetBackgroundDrawList(), ImVec2(pos.x - 1.0f, pos.y - 1.0f),
                      ImVec2(max.x + 1.0f, max.y + 1.0f), rounding, tint_alpha, 0);
 }
 
