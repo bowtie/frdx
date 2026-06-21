@@ -112,10 +112,11 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
         apply_window_blur(6.0f);
@@ -130,6 +131,10 @@ void draw_settings_window(const PlayerBarLayout& layout) {
                 }
                 if (ImGui::BeginTabItem("Settings")) {
                     draw_general_settings_tab();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Blur")) {
+                    draw_blur_debug_tab();
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();
@@ -150,8 +155,38 @@ void draw_settings_window(const PlayerBarLayout& layout) {
         mark_overlay_mouse_region();
     }
     ImGui::End();
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(3);
+}
+
+void draw_blur_debug_tab() {
+    ImGui::TextUnformatted("Tweak these in real-time until the frosted-glass");
+    ImGui::TextUnformatted("look is right. Changes apply immediately.");
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Blur Kernel");
+    ImGui::SliderFloat("Offset multiplier", &g_blur_debug_offset_mult, 0.0f, 5.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Scales the blur kernel spread.  0 = no blur, 1 = default, >1 = stronger.");
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Frosted-glass Tint");
+    ImGui::SliderFloat("Opacity", &g_blur_debug_tint_alpha, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How opaque the tint is.  0 = fully transparent, 1 = fully opaque.");
+    }
+    ImGui::SliderFloat("Red", &g_blur_debug_tint_r, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Green", &g_blur_debug_tint_g, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Blue", &g_blur_debug_tint_b, 0.0f, 1.0f, "%.2f");
+
+    // Preview swatch
+    ImGui::Separator();
+    ImGui::TextUnformatted("Preview");
+    const ImVec4 swatch(g_blur_debug_tint_r, g_blur_debug_tint_g,
+                        g_blur_debug_tint_b, g_blur_debug_tint_alpha);
+    ImGui::ColorButton("##tint_preview", swatch, ImGuiColorEditFlags_NoTooltip,
+                       ImVec2(ImGui::GetContentRegionAvail().x, 40.0f));
 }
 
 } // namespace frdx::overlay

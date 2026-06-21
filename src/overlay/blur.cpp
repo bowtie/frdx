@@ -4,6 +4,13 @@
 namespace frdx::overlay {
 using namespace frdx;
 
+// ── Debug tuning knobs (exposed via Settings > Blur tab) ──────────────
+float g_blur_debug_offset_mult = 1.0f;
+float g_blur_debug_tint_alpha  = 0.65f;
+float g_blur_debug_tint_r      = 0.45f;
+float g_blur_debug_tint_g      = 0.47f;
+float g_blur_debug_tint_b      = 0.52f;
+
 // ── UI section: overlay background blur ───────────────────────────────
 //
 // Dual Kawase blur implemented per KWin's approach:
@@ -493,9 +500,10 @@ bool render_overlay_blur(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuf
     // The 12-tap tent filter both upsamples AND blurs: sampling a lower-res
     // texture with the tent kernel at a higher output resolution spreads
     // each input texel smoothly across the larger output — this IS the blur.
-    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.ping, g_dx.blur.upsample_pso.get(), 3.0f);
-    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.half, g_dx.blur.upsample_pso.get(), 2.0f);
-    draw_blur_pass(cmd, g_dx.blur.half, g_dx.blur.source, g_dx.blur.upsample_pso.get(), 1.0f);
+    const float bo = g_blur_debug_offset_mult;
+    draw_blur_pass(cmd, g_dx.blur.pong, g_dx.blur.ping, g_dx.blur.upsample_pso.get(), 3.0f * bo);
+    draw_blur_pass(cmd, g_dx.blur.ping, g_dx.blur.half, g_dx.blur.upsample_pso.get(), 2.0f * bo);
+    draw_blur_pass(cmd, g_dx.blur.half, g_dx.blur.source, g_dx.blur.upsample_pso.get(), 1.0f * bo);
 
     g_ui.overlay_blur_ready = true;
     return true;
@@ -596,7 +604,10 @@ bool add_overlay_blur(ImDrawList* dl, ImVec2 min, ImVec2 max, float rounding, fl
     uv1.x = std::clamp(uv1.x, 0.0f, 1.0f);
     uv1.y = std::clamp(uv1.y, 0.0f, 1.0f);
 
-    const ImU32 tint = ImGui::GetColorU32(ImVec4(0.45f, 0.47f, 0.52f, tint_alpha));
+    // Use debug tuning values (adjustable via Settings > Blur tab).
+    const float ta = g_blur_debug_tint_alpha > 0.0f ? g_blur_debug_tint_alpha : tint_alpha;
+    const ImU32 tint = ImGui::GetColorU32(ImVec4(g_blur_debug_tint_r, g_blur_debug_tint_g,
+                                                  g_blur_debug_tint_b, ta));
     if (rounding > 0.0f) {
         dl->AddImageRounded(g_ui.overlay_blur_texture_id, min, max, uv0, uv1, tint, rounding,
                             flags);

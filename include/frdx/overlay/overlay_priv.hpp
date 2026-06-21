@@ -193,6 +193,13 @@ struct ExternalCtx {
 };
 extern ExternalCtx g_ctx;
 
+// ── Blur debug tuning knobs ──────────────────────────────────────────
+extern float g_blur_debug_offset_mult;
+extern float g_blur_debug_tint_alpha;
+extern float g_blur_debug_tint_r;
+extern float g_blur_debug_tint_g;
+extern float g_blur_debug_tint_b;
+
 // ── Cross-file constants and function declarations ──
 
 inline constexpr UINT kOverlaySrvCount = 16;
@@ -230,6 +237,7 @@ bool should_notify_song_change(IAudioSource* active, const TrackInfo& track, std
                                std::string_view artist);
 void draw_dualsense_settings(const struct DualSenseConfig& ds);
 void draw_general_settings_tab();
+void draw_blur_debug_tab();
 void close_player_children_except(bool keep_settings, bool keep_stations, bool reset_anim = true);
 void animate_station_combo_to(int next_idx, int dir);
 void animate_station_combo_by(int dir);
