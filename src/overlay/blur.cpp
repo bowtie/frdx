@@ -627,6 +627,7 @@ void apply_window_blur(float rounding, float tint_alpha /* = 0.65f */, float top
         return;
     const ImVec2 pos = ImGui::GetWindowPos();
     const ImVec2 max(pos.x + ImGui::GetWindowSize().x, pos.y + ImGui::GetWindowSize().y);
+    const float border = ImGui::GetStyle().WindowBorderSize;
 
     render_drop_shadow(g_ui.shadow_texture_id, 200, rounding);
     // Draw the blur on the background draw list (behind the window
@@ -634,11 +635,16 @@ void apply_window_blur(float rounding, float tint_alpha /* = 0.65f */, float top
     // directly on the blur layer.  The window bg alpha (controlled by
     // Settings > Blur > Bg opacity) controls how much blur shows through.
     //
+    // Expand the blur rect by the window border size so it covers the
+    // full window area including the border.  This prevents a 1px gap
+    // when a border is present, and avoids an unwanted glow when the
+    // border is set to zero.
+    //
     // When top_offset > 0 the blur starts below the titlebar, leaving
     // the titlebar area showing only the window background (no blur).
-    const float blur_top = pos.y + (top_offset > 0.0f ? top_offset : -1.0f);
-    add_overlay_blur(ImGui::GetBackgroundDrawList(), ImVec2(pos.x - 1.0f, blur_top),
-                     ImVec2(max.x + 1.0f, max.y + 1.0f), rounding, tint_alpha, 0);
+    const float blur_top = pos.y + (top_offset > 0.0f ? top_offset : -border);
+    add_overlay_blur(ImGui::GetBackgroundDrawList(), ImVec2(pos.x - border, blur_top),
+                     ImVec2(max.x + border, max.y + border), rounding, tint_alpha, 0);
 }
 
 float window_bg_alpha(float normal) {
