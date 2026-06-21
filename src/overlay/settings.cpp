@@ -104,7 +104,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(window_bg_alpha(eased * 0.92f * g_ui.interactive_draw_alpha));
 
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
                              ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoBringToFrontOnFocus;
@@ -115,8 +115,6 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
-    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
@@ -156,7 +154,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
         mark_overlay_mouse_region();
     }
     ImGui::End();
-    ImGui::PopStyleColor(3);
+    ImGui::PopStyleColor();
     ImGui::PopStyleVar(3);
 }
 

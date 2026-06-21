@@ -434,7 +434,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
     // Slightly more transparent than the player bar (0.96).
     ImGui::SetNextWindowBgAlpha(window_bg_alpha(eased * 0.92f * g_ui.interactive_draw_alpha));
 
-	    ImGuiWindowFlags stFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+	    ImGuiWindowFlags stFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
 	                               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
 	                               ImGuiWindowFlags_NoSavedSettings |
 	                               ImGuiWindowFlags_NoBringToFrontOnFocus;
@@ -444,13 +444,11 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
         stFlags |= ImGuiWindowFlags_NoScrollbar;
     }
 
-	    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-	    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-	    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
-	    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
-	    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
-	    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
-	    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+		    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+		    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+		    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
+		    ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+		    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Stations", nullptr, stFlags)) {
         apply_window_blur(6.0f);
@@ -521,8 +519,8 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
         mark_overlay_mouse_region();
     }
     ImGui::End();
-	    ImGui::PopStyleColor(4);
-    ImGui::PopStyleVar(3);
+	    ImGui::PopStyleColor(2);
+	    ImGui::PopStyleVar(3);
 }
 
 // ── Main UI orchestrator ────────────────────────────────────────────────
