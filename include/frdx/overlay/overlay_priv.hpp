@@ -200,6 +200,7 @@ extern float g_blur_debug_tint_r;
 extern float g_blur_debug_tint_g;
 extern float g_blur_debug_tint_b;
 extern float g_blur_debug_bg_alpha;
+extern float g_blur_debug_widget_alpha;
 
 // ── Cross-file constants and function declarations ──
 
@@ -223,6 +224,15 @@ ConsoleLineKind classify_console_line(std::string_view line);
 ImVec4 console_line_color(ConsoleLineKind kind);
 float advance_popup_anim(bool opening, float& anim);
 float window_bg_alpha(float normal);
+int push_blur_widget_style();
+void pop_blur_widget_style(int n);
+
+struct BlurWidgetScope {
+    int pushed = 0;
+    BlurWidgetScope() { pushed = push_blur_widget_style(); }
+    ~BlurWidgetScope() { pop_blur_widget_style(pushed); }
+};
+
 void mark_overlay_mouse_region();
 void apply_window_blur(float rounding, float tint_alpha = 0.65f);
 void queue_overlay_blur_callback();

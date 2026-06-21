@@ -5,12 +5,13 @@ namespace frdx::overlay {
 using namespace frdx;
 
 // ── Debug tuning knobs (exposed via Settings > Blur tab) ──────────────
-float g_blur_debug_offset_mult = 1.0f;
-float g_blur_debug_tint_alpha  = 0.65f;
-float g_blur_debug_tint_r      = 0.85f;
-float g_blur_debug_tint_g      = 0.87f;
-float g_blur_debug_tint_b      = 0.92f;
-float g_blur_debug_bg_alpha    = 0.60f;
+float g_blur_debug_offset_mult  = 1.0f;
+float g_blur_debug_tint_alpha   = 0.75f;
+float g_blur_debug_tint_r       = 0.70f;
+float g_blur_debug_tint_g       = 0.72f;
+float g_blur_debug_tint_b       = 0.77f;
+float g_blur_debug_bg_alpha     = 0.85f;
+float g_blur_debug_widget_alpha = 0.78f;
 
 // ── UI section: overlay background blur ───────────────────────────────
 //
@@ -646,6 +647,46 @@ float window_bg_alpha(float normal) {
         mul = g_blur_debug_bg_alpha;
     }
     return normal * mul;
+}
+
+// ── Widget transparency for blur blending ────────────────────────────
+//
+// When blur is enabled we push reduced-alpha versions of widget background
+// colours so buttons, frames, tabs, etc. blend softly into the frosted
+// blur layer instead of sitting on it as opaque blocks.  Use the RAII
+// BlurWidgetScope struct in each window right after apply_window_blur().
+
+// Colours whose alpha we scale (widget fills — not text or highlights).
+static constexpr ImGuiCol kBlurWidgetCols[] = {
+    ImGuiCol_Button,          ImGuiCol_ButtonHovered,    ImGuiCol_ButtonActive,
+    ImGuiCol_FrameBg,         ImGuiCol_FrameBgHovered,   ImGuiCol_FrameBgActive,
+    ImGuiCol_Header,          ImGuiCol_HeaderHovered,    ImGuiCol_HeaderActive,
+    ImGuiCol_Tab,             ImGuiCol_TabHovered,       ImGuiCol_TabActive,
+    ImGuiCol_TabUnfocused,    ImGuiCol_TabUnfocusedActive,
+    ImGuiCol_ScrollbarBg,     ImGuiCol_ScrollbarGrab,    ImGuiCol_ScrollbarGrabHovered,
+    ImGuiCol_ScrollbarGrabActive,
+    ImGuiCol_ChildBg,
+    ImGuiCol_PopupBg,
+    ImGuiCol_SliderGrab,      ImGuiCol_SliderGrabActive,
+    ImGuiCol_CheckMark,
+    ImGuiCol_Separator,       ImGuiCol_SeparatorHovered, ImGuiCol_SeparatorActive,
+};
+
+int push_blur_widget_style() {
+    if (!g_ui.background_blur_enabled.load(std::memory_order_acquire)) return 0;
+    const float wa = g_blur_debug_widget_alpha;
+    int n = 0;
+    for (ImGuiCol col : kBlurWidgetCols) {
+        ImVec4 c = ImGui::GetStyleColorVec4(col);
+        c.w *= wa;
+        ImGui::PushStyleColor(col, c);
+        ++n;
+    }
+    return n;
+}
+
+void pop_blur_widget_style(int n) {
+    if (n > 0) ImGui::PopStyleColor(n);
 }
 
 } // namespace frdx::overlay

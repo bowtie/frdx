@@ -146,6 +146,7 @@ void draw_toasts() {
         std::snprintf(window_name, sizeof(window_name), "##frdx_toast_%d", idx);
         ImGui::Begin(window_name, nullptr, flags);
         apply_window_blur(6.0f);
+        BlurWidgetScope blur_scope;
         ImGui::PushTextWrapPos(390.0f);
         ImGui::TextColored(toast_color(it->kind), "%s", it->title.c_str());
         if (!it->detail.empty()) {
