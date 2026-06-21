@@ -199,6 +199,7 @@ extern float g_blur_debug_tint_alpha;
 extern float g_blur_debug_tint_r;
 extern float g_blur_debug_tint_g;
 extern float g_blur_debug_tint_b;
+extern float g_blur_debug_bg_alpha;
 
 // ── Cross-file constants and function declarations ──
 

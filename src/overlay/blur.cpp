@@ -7,9 +7,10 @@ using namespace frdx;
 // ── Debug tuning knobs (exposed via Settings > Blur tab) ──────────────
 float g_blur_debug_offset_mult = 1.0f;
 float g_blur_debug_tint_alpha  = 0.65f;
-float g_blur_debug_tint_r      = 0.45f;
-float g_blur_debug_tint_g      = 0.47f;
-float g_blur_debug_tint_b      = 0.52f;
+float g_blur_debug_tint_r      = 0.85f;
+float g_blur_debug_tint_g      = 0.87f;
+float g_blur_debug_tint_b      = 0.92f;
+float g_blur_debug_bg_alpha    = 0.60f;
 
 // ── UI section: overlay background blur ───────────────────────────────
 //
@@ -630,22 +631,17 @@ void apply_window_blur(float rounding, float tint_alpha /* = 0.65f */) {
     // where the game background peeks through between adjacent windows.
     add_overlay_blur(ImGui::GetWindowDrawList(), ImVec2(pos.x - 1.0f, pos.y - 1.0f),
                      ImVec2(max.x + 1.0f, max.y + 1.0f), rounding, tint_alpha, 0);
-
-    // ImGui's built-in border renders *before* draw-list items, so the blur
-    // overlay above would cover it.  Draw a glass-edge border rect on top of
-    // the blur — it renders behind widgets (text, buttons) but in front of
-    // the frosted fill, restoring the frosted-glass pane edge.
-    if (g_ui.background_blur_enabled.load(std::memory_order_acquire)) {
-        ImGui::GetWindowDrawList()->AddRect(pos, max, IM_COL32(255, 255, 255, 31), rounding,
-                                            ImDrawFlags_RoundCornersAll, 1.0f);
-    }
 }
 
 float window_bg_alpha(float normal) {
+    // g_blur_debug_bg_alpha scales the window background so the frosted
+    // blur shows through.  Lower = blurrier, higher = more opaque base
+    // for widgets.  Adjustable via Settings > Blur tab.
+    float mul = 1.0f;
     if (g_ui.background_blur_enabled.load(std::memory_order_acquire)) {
-        return normal * 0.35f;
+        mul = g_blur_debug_bg_alpha;
     }
-    return normal;
+    return normal * mul;
 }
 
 } // namespace frdx::overlay

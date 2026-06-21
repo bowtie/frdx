@@ -165,9 +165,17 @@ void draw_blur_debug_tab() {
 
     ImGui::Separator();
     ImGui::TextUnformatted("Blur Kernel");
-    ImGui::SliderFloat("Offset multiplier", &g_blur_debug_offset_mult, 0.0f, 5.0f, "%.2f");
+    ImGui::SliderFloat("Offset multiplier", &g_blur_debug_offset_mult, 0.0f, 20.0f, "%.2f");
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Scales the blur kernel spread.  0 = no blur, 1 = default, >1 = stronger.");
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Window Background");
+    ImGui::SliderFloat("Bg opacity", &g_blur_debug_bg_alpha, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How opaque the window base is.  0 = fully transparent (blur shows through),"
+                          " 1 = fully opaque (blur hidden behind window bg).");
     }
 
     ImGui::Separator();
