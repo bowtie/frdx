@@ -161,6 +161,29 @@ void draw_settings_window(const PlayerBarLayout& layout) {
 }
 
 void draw_blur_debug_tab() {
+    // ── Status info ──────────────────────────────────────────────────
+    const char* fmt_names[] = {"UNKNOWN", "R8G8B8A8", "R10G10B10A2", "R16G16B16A16"};
+    const char* fmt_str    = "?";
+    switch (g_dx.blur.format) {
+        case DXGI_FORMAT_UNKNOWN:            fmt_str = fmt_names[0]; break;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:     fmt_str = fmt_names[1]; break;
+        case DXGI_FORMAT_R10G10B10A2_UNORM:  fmt_str = fmt_names[2]; break;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: fmt_str = fmt_names[3]; break;
+        default: break;
+    }
+    ImGui::Text("Blur tex: %s  |  %ux%u  |  format: %s",
+                g_ui.overlay_blur_ready ? "READY" : "stale",
+                g_dx.blur.width, g_dx.blur.height, fmt_str);
+    ImGui::Text("Backbuffer: %s  |  format: %s",
+                g_dx.blur_frame_backbuffer ? "OK" : "null",
+                fmt_str);  // same format for now
+    ImGui::Text("Callback queued: %s",
+                (g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible ||
+                 g_ui.console_visible || !g_ui.toasts.empty())
+                    ? "yes"
+                    : "no (no windows visible)");
+    ImGui::Separator();
+
     ImGui::TextUnformatted("Tweak these in real-time until the frosted-glass");
     ImGui::TextUnformatted("look is right. Changes apply immediately.");
 
