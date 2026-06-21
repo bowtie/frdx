@@ -599,7 +599,11 @@ void apply_window_blur(float rounding, float tint_alpha /* = 0.65f */) {
     const ImVec2 max(pos.x + ImGui::GetWindowSize().x, pos.y + ImGui::GetWindowSize().y);
 
     render_drop_shadow(g_ui.shadow_texture_id, 200, rounding);
-    add_overlay_blur(ImGui::GetWindowDrawList(), pos, max, rounding, tint_alpha, 0);
+    // Expand the blur rect outward by 1 px so it covers the window border
+    // area — without this, the 1 px ImGui border leaves a visible gap
+    // where the game background peeks through between adjacent windows.
+    add_overlay_blur(ImGui::GetWindowDrawList(), ImVec2(pos.x - 1.0f, pos.y - 1.0f),
+                     ImVec2(max.x + 1.0f, max.y + 1.0f), rounding, tint_alpha, 0);
 
     // ImGui's built-in border renders *before* draw-list items, so the blur
     // overlay above would cover it.  Draw a glass-edge border rect on top of
