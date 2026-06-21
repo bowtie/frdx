@@ -52,7 +52,7 @@ void draw_console_window() {
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     if (ImGui::Begin("##FRDX Console (F10)", nullptr, flags)) {
-        apply_window_blur(6.0f);
+        apply_window_blur(6.0f, 0.65f, ImGui::GetFrameHeight());
         const uint64_t log_generation = log::recent_generation();
         if (g_ui.console_log_generation != log_generation) {
             g_ui.console_lines = log::recent_lines();

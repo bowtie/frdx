@@ -120,7 +120,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
-        apply_window_blur(6.0f);
+        apply_window_blur(6.0f, 0.65f, ImGui::GetFrameHeight());
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {

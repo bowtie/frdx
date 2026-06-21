@@ -456,7 +456,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
 		    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
 	    if (ImGui::Begin("##Stations", nullptr, stFlags)) {
-	        apply_window_blur(6.0f);
+	        apply_window_blur(6.0f, 0.65f, ImGui::GetFrameHeight());
         auto [active_st, active_str] = sc_st->active_station_stream();
         {
             frdx::ScopedLock lk{g_station_switch.mutex};
