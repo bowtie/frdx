@@ -242,9 +242,6 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     };
 
     const float frame_rounding = ImGui::GetStyle().FrameRounding;
-    const ImU32 col_btn        = ImGui::GetColorU32(ImGuiCol_Button);
-    const ImU32 col_btn_hov    = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
-    const ImU32 col_btn_act    = ImGui::GetColorU32(ImGuiCol_ButtonActive);
     const ImU32 col_text       = ImGui::GetColorU32(ImGuiCol_Text);
 
     auto draw_icon_btn = [&](const char* id, const char* glyph, ImU32 active_col = 0,
@@ -254,11 +251,17 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         const bool held    = ImGui::IsItemActive();
         const bool pressed = ImGui::IsItemClicked();
 
+        // Read colours fresh each call so blur widget alpha is reflected
+        // immediately (especially for hovered/active states).
+        const ImU32 btn     = ImGui::GetColorU32(ImGuiCol_Button);
+        const ImU32 btn_hov = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
+        const ImU32 btn_act = ImGui::GetColorU32(ImGuiCol_ButtonActive);
+
         ImU32 bg_col;
         if (active_col) {
-            bg_col = held && hovered ? col_btn_act : hovered ? hover_col : active_col;
+            bg_col = held && hovered ? btn_act : hovered ? hover_col : active_col;
         } else {
-            bg_col = held && hovered ? col_btn_act : hovered ? col_btn_hov : col_btn;
+            bg_col = held && hovered ? btn_act : hovered ? btn_hov : btn;
         }
 
         auto* dl   = ImGui::GetWindowDrawList();
