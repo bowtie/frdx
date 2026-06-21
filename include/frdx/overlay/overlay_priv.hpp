@@ -230,7 +230,7 @@ void save_theme_widget_colors();
 void apply_blur_widget_alpha();
 
 void mark_overlay_mouse_region();
-void apply_window_blur(float rounding, float tint_alpha = 0.65f);
+void apply_window_blur(float rounding, float tint_alpha = 0.65f, float top_offset = 0.0f);
 void queue_overlay_blur_callback();
 void release_blur_resources();
 void draw_toasts();
