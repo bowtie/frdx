@@ -83,6 +83,10 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, rounding);
     ImGui::Begin("Forza Radio DX", nullptr, barFlags);
 
+    // CSS-style backdrop blur — first thing inside Begin so widget chrome
+    // sits on top of the blurred scene.  Fades with the cursor.
+    draw_backdrop_blur(g_ui.interactive_draw_alpha);
+
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
     const float btn_w     = 27.0f;
     const float btn_h     = 24.0f;

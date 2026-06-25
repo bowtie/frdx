@@ -55,6 +55,9 @@ void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     if (ImGui::Begin("##FRDX Console (F10)", nullptr, flags)) {
+        // Backdrop blur does not fade with the cursor here — the console
+        // window stays readable while other overlay content fades out.
+        draw_backdrop_blur(1.0f);
         const uint64_t log_generation = log::recent_generation();
         if (g_ui.console_log_generation != log_generation) {
             g_ui.console_lines = log::recent_lines();

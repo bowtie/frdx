@@ -140,6 +140,12 @@ void post_resize(IDXGISwapChain* swapChain) {
 
     ImGui_ImplDX12_CreateDeviceObjects();
 
+    // Re-allocate backdrop blur textures at the new resolution.  The RTV
+    // heap is sized desc.BufferCount+1 at init so blurred_rtv_index stays
+    // valid; recreate_blur_textures() will pick it up.
+    resize_backdrop_blur(nullptr, desc.BufferDesc.Width, desc.BufferDesc.Height,
+                         desc.BufferDesc.Format);
+
     log::info("[overlay] recovered DX12 backbuffer RTV resources after resize");
 }
 
@@ -209,10 +215,14 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         return false;
     }
 
-    if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.BufferCount, false)) {
+    if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.BufferCount + 1,
+                              false)) {
         log::error("[overlay] failed to create RTV descriptor heap!");
         return false;
     }
+    // Slot [BufferCount] is reserved for the blurred_tex RTV that the
+    // backdrop-blur pipeline creates during init_backdrop_blur().
+    g_dx.blurred_rtv_index = desc.BufferCount;
 
     // Command allocators
     g_dx.allocators.resize(desc.BufferCount);
@@ -296,6 +306,10 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // Load optional background image for sandbox visual testing
     load_background_texture(active_queue);
 
+    // Backdrop blur pipeline — CSS-style blurred scene under overlay windows.
+    init_backdrop_blur(active_queue, desc.BufferDesc.Width, desc.BufferDesc.Height,
+                       desc.BufferDesc.Format);
+
     return true;
 }
 
@@ -323,6 +337,7 @@ void cleanup_imgui_resources() {
     g_ui.bg_texture_id     = 0;
     g_ui.bg_texture_width  = 0;
     g_ui.bg_texture_height = 0;
+    release_backdrop_blur();
     g_dx.srv_heap.reset();
     g_dx.rtv_heap.reset();
     // Release the overlay's reference to the shared device.
@@ -406,6 +421,20 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             transition_barrier(bb, D3D12_RESOURCE_STATE_PRESENT,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
         g_dx.cmd_list->ResourceBarrier(1, &to_render_target);
+        // Mark the swapchain backbuffer state so capture_and_blur_backbuffer
+        // can transition off RENDER_TARGET without re-emitting the
+        // PRESENT→RENDER_TARGET barrier.
+        g_dx.bb_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+        // Capture the (now-render-target) backbuffer into our copy texture,
+        // then run the 9-tap Gaussian blur into a half-res RTV.  Leaves
+        // the backbuffer in RENDER_TARGET and blurred_tex in
+        // PIXEL_SHADER_RESOURCE so ImGui can sample it via AddImage later.
+        if (!capture_and_blur_backbuffer(g_dx.cmd_list.get(), bb)) {
+            // If the user has backdrop blur disabled, the helper still
+            // returns true but performs no work.  False is a hard pipeline
+            // error; we still proceed so ImGui can draw.
+        }
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
@@ -428,6 +457,10 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             transition_barrier(g_dx.fb_bufs[backBufferIdx].get(),
                                D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         g_dx.cmd_list->ResourceBarrier(1, &barrier);
+        // Now the backbuffer has been put into PRESENT state on the GPU;
+        // mirror that in our tracker so next frame's capture pipeline can
+        // reason about backwards-into-COPY_SOURCE correctly.
+        g_dx.bb_state = D3D12_RESOURCE_STATE_PRESENT;
 
         g_dx.cmd_list->Close();
 
