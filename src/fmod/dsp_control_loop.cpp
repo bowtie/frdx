@@ -135,8 +135,10 @@ std::expected<void, ControlLoopError> ControlLoop::acquire_target() noexcept {
         log::warn("[ctrl] FMOD SystemI resolution failed");
         return std::unexpected{ControlLoopError::fmod_system_resolution_failed};
     }
-    bridge_.set_target(*chosen, fmod_system);
+    bridge_.set_target(*chosen, fmod_system, this);
     meta_.set_target(chosen->sample_props_body);
+    radio_stream_      = chosen->radio_stream;
+    sample_props_body_ = chosen->sample_props_body;
     log::info("[ctrl] targeting RadioStreamFmod @0x{:X} SoundName=\"{}\" SystemI*=0x{:X}",
               reinterpret_cast<uintptr_t>(chosen->radio_stream), chosen->sound_name,
               reinterpret_cast<uintptr_t>(fmod_system));
@@ -169,11 +171,21 @@ void ControlLoop::push_metadata() noexcept {
         return;
     }
 
-    const uint64_t generation = a->track_generation();
+    auto* mp = a->metadata_provider();
+    if (!mp) {
+        metadata_source_     = nullptr;
+        metadata_generation_ = 0;
+        metadata_track_      = {};
+        metadata_display_name_.clear();
+        [[maybe_unused]] auto _meta = meta_.update("Forza Radio DX", "Idle");
+        return;
+    }
+
+    const uint64_t generation = mp->track_generation();
     if (a != metadata_source_ || generation == 0 || generation != metadata_generation_) {
         try {
-            metadata_track_        = a->current_track();
-            metadata_display_name_ = a->display_name();
+            metadata_track_        = mp->current_track();
+            metadata_display_name_ = mp->display_name();
             metadata_source_       = a;
             metadata_generation_   = generation;
         } catch (...) {

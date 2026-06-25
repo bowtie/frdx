@@ -1,24 +1,25 @@
 #pragma once
 
 #include "frdx/audio_source.hpp"
-#include "frdx/detail/thread_annotations.hpp"
 #include "frdx/ring_buffer.hpp"
 
 #include <atomic>
-#include <mutex>
 
 namespace frdx {
 
 // Holds the shared ring buffer and the single active audio source. The DSP
 // read callback consumes from ring(); pump_once() is the producer side.
 //
-// active_ is lock-free via std::atomic — the mutex active_mu_ is never
-// actually locked.  It exists solely as a named capability so the Clang
-// thread-safety analyzer can express the synchronization contract:
-//   - Writers (set_source/shutdown) acquire exclusive access via
-//     exchange(acq_rel), conceptually "locking" active_mu_.
-//   - Readers (pump_once/active()) use load(acquire), conceptually
-//     "shared-locking" active_mu_.
+// active_ is lock-free via std::atomic — no mutex is needed because:
+//   - Writers (set_source/shutdown) use exchange(acq_rel) to atomically
+//     swap in nullptr, then drain/pause the old source.
+//   - Readers (pump_once/active()) use load(acquire) — they see either the
+//     old source or nullptr, both of which are safe to dereference/call.
+//
+// This is safe only because the DSP read callback uses the atomic pointer
+// as a snapshot: if it sees nullptr it outputs silence; if it sees a valid
+// source it calls pump().  The caller guarantees the source stays alive
+// until exchange() retires it.
 class AudioSourceManager {
 public:
     explicit AudioSourceManager(std::size_t ring_bytes);
@@ -33,20 +34,16 @@ public:
 
     // Pauses the previous source (if any), drains the ring, and plays `src`.
     // Pass nullptr to deactivate without crashing.
-    FRDX_NO_THREAD_SAFETY_ANALYSIS
     void set_source(IAudioSource* src);
 
     // Deactivates and shuts down the current source.  Replaces the
     // manual pattern of  set_source(nullptr) + source->shutdown().
     // Safe to call even when there is no active source.
-    FRDX_NO_THREAD_SAFETY_ANALYSIS
     void shutdown();
 
-    FRDX_NO_THREAD_SAFETY_ANALYSIS
     IAudioSource* active() const noexcept { return active_.load(std::memory_order_acquire); }
     RingBuffer& ring() noexcept { return ring_; }
 
-    FRDX_NO_THREAD_SAFETY_ANALYSIS
     void pump_once();
 
 private:
@@ -63,15 +60,7 @@ private:
     //                     the old value (acquire) and publish nullptr
     //                     (release) in a single operation, closing the
     //                     TOCTOU gap that load-then-store would have.
-    FRDX_GUARDED_BY(active_mu_)
     std::atomic<IAudioSource*> active_{nullptr};
-
-    // Documentation capability only — never locked.  active_ is lock-free
-    // via std::atomic, but the thread-safety analyzer needs a named mutex
-    // to express the GUARDED_BY / REQUIRES / EXCLUDES contract.  Writers
-    // conceptually "acquire" this via exchange(acq_rel); readers 
-    // conceptually "acquire-shared" via load(acquire).
-    mutable frdx::Mutex active_mu_;
 };
 
 } // namespace frdx

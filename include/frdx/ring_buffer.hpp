@@ -30,6 +30,12 @@ public:
     // Returns bytes actually written; 0 if `n` doesn't fit (never partial).
     std::size_t write(const void* src, std::size_t n) noexcept;
 
+    // Writes as much of `n` as fits into the available space; returns the
+    // actual byte count written (may be less than `n`).  The remainder is
+    // silently dropped — callers that need the full payload should use
+    // write() and retry on 0, or size their ring to never overflow.
+    std::size_t write_partial(const void* src, std::size_t n) noexcept;
+
     // Reads up to `n` bytes; returns the actual count read.
     std::size_t read(void* dst, std::size_t n) noexcept;
 

@@ -12,7 +12,7 @@
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/overlay/overlay.hpp"
 
-#include "frdx/subprocess.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
 #include <algorithm>

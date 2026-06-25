@@ -266,10 +266,12 @@ void DSPBridge::install_dsp_locked(uint32_t handle) noexcept {
     log::info("[dsp] installed dsp={} on handle=0x{:X}", current_dsp_, handle);
 }
 
-void DSPBridge::set_target(const RadioInstance& inst, void* fmod_system) noexcept {
+void DSPBridge::set_target(const RadioInstance& inst, void* fmod_system,
+                            IRadioTargetProvider* provider) noexcept {
     std::scoped_lock lk{dsp_mu_};
-    fmod_system_  = fmod_system;
-    radio_stream_ = inst.radio_stream;
+    fmod_system_   = fmod_system;
+    radio_stream_  = inst.radio_stream;
+    radio_target_  = provider;
 }
 
 uint32_t DSPBridge::read_live_handle(std::byte* radio_stream) const noexcept {
@@ -288,7 +290,13 @@ bool DSPBridge::current_handle_alive() const noexcept {
 void DSPBridge::retarget_if_needed() noexcept {
     if (mode() != DSPMode::pcm || !fmod_system_) return;
     std::scoped_lock lk{dsp_mu_};
-    const uint32_t handle = read_live_handle(radio_stream_);
+    // Prefer the abstract provider (avoids touching game memory directly);
+    // fall back to the raw pointer stored at set_target() time.
+    //
+    // radio_target_->radio_stream() is a const noexcept accessor on ControlLoop
+    // whose single-writer run() loop is the only mutator — no data race.
+    std::byte* rs = radio_target_ ? radio_target_->radio_stream() : radio_stream_;
+    const uint32_t handle = read_live_handle(rs);
     if (handle == current_handle_) return;
     // No live handle on the RadioStreamFmod. If we still think we're installed
     // on a dead one, release it so we stop querying the stale handle.

@@ -18,6 +18,8 @@
 
 namespace frdx::sources {
 
+class MetadataController;
+
 enum class ShoutcastError {
     pipe_creation_failed,
     spawn_failed,
@@ -90,7 +92,7 @@ struct StationPreset {
 // Streams audio from a Shoutcast / Icecast URL via ffmpeg.
 // Supports station presets (JSON catalog) with REST metadata polling
 // for live track info, plus ICY metadata from the stream stderr.
-class ShoutcastSource final : public IAudioSource {
+class ShoutcastSource final : public IAudioSource, public IAudioMetadataProvider {
 public:
     explicit ShoutcastSource(ShoutcastConfig cfg);
     FRDX_NO_THREAD_SAFETY_ANALYSIS
@@ -105,6 +107,9 @@ public:
     ShoutcastSource& operator=(ShoutcastSource&&)      = delete;
 
     SourceType type() const noexcept override { return SourceType::shoutcast; }
+
+    // IAudioMetadataProvider
+    IAudioMetadataProvider* metadata_provider() noexcept override { return this; }
     uint64_t track_generation() const noexcept override {
         return info_gen_.load(std::memory_order_acquire);
     }
@@ -112,17 +117,27 @@ public:
     std::string_view name() const noexcept override { return "shoutcast"; }
     FRDX_NO_THREAD_SAFETY_ANALYSIS
     std::string display_name() const override FRDX_EXCLUDES(mu_) {
-        thread_local uint64_t cached_gen = 0;
-        thread_local std::string cached_name;
+        // Snapshot display_name_ under mu_ so all threads see the same
+        // value for a given generation.  Uses an atomic load of the gen
+        // counter to avoid locking on repeated calls within the same
+        // generation — only the control-loop metadata path (push_metadata)
+        // calls this at low frequency (4 Hz), so the lock is cheap.
+        //
+        // No thread_local cache — the previous thread_local approach could
+        // go stale when the station changed on a background thread without
+        // the calling thread ever re-locking.
         const uint64_t gen = display_name_gen_.load(std::memory_order_acquire);
-        if (gen == cached_gen) [[likely]] {
-            return cached_name;
+        {
+            frdx::ScopedLock lk{mu_};
+            // Re-check gen under lock in case it changed between the
+            // acquire-load above and the lock acquisition.
+            if (display_name_gen_.load(std::memory_order_relaxed) == gen) {
+                return display_name_;
+            }
         }
-        // Generation changed — re-read under lock.
+        // Gen changed after the load — retry once with lock held.
         frdx::ScopedLock lk{mu_};
-        cached_name = display_name_;
-        cached_gen  = display_name_gen_.load(std::memory_order_relaxed);
-        return cached_name;
+        return display_name_;
     }
 
     bool initialize() override FRDX_EXCLUDES(mu_);
@@ -165,14 +180,6 @@ private:
     void restore_station_display_locked() FRDX_REQUIRES(mu_);
     void cycle_preset(int direction = 1) FRDX_REQUIRES(mu_);
     void cycle_and_restart(int direction) FRDX_EXCLUDES(mu_);
-    void stop_metadata_poller() FRDX_EXCLUDES(ws_mu_);          // join bg thread (no-op now, kept for API compat)
-    void stop_icy_poller();               // join ICY metadata thread
-    void run_icy_poller(const std::string& stream_url, uint64_t metadata_epoch,
-                        const std::stop_token& stop); // ICY metadata loop body
-    void run_ws_poller(std::string url, const StationMetadataMapping& mapping,
-                       const StationMetadataWebSocketFilter& filter,
-                       StationMetadataWebSocketHeartbeat hb, uint64_t metadata_epoch,
-                       const std::stop_token& stop); // WebSocket metadata loop body
     bool queue_timed_metadata_locked(TrackInfo info, int64_t now_ms, uint64_t metadata_epoch)
         FRDX_REQUIRES(mu_);
     void apply_pending_metadata_locked(const char* reason) FRDX_REQUIRES(mu_);
@@ -221,39 +228,19 @@ private:
     std::string active_stream_id_       FRDX_GUARDED_BY(mu_);
     std::string metadata_url_           FRDX_GUARDED_BY(mu_); // resolved REST metadata URL for current selection
 
-    // Restart metadata poller for the currently active station (releases mu_ first).
-    // FRDX_NO_THREAD_SAFETY_ANALYSIS: the Clang analyzer doesn't understand
-    // std::jthread boundaries and traces lock state from the internal mu_
-    // acquisition through the spawned lambdas, producing false positives.
-    FRDX_NO_THREAD_SAFETY_ANALYSIS
+    // Restarts polling for the current station. Delegates to metadata_controller_.
     void restart_metadata_for_current() FRDX_EXCLUDES(mu_);
 
-    // Metadata poller thread (background REST/WS polling).
-    std::jthread metadata_thread_;
-
-    // ICY metadata poller — connects directly to the stream URL via WinHTTP,
-    // sends Icy-MetaData: 1, parses interleaved StreamTitle blocks.
-    std::jthread icy_poller_thread_;
-
-    // WinHTTP WebSocket handle for forced close on stop.
-    // void* avoids pulling <windows.h>/<winhttp.h> into this public header.
-    mutable frdx::Mutex ws_mu_;
-    void* ws_handle_ FRDX_GUARDED_BY(ws_mu_) = nullptr;
-
-    // Persistent WinHTTP session handle shared across REST and WebSocket polling.
+    // Persistent WinHTTP session handle shared across polling connections.
     void* winhttp_session_ = nullptr;
 
     // Retry counter to preserve active station during brief network dropouts.
     std::atomic<int> reconnect_attempts_{0};
 
-    // Timestamp (steady_clock ms) of the last ICY StreamTitle received in
-    // pump(). The REST/WS pollers check this — if ICY is actively delivering
-    // metadata, they skip overwriting title/artist.
-    std::atomic<int64_t> last_icy_ms_{0};
-    std::atomic<int64_t> last_ffmpeg_icy_ms_{0};
-
-    // ICY read buffer — reused across run_icy_poller() invocations.
-    std::vector<char> icy_buf_;
+    // Background metadata poller (ICY + WebSocket). Allocated on heap so
+    // shoutcast_source.hpp only needs a forward declaration (avoids circular
+    // include with shoutcast_metadata.hpp).
+    std::unique_ptr<MetadataController> metadata_controller_;
 
     // Generation counter bumped on every info_ write so the overlay can
     // avoid calling current_track() (which locks mu_) every frame.

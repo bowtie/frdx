@@ -55,6 +55,7 @@ add_library(version SHARED
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp
+    src/sources/shoutcast_metadata.cpp
     third_party/hidapi/windows/hid.c
 
     # Dear ImGui
@@ -132,6 +133,7 @@ add_executable(frdx_sandbox
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp
+    src/sources/shoutcast_metadata.cpp
     third_party/hidapi/windows/hid.c
 
     # Dear ImGui

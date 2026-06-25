@@ -2,7 +2,7 @@
 #include "frdx/overlay/overlay_priv.hpp"
 #include <array>
 #include <fstream>
-#include "frdx/subprocess.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 namespace frdx::overlay {
 using namespace frdx;

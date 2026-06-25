@@ -6,7 +6,7 @@
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/log.hpp"
-#include "frdx/subprocess.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
 #include <d3d12.h>

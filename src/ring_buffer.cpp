@@ -28,11 +28,20 @@ std::size_t RingBuffer::writable() const noexcept {
 }
 
 std::size_t RingBuffer::write(const void* src, std::size_t n) noexcept {
+    // Delegate to write_partial; reject if the full payload didn't fit.
+    // The SPSC contract guarantees write_pos won't change between the two
+    // internal atomic loads (single writer), and read_pos can only increase
+    // (single reader), so the double-load is safe.
+    return write_partial(src, n) == n ? n : 0;
+}
+
+std::size_t RingBuffer::write_partial(const void* src, std::size_t n) noexcept {
     if (!src || n == 0) return 0;
     const auto w     = write_pos_.load(std::memory_order_relaxed);
     const auto r     = read_pos_.load(std::memory_order_acquire);
     const auto space = capacity_ - (w - r);
-    if (space < n) return 0;
+    if (space == 0) return 0;
+    if (n > space) n = space;
 
     const auto off  = w & mask_;
     const auto tail = std::min(n, capacity_ - off);

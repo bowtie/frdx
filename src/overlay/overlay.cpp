@@ -6,7 +6,7 @@
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/log.hpp"
-#include "frdx/subprocess.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -307,24 +307,35 @@ void draw_imgui_ui_impl() {
     static std::string s_toast_title;
     static std::string s_toast_artist;
     if (active) {
-        uint64_t gen = active->track_generation();
-        if (active != s_track_source || gen == 0 || gen != s_track_gen) {
-            s_track_source = active;
-            s_track_gen    = gen;
-            s_cached_track = active->current_track();
-            s_cached_hud_title =
-                s_cached_track.title.empty() ? active->display_name() : s_cached_track.title;
-            const std::string artist =
-                s_cached_track.artist == "Select a station" ? std::string{} : s_cached_track.artist;
-            if (g_ui.hud_visible &&
-                should_notify_song_change(active, s_cached_track, s_cached_hud_title, artist) &&
-                (active != s_toast_source || s_cached_hud_title != s_toast_title ||
-                 artist != s_toast_artist)) {
-                push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);
-                s_toast_source = active;
-                s_toast_title  = s_cached_hud_title;
-                s_toast_artist = artist;
+        auto* mp = active->metadata_provider();
+        if (mp) {
+            uint64_t gen = mp->track_generation();
+            if (active != s_track_source || gen == 0 || gen != s_track_gen) {
+                s_track_source = active;
+                s_track_gen    = gen;
+                s_cached_track = mp->current_track();
+                s_cached_hud_title =
+                    s_cached_track.title.empty() ? mp->display_name() : s_cached_track.title;
+                const std::string artist =
+                    s_cached_track.artist == "Select a station" ? std::string{} : s_cached_track.artist;
+                if (g_ui.hud_visible &&
+                    should_notify_song_change(active, s_cached_track, s_cached_hud_title, artist) &&
+                    (active != s_toast_source || s_cached_hud_title != s_toast_title ||
+                     artist != s_toast_artist)) {
+                    push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);
+                    s_toast_source = active;
+                    s_toast_title  = s_cached_hud_title;
+                    s_toast_artist = artist;
+                }
             }
+        } else {
+            s_track_source = nullptr;
+            s_track_gen    = 0;
+            s_cached_track = {};
+            s_cached_hud_title.clear();
+            s_toast_source = nullptr;
+            s_toast_title.clear();
+            s_toast_artist.clear();
         }
     } else {
         s_track_source = nullptr;

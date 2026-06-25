@@ -4,7 +4,7 @@
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/fmod/metadata_injector.hpp"
 #include "frdx/fmod/pe_image.hpp"
-#include "frdx/fmod/radio_discovery.hpp"
+#include "frdx/fmod/radio_discovery.hpp"  // IRadioTargetProvider, RadioInstance, DiscoveryResult
 
 #include "frdx/detail/thread_annotations.hpp"
 
@@ -21,7 +21,11 @@ enum class ControlLoopError { discover_failed, fmod_system_resolution_failed };
 
 // 50 Hz tick: keeps the DSP installed on the current radio channel and
 // drives the AudioSourceManager pump.
-class ControlLoop {
+//
+// Implements IRadioTargetProvider so DSPBridge can query the live radio
+// stream pointer through an abstract interface instead of storing a raw
+// pointer into game memory whose lifetime it can't verify.
+class ControlLoop : public IRadioTargetProvider {
 public:
     ControlLoop(DSPBridge& bridge, const PEImage& img, float configured_gain);
     ~ControlLoop();
@@ -37,6 +41,10 @@ public:
     void set_configured_gain(float g) noexcept {
         configured_gain_.store(g, std::memory_order_release);
     }
+
+    // IRadioTargetProvider
+    std::byte* radio_stream() const noexcept override { return radio_stream_; }
+    std::byte* sample_props_body() const noexcept override { return sample_props_body_; }
 
 private:
     FRDX_NO_THREAD_SAFETY_ANALYSIS
@@ -61,8 +69,10 @@ private:
     std::uint64_t metadata_generation_ = 0;
     TrackInfo metadata_track_;
     std::string metadata_display_name_;
-    std::uint64_t prev_calls_ = 0;
-    int stale_ticks_          = 0;
+    std::byte* radio_stream_      = nullptr;  // current RadioStreamFmod
+    std::byte* sample_props_body_ = nullptr;  // current SampleProperties body
+    std::uint64_t prev_calls_     = 0;
+    int stale_ticks_              = 0;
     std::chrono::steady_clock::time_point last_reacquire_{}; // cooldown for rediscovery
     std::jthread thread_;
 };

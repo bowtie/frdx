@@ -1,7 +1,7 @@
 #include "frdx/overlay/overlay.hpp"
 #include "frdx/overlay/overlay_priv.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
-#include "frdx/subprocess.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
 #include <filesystem>

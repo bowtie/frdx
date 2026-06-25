@@ -1,5 +1,5 @@
 #include "frdx/log.hpp"
-#include "frdx/detail/win32_handle.hpp"
+#include "frdx/platform/windows/win32_handle.hpp"
 
 #include <atomic>
 #include <chrono>

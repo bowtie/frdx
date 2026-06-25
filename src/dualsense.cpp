@@ -1,5 +1,5 @@
 #include "frdx/dualsense.hpp"
-#include "frdx/detail/win32_handle.hpp"
+#include "frdx/platform/windows/win32_handle.hpp"
 #include "frdx/log.hpp"
 
 #include <winsock2.h>
