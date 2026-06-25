@@ -30,7 +30,31 @@ function Backup-AndCopy([string]$src, [string]$dst) {
     "  + $($dst.Substring($GameDir.Length + 1))"
 }
 
-Backup-AndCopy (Join-Path $dist "version.dll") (Join-Path $GameDir "version.dll") | Out-Host
+# Lock check — Windows won't let us replace a dll that the running process
+# has mapped (Forza holds version.dll open for the lifetime of the game).
+# Detect that explicitly and throw a clear message instead of silently
+# failing the cp step.
+$targetDll = Join-Path $GameDir "version.dll"
+if (Test-Path $targetDll) {
+    try {
+        $probe = [System.IO.File]::Open($targetDll, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $probe.Close()
+    } catch {
+        throw "DEPLOY FAILED: version.dll in $GameDir is locked. Fully CLOSE Forza Horizon 6 (not just minimize the window) before installing."
+    }
+}
+
+Backup-AndCopy (Join-Path $dist "version.dll") $targetDll | Out-Host
+
+# MD5 verification — confirm the deploy actually copied the new bytes
+# (catches silent cp failures, network drive quirks, file-locked races).
+$installedMd5 = (Get-FileHash $targetDll -Algorithm MD5).Hash
+$distMd5      = (Get-FileHash (Join-Path $dist "version.dll") -Algorithm MD5).Hash
+Write-Host ("`nDeploy check  dist MD5: {0}" -f $distMd5) -ForegroundColor DarkGray
+Write-Host ("               game MD5: {0}" -f $installedMd5) -ForegroundColor DarkGray
+if ($installedMd5 -ne $distMd5) {
+    Write-Warning "Deploy check FAILED: MD5 mismatch. Game folder still has the old version.dll."
+}
 
 $dataDir = Join-Path $GameDir "mods\frdx"
 if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Force -Path $dataDir | Out-Null }

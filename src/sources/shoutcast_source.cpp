@@ -1,6 +1,8 @@
 #include "frdx/sources/shoutcast_source.hpp"
+#include "frdx/sources/shoutcast_helpers.hpp"
+#include "frdx/sources/shoutcast_metadata.hpp"
 #include "frdx/log.hpp"
-#include "frdx/subprocess.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -8,22 +10,22 @@
 #include <winhttp.h>
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <fstream>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
 
 // The Clang thread-safety analyzer doesn't understand std::jthread boundaries
-// and traces lock state from restart_metadata_for_current() (which acquires mu_)
-// through the jthread lambda into run_icy_poller(), producing 14 false-positive
-// warnings.  Neither [[clang::no_thread_safety_analysis]] nor #pragma clang
-// diagnostic wrapping the function definitions suppresses the CFG-based
-// analysis when lock state is inherited via inter-procedural inlining.
+// and traces lock state from queue_timed_metadata_locked() (which requires mu_)
+// through MetadataController callbacks, producing false-positive warnings.
 // File-level suppression is the only reliable mechanism.
 #if defined(__clang__)
 #pragma clang diagnostic ignored "-Wthread-safety"
@@ -33,6 +35,7 @@
 namespace frdx::sources {
 
 using json = nlohmann::json;
+using namespace helpers;
 
 namespace {
 
@@ -54,84 +57,6 @@ std::wstring resolve_ffmpeg_path(const std::filesystem::path& configured) {
     }
     // Fall back to PATH lookup.
     return L"ffmpeg";
-}
-
-// Resolve a JSON path to a const json* node (returns nullptr if not found).
-// Supports both object traversal and array indexing.
-// Accepts string_view to avoid heap-allocated key copies.
-const json* resolve_json_node(const json& root, std::string_view dot_path) {
-    if (dot_path.empty()) return &root;
-    const json* node = &root;
-    std::size_t pos  = 0;
-    while (pos < dot_path.size()) {
-        auto dot = dot_path.find('.', pos);
-        auto key_sv = (dot == std::string_view::npos)
-                          ? dot_path.substr(pos)
-                          : dot_path.substr(pos, dot - pos);
-        if (key_sv.empty()) return nullptr;
-        if (node->is_array()) {
-            try {
-                auto idx = static_cast<std::size_t>(std::stoul(std::string{key_sv}));
-                if (idx >= node->size()) return nullptr;
-                node = &(*node)[idx];
-            } catch (...) {
-                return nullptr;
-            }
-        } else if (node->is_object()) {
-            auto it = node->find(key_sv);
-            if (it == node->end()) return nullptr;
-            node = &*it;
-        } else {
-            return nullptr;
-        }
-        pos = (dot == std::string_view::npos) ? dot_path.size() : dot + 1;
-    }
-    return node;
-}
-
-// Resolve a dot-notation JSON path (e.g. "data.track_title") to a value in a nlohmann::json tree.
-// Returns the value if found, otherwise an empty string.
-std::string resolve_json_path(const json& root, std::string_view dot_path) {
-    if (dot_path.empty()) return {};
-    const json* node = resolve_json_node(root, dot_path);
-    if (!node) return {};
-    if (node->is_string()) return node->get<std::string>();
-    if (node->is_number_integer()) return std::to_string(node->get<int64_t>());
-    if (node->is_number_float()) return std::to_string(node->get<double>());
-    return node->dump();
-}
-
-// Apply enhanced mapping to resolve a single field from JSON.
-// Handles: dot-path resolution, artist_array_field (join array of objects),
-// and artist_separator.
-std::string resolve_mapped_value(const json& root, const std::string& path,
-                                 const std::string& array_field, const std::string& separator) {
-    if (path.empty()) return {};
-
-    // If array_field is set, resolve to the node and extract array elements.
-    if (!array_field.empty()) {
-        const json* node = resolve_json_node(root, path);
-        if (node && node->is_array()) {
-            std::string result;
-            for (const auto& elem : *node) {
-                std::string val;
-                if (elem.is_object()) {
-                    auto it = elem.find(array_field);
-                    if (it != elem.end() && it->is_string()) val = it->get<std::string>();
-                } else if (elem.is_string()) {
-                    val = elem.get<std::string>();
-                }
-                if (!val.empty()) {
-                    if (!result.empty()) result += separator;
-                    result += val;
-                }
-            }
-            return result;
-        }
-    }
-
-    // Standard path resolution.
-    return resolve_json_path(root, path);
 }
 
 // Load station presets from a JSON file matching the schema the user provided.
@@ -158,7 +83,9 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
         sp.id   = j.value("id", "");
         sp.name = j.value("name", "");
         if (j.contains("streams") && j["streams"].is_array()) {
-            for (const auto& s : j["streams"]) {
+            const auto& streams = j["streams"];
+            sp.streams.reserve(streams.size());
+            for (const auto& s : streams) {
                 StationStream ss;
                 ss.id   = s.value("id", "");
                 ss.name = s.value("name", "");
@@ -215,6 +142,7 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
     };
 
     if (root.is_array()) {
+        out.reserve(root.size());
         for (const auto& j : root) out.push_back(parse_station(j));
     } else {
         out.push_back(parse_station(root));
@@ -224,162 +152,7 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
     return out;
 }
 
-// RAII wrapper for HINTERNET handles — auto-closes via WinHttpCloseHandle.
-class ScopedWinHttp {
-public:
-    ScopedWinHttp() = default;
-    explicit ScopedWinHttp(HINTERNET h) : h_(h) {}
-    ~ScopedWinHttp() { close(); }
-
-    ScopedWinHttp(const ScopedWinHttp&) = delete;
-    ScopedWinHttp& operator=(const ScopedWinHttp&) = delete;
-    ScopedWinHttp(ScopedWinHttp&& o) noexcept : h_(o.h_) { o.h_ = nullptr; }
-    ScopedWinHttp& operator=(ScopedWinHttp&& o) noexcept {
-        if (this != &o) { close(); h_ = o.h_; o.h_ = nullptr; }
-        return *this;
-    }
-
-    void close() {
-        if (h_) { WinHttpCloseHandle(h_); h_ = nullptr; }
-    }
-    HINTERNET get() const { return h_; }
-    HINTERNET release() { HINTERNET h = h_; h_ = nullptr; return h; }
-    explicit operator bool() const { return h_ != nullptr; }
-
-private:
-    HINTERNET h_ = nullptr;
-};
-
-// Parsed WinHTTP URL components — handles ws:///wss:// → http/https substitution.
-struct ParsedUrl {
-    std::wstring wurl;
-    URL_COMPONENTS uc{};
-    wchar_t host[256]{};
-    wchar_t path[2048]{};
-    bool is_ssl = false;
-    INTERNET_PORT port = 80;
-
-    static std::optional<ParsedUrl> parse(const std::string& url) {
-        ParsedUrl p;
-        std::string tmp = url;
-        auto ws_pos      = tmp.find("://");
-        if (ws_pos != std::string::npos) {
-            std::string scheme = tmp.substr(0, ws_pos);
-            if (scheme == "wss") {
-                tmp.replace(0, 3, "https");
-            } else if (scheme == "ws") {
-                tmp.replace(0, 2, "http");
-            }
-        }
-        p.wurl             = frdx::subprocess::widen(tmp);
-        p.uc.dwStructSize  = sizeof(p.uc);
-        p.uc.lpszHostName  = p.host;
-        p.uc.dwHostNameLength = 255;
-        p.uc.lpszUrlPath      = p.path;
-        p.uc.dwUrlPathLength  = 2047;
-        if (!WinHttpCrackUrl(p.wurl.c_str(), 0, 0, &p.uc)) return std::nullopt;
-        p.is_ssl = (p.uc.nScheme == INTERNET_SCHEME_HTTPS);
-        p.port   = p.uc.nPort ? p.uc.nPort : (p.is_ssl ? 443 : 80);
-        return p;
-    }
-};
-
-// Shared WinHTTP connection setup — RAII-wrapped connect + request.
-struct WinHttpConn {
-    ScopedWinHttp request;
-    ScopedWinHttp connect;
-    ScopedWinHttp localSession;
-    explicit operator bool() const { return request.get() != nullptr; }
-};
-
-WinHttpConn winhttp_connect(void* shared_session, const ParsedUrl& parsed) {
-    WinHttpConn conn;
-    HINTERNET hSession =
-        shared_session ? static_cast<HINTERNET>(shared_session) : nullptr;
-
-    if (!hSession) {
-        hSession = WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (!hSession) {
-            log::warn("[shoutcast] WinHttpOpen failed ({})", GetLastError());
-            return conn;
-        }
-        conn.localSession = ScopedWinHttp(hSession);
-        DWORD to_ms = 5000;
-        WinHttpSetOption(hSession, WINHTTP_OPTION_CONNECT_TIMEOUT, &to_ms, sizeof(to_ms));
-        WinHttpSetOption(hSession, WINHTTP_OPTION_SEND_TIMEOUT, &to_ms, sizeof(to_ms));
-        WinHttpSetOption(hSession, WINHTTP_OPTION_RECEIVE_TIMEOUT, &to_ms, sizeof(to_ms));
-    }
-
-    conn.connect = ScopedWinHttp(
-        WinHttpConnect(hSession, parsed.host, parsed.port, 0));
-    if (!conn.connect) {
-        log::warn("[shoutcast] WinHttpConnect failed ({})", GetLastError());
-        return conn;
-    }
-
-    conn.request = ScopedWinHttp(WinHttpOpenRequest(
-        conn.connect.get(), L"GET", parsed.path, nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, parsed.is_ssl ? WINHTTP_FLAG_SECURE : 0));
-    if (!conn.request) {
-        log::warn("[shoutcast] WinHttpOpenRequest failed ({})", GetLastError());
-        return conn;
-    }
-
-    DWORD sec = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-    WinHttpSetOption(conn.request.get(), WINHTTP_OPTION_SECURITY_FLAGS, &sec, sizeof(sec));
-
-    return conn;
-}
-
 } // namespace
-
-// Replace CJK brackets that don't render in-game with ASCII [].
-// U+300C/U+300D (「」) corner brackets, U+300A/U+300B (《》) double angle,
-// U+3010/U+3011 (【】) square brackets — each is 3 bytes in UTF-8.
-// Corner brackets: \xE3\x80\x8C / \xE3\x80\x8D
-// Double angle:    \xE3\x80\x8A / \xE3\x80\x8B
-// Square brackets: \xE3\x80\x90 / \xE3\x80\x91
-std::string sanitize_brackets(std::string s) {
-    // Single-pass character-by-character scan using a small UTF-8 state
-    // machine. Replaces CJK bracket codepoints (3 bytes each) with ASCII
-    // [] in one traversal instead of 6 separate find/replace passes.
-    //
-    // Mapping: U+300C/U+300A/U+3010 → '['  (「, 《, 【)
-    //          U+300D/U+300B/U+3011 → ']'  (」, 》 , 】)
-    auto*       dst  = s.data();
-    const auto* src  = s.data();
-    const auto* end  = src + s.size();
-    // Thread-local lookup table indexed by the first byte of a 3-byte UTF-8
-    // CJK sequence.  Initialized once with 0 for non-matching first bytes.
-    static thread_local char cjk_replace[256] = {};
-    if (cjk_replace[0x8C] == 0) {
-        cjk_replace[0x8C] = '[';  // U+300C 「
-        cjk_replace[0x8D] = ']';  // U+300D 」
-        cjk_replace[0x8A] = '[';  // U+300A 《
-        cjk_replace[0x8B] = ']';  // U+300B 》
-        cjk_replace[0x90] = '[';  // U+3010 【
-        cjk_replace[0x91] = ']';  // U+3011 】
-    }
-
-    while (src < end) {
-        const auto c = static_cast<unsigned char>(*src);
-        if (c == 0xE3 && src + 3 <= end) {
-            // Potential 3-byte CJK bracket
-            const auto b2 = static_cast<unsigned char>(*(src + 1));
-            const char r  = cjk_replace[b2];
-            if (r != 0) {
-                *dst++ = r;
-                src   += 3;
-                continue;
-            }
-        }
-        *dst++ = *src++;
-    }
-    s.resize(static_cast<std::size_t>(dst - s.data()));
-    return s;
-}
 
 // ---- Pipe ----
 
@@ -390,6 +163,7 @@ struct ShoutcastSource::Pipe {
     HANDLE stderr_pipe = nullptr;
     std::string stderr_buf;
     std::uint64_t bytes_written = 0;
+    std::uint64_t metadata_epoch = 0;
     bool ended                  = false;
     bool stderr_empty           = false;
 
@@ -404,19 +178,23 @@ struct ShoutcastSource::Pipe {
 // ---- ShoutcastSource ----
 
 ShoutcastSource::ShoutcastSource(ShoutcastConfig cfg) : cfg_{std::move(cfg)} {
+    metadata_controller_ = std::make_unique<MetadataController>(
+        [this](TrackInfo info, int64_t now_ms, uint64_t epoch) -> bool {
+            frdx::ScopedLock lk{mu_};
+            return queue_timed_metadata_locked(std::move(info), now_ms, epoch);
+        }
+    );
     info_        = TrackInfo{};
     info_.artist = "Select a station";
+    clear_pending_metadata_locked();
     info_gen_.fetch_add(1, std::memory_order_release);
 }
 
 ShoutcastSource::~ShoutcastSource() {
-    stop_icy_poller();
-    stop_metadata_poller();
     stop_pipe_locked();
 }
 
 bool ShoutcastSource::initialize() {
-    if (!cfg_.enabled) return false;
     if (!cfg_.default_url.empty()) {
         frdx::ScopedLock lk{mu_};
         target_url_ = cfg_.default_url;
@@ -434,6 +212,7 @@ bool ShoutcastSource::initialize() {
         WinHttpSetOption(session.get(), WINHTTP_OPTION_RECEIVE_TIMEOUT,
                          &to, sizeof(to));
         winhttp_session_ = session.release();
+        metadata_controller_->set_winhttp_session(winhttp_session_);
     } else {
         log::warn("[shoutcast] failed to initialize shared WinHTTP session; falling back to local "
                   "sessions");
@@ -443,8 +222,7 @@ bool ShoutcastSource::initialize() {
 }
 
 void ShoutcastSource::shutdown() noexcept {
-    stop_icy_poller();
-    stop_metadata_poller();
+    metadata_controller_->stop();
     {
         frdx::ScopedLock lk{mu_};
         stop_pipe_locked();
@@ -509,7 +287,7 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
     const auto ff = resolve_ffmpeg_path(ffmpeg_path);
 
     std::wstring ff_cmd = frdx::subprocess::quote(ff) +
-                          L" -loglevel error"
+                          L" -hide_banner -nostats -loglevel info"
                           L" -icy 1"
                           L" -user_agent \"WinampMPEG/5.0\""
                           L" -reconnect 1"
@@ -544,6 +322,11 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
 // ---- select_station ----
 
 void ShoutcastSource::select_station(const std::string& station_id, const std::string& stream_id) {
+    // Stop old metadata producers before publishing the new active station.
+    // Otherwise a late WS/ICY write can briefly overwrite the freshly selected
+    // station metadata.
+    metadata_controller_->stop();
+
     // Phase 1: configure under lock — fast path, no ffmpeg launch.
     std::string launch_url;
     std::string md_type;
@@ -605,13 +388,11 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
             static_info.artist = sanitize_brackets(station->metadata.static_artist);
         }
 
-        // Signal the old metadata thread to stop before restarting the
-        // pipe, so even if it's about to write a stale poll result to
-        // info_ it sees the flag and skips the write.
-        // (stop_metadata_poller() will request_stop on the jthread)
-
         // Stop old pipe (fast — no ffmpeg launch here).
         stop_pipe_locked();
+        reset_metadata_sync_locked();
+        metadata_controller_->notify_icy_metadata(0);
+        metadata_controller_->notify_ffmpeg_icy_metadata(0);
     } // mu_ released — ffmpeg launch happens outside the lock
 
     // Phase 2: launch ffmpeg OUTSIDE the lock (expensive subprocess creation).
@@ -626,7 +407,9 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         frdx::ScopedLock lk{mu_};
         // Only install if we're still on the same station (not changed during launch).
         if (active_station_id_ == station_id && active_stream_id_ == stream_id) {
+            const auto metadata_epoch = reset_metadata_sync_locked();
             if (new_pipe) {
+                new_pipe->metadata_epoch = metadata_epoch;
                 pipe_.store(std::shared_ptr<Pipe>(std::move(new_pipe)),
                             std::memory_order_release);
                 has_pipe = true;
@@ -634,6 +417,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
 
             if (has_static) {
                 info_ = static_info;
+                metadata_epoch_has_track_ = true;
             } else {
                 info_        = TrackInfo{};
                 info_.title  = station_name;
@@ -647,8 +431,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         }
     }
 
-    // Stop old poller and start the appropriate new one.
-    stop_metadata_poller();
+    // Start the appropriate new poller.
     restart_metadata_for_current();
 
     if (has_pipe) {
@@ -709,6 +492,7 @@ void ShoutcastSource::start_pipe_locked() {
     // returning to the station list or selecting a new station.
     info_         = TrackInfo{};
     info_.artist  = "Select a station";
+    const auto metadata_epoch = reset_metadata_sync_locked();
     info_gen_.fetch_add(1, std::memory_order_release);
     display_name_ = "Online Radio";
     display_name_gen_.fetch_add(1, std::memory_order_release);
@@ -718,28 +502,13 @@ void ShoutcastSource::start_pipe_locked() {
     auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path);
     if (!pipe_result) return;
 
+    (*pipe_result)->metadata_epoch = metadata_epoch;
     pipe_.store(std::shared_ptr<Pipe>(std::move(*pipe_result)),
                 std::memory_order_release);
 
     // Set initial display metadata from the active station before real
     // track info arrives from the background poller / ICY parser.
-    if (!active_station_id_.empty()) {
-        for (const auto& st : stations_) {
-            if (st.id == active_station_id_) {
-                info_.title   = st.name;
-                display_name_ = st.name;
-                display_name_gen_.fetch_add(1, std::memory_order_release);
-                for (const auto& str : st.streams) {
-                    if (str.id == active_stream_id_) {
-                        info_.artist = str.name;
-                        break;
-                    }
-                }
-                info_gen_.fetch_add(1, std::memory_order_release);
-                break;
-            }
-        }
-    }
+    restore_station_display_locked();
     position_ms_.store(0, std::memory_order_release);
     state_.store(PlaybackState::buffering, std::memory_order_release);
 
@@ -751,11 +520,32 @@ void ShoutcastSource::stop_pipe_locked() {
     state_.store(PlaybackState::stopped, std::memory_order_release);
 }
 
+void ShoutcastSource::restore_station_display_locked() {
+    if (active_station_id_.empty()) return;
+    for (const auto& st : stations_) {
+        if (st.id != active_station_id_) continue;
+        info_.title   = st.name;
+        display_name_ = st.name;
+        display_name_gen_.fetch_add(1, std::memory_order_release);
+        info_.artist.clear();
+        for (const auto& str : st.streams) {
+            if (str.id == active_stream_id_) {
+                info_.artist = str.name;
+                break;
+            }
+        }
+        clear_pending_metadata_locked();
+        info_gen_.fetch_add(1, std::memory_order_release);
+        return;
+    }
+}
+
 void ShoutcastSource::play() {
     bool has_pipe = false;
     {
         frdx::ScopedLock lk{mu_};
         if (!pipe_.load(std::memory_order_acquire)) start_pipe_locked();
+        restore_station_display_locked();
         has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
     } // mu_ released before poller restart to avoid deadlock
     // Restart the metadata poller — pause() stops it, so unpausing needs to
@@ -767,21 +557,25 @@ void ShoutcastSource::play() {
 }
 
 void ShoutcastSource::pause() {
-    stop_icy_poller();
-    stop_metadata_poller();
+    metadata_controller_->stop();
     {
         frdx::ScopedLock lk{mu_};
         stop_pipe_locked();
         info_         = TrackInfo{};
         info_.artist  = "Nothing playing";
+        reset_metadata_sync_locked();
         info_gen_.fetch_add(1, std::memory_order_release);
-        display_name_ = "Online Radio";
-        display_name_gen_.fetch_add(1, std::memory_order_release);
+        if (active_station_id_.empty()) {
+            display_name_ = "Online Radio";
+            display_name_gen_.fetch_add(1, std::memory_order_release);
+        }
     }
     state_.store(PlaybackState::paused, std::memory_order_release);
 }
 
 void ShoutcastSource::cycle_and_restart(int direction) {
+    metadata_controller_->stop();
+
     bool has_pipe = false;
     {
         frdx::ScopedLock lk{mu_};
@@ -794,6 +588,8 @@ void ShoutcastSource::cycle_and_restart(int direction) {
                     info_.title =
                         st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
                     info_.artist = st.metadata.static_artist;
+                    metadata_epoch_has_track_ = true;
+                    clear_pending_metadata_locked();
                     info_gen_.fetch_add(1, std::memory_order_release);
                 }
                 break;
@@ -812,60 +608,140 @@ void ShoutcastSource::next() { cycle_and_restart(1); }
 void ShoutcastSource::previous() { cycle_and_restart(-1); }
 
 TrackInfo ShoutcastSource::current_track() const {
-    frdx::ScopedLock lk{mu_};
-    TrackInfo t   = info_;
+    TrackInfo t;
+    {
+        frdx::ScopedLock lk{mu_};
+        t = info_;
+    }
     t.position_ms = position_ms_.load(std::memory_order_acquire);
     return t;
+}
+
+bool ShoutcastSource::queue_timed_metadata_locked(TrackInfo info, int64_t now_ms,
+                                                  uint64_t metadata_epoch) {
+    if (metadata_epoch != metadata_epoch_.load(std::memory_order_acquire)) return false;
+    if (info.title.empty() && info.artist.empty()) return false;
+    if (info.title == info_.title && info.artist == info_.artist) {
+        clear_pending_metadata_locked();
+        return false;
+    }
+    if (pending_info_valid_ && pending_info_epoch_ == metadata_epoch &&
+        info.title == pending_info_.title &&
+        info.artist == pending_info_.artist) {
+        return false;
+    }
+    pending_info_        = std::move(info);
+    pending_info_ms_     = now_ms;
+    quiet_started_ms_    = 0;
+    pending_info_epoch_  = metadata_epoch;
+    pending_info_valid_  = true;
+    if (!metadata_epoch_has_track_) {
+        apply_pending_metadata_locked("initial metadata");
+    }
+    return true;
+}
+
+void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
+    if (!pending_info_valid_) return;
+    if (pending_info_epoch_ != metadata_epoch_.load(std::memory_order_acquire)) {
+        clear_pending_metadata_locked();
+        return;
+    }
+    info_ = std::move(pending_info_);
+    pending_info_ = {};
+    pending_info_ms_ = 0;
+    quiet_started_ms_ = 0;
+    pending_info_epoch_ = 0;
+    pending_info_valid_ = false;
+    info_gen_.fetch_add(1, std::memory_order_release);
+    metadata_epoch_has_track_ = true;
+    log::info("[shoutcast] applied timed metadata after {}: {} - {}", reason, info_.artist,
+              info_.title);
+}
+
+void ShoutcastSource::clear_pending_metadata_locked() {
+    pending_info_ = {};
+    pending_info_ms_ = 0;
+    quiet_started_ms_ = 0;
+    pending_info_epoch_ = 0;
+    pending_info_valid_ = false;
+}
+
+uint64_t ShoutcastSource::reset_metadata_sync_locked() {
+    clear_pending_metadata_locked();
+    metadata_epoch_has_track_ = false;
+    metadata_controller_->notify_icy_metadata(0);
+    metadata_controller_->notify_ffmpeg_icy_metadata(0);
+    return metadata_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+}
+
+void ShoutcastSource::observe_pcm_for_metadata_sync(const int16_t* samples,
+                                                    std::size_t sample_count,
+                                                    uint64_t metadata_epoch) {
+    constexpr int kQuietPeak = 700;
+    constexpr int64_t kQuietHoldMs = 260;
+    constexpr int64_t kMaxPendingMs = 25'000;
+
+    int peak = 0;
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        const int sample = samples[i] == INT16_MIN ? 32768 : std::abs(static_cast<int>(samples[i]));
+        if (sample > peak) peak = sample;
+    }
+
+    const auto now_ms = steady_ms();
+    frdx::ScopedLock lk{mu_};
+    if (metadata_epoch != metadata_epoch_.load(std::memory_order_acquire) ||
+        !pending_info_valid_ || pending_info_epoch_ != metadata_epoch) {
+        quiet_started_ms_ = 0;
+        return;
+    }
+
+    if (pending_info_ms_ > 0 && now_ms - pending_info_ms_ >= kMaxPendingMs) {
+        apply_pending_metadata_locked("timeout");
+        return;
+    }
+
+    if (peak <= kQuietPeak) {
+        if (quiet_started_ms_ == 0) quiet_started_ms_ = now_ms;
+        if (now_ms - quiet_started_ms_ >= kQuietHoldMs) {
+            apply_pending_metadata_locked("quiet gap");
+        }
+    } else {
+        quiet_started_ms_ = 0;
+    }
 }
 
 // ---- Metadata poller (dispatcher) ----
 
 void ShoutcastSource::restart_metadata_for_current() {
-    // Spawns background metadata threads for the currently active station:
-    //   - ICY poller: direct HTTP connection to the stream URL parsing
-    //     interleaved StreamTitle blocks (frame-synced). Runs for any
-    //     station that isn't WebSocket or static.
-    //   - WebSocket poller: persistent connection with live push updates.
-    //
-    // Called from select_station(), next(), and previous().
-    // All captured state is by value — no dangling references.
-
-    // 1. Stop any existing ICY poller before checking state.
-    stop_icy_poller();
+    // Gather station metadata config under mu_, then delegate to
+    // metadata_controller_ for the actual polling threads.
+    metadata_controller_->stop();
 
     frdx::UniqueLock lk{mu_};
 
-    // ---- Legacy preset mode (no station selected, raw URL only) ----
+    // Legacy preset mode (no station selected, raw URL only).
     if (active_station_id_.empty()) {
         std::string legacy_url = target_url_;
+        const auto md_epoch = metadata_epoch_.load(std::memory_order_acquire);
         lk.unlock();
         if (!legacy_url.empty()) {
-            icy_poller_thread_ = std::jthread(
-                [this, url = std::move(legacy_url)](const std::stop_token& stop) {
-                    run_icy_poller(url, stop);
-                });
+            metadata_controller_->start(legacy_url, "", "", {}, {}, {}, md_epoch);
         }
         return;
     }
 
     const StationPreset* station = nullptr;
     for (const auto& st : stations_) {
-        if (st.id == active_station_id_) {
-            station = &st;
-            break;
-        }
+        if (st.id == active_station_id_) { station = &st; break; }
     }
     if (!station) return;
 
     const StationStream* stream = nullptr;
     for (const auto& s : station->streams) {
-        if (s.id == active_stream_id_) {
-            stream = &s;
-            break;
-        }
+        if (s.id == active_stream_id_) { stream = &s; break; }
     }
 
-    // Copy by value — station/stream pointers dangle after mu_ is released.
     auto mapping = station->metadata.mapping;
     if (stream && (!stream->mapping_override.title.empty() ||
                    !stream->mapping_override.split_separator.empty() ||
@@ -874,497 +750,22 @@ void ShoutcastSource::restart_metadata_for_current() {
         log::info("[shoutcast] using stream-level mapping override for '{}'", stream->id);
     }
 
-    auto url     = metadata_url_;
-    auto md_type = station->metadata.type;
-    auto ws_filter    = station->metadata.ws_filter;
-    auto ws_heartbeat = station->metadata.ws_heartbeat;
+    auto md_url     = metadata_url_;
+    auto md_type    = station->metadata.type;
+    auto ws_filter  = station->metadata.ws_filter;
+    auto ws_hb      = station->metadata.ws_heartbeat;
+    const auto md_epoch = metadata_epoch_.load(std::memory_order_acquire);
 
-    // Capture stream URL for ICY poller.
     std::string stream_url;
     if (stream && !stream->url.empty())
         stream_url = stream->url;
     if (stream_url.empty() && !station->streams.empty())
         stream_url = station->streams[0].url;
 
-    // Reset ICY timestamp so the first WS poller response fills title/artist.
-    last_icy_ms_.store(0, std::memory_order_release);
-
     lk.unlock();
 
-    // 2. Start ICY poller for non-WS, non-static stations.
-    if (!stream_url.empty() && md_type != "websocket" && md_type != "static") {
-        icy_poller_thread_ = std::jthread(
-            [this, url = std::move(stream_url)](const std::stop_token& stop) {
-                run_icy_poller(url, stop);
-            });
-    }
-
-    // 3. Stop any existing background metadata poller before starting a new one.
-    stop_metadata_poller();
-
-    // Static or no type -> no background poller needed.
-    if (md_type == "static" || md_type.empty()) return;
-
-    // No metadata URL configured -> no WS poller possible.
-    if (url.empty()) return;
-
-    // ---- WebSocket metadata poller ----
-    if (md_type == "websocket") {
-        metadata_thread_ = std::jthread(
-            [this, url = std::move(url), mapping = std::move(mapping),
-             filter = std::move(ws_filter), hb = std::move(ws_heartbeat)](
-                const std::stop_token& stop) { run_ws_poller(url, mapping, filter, hb, stop); });
-        return;
-    }
-}
-
-void ShoutcastSource::run_ws_poller(std::string url, const StationMetadataMapping& mapping,
-                                    const StationMetadataWebSocketFilter& filter,
-                                    StationMetadataWebSocketHeartbeat hb,
-                                    const std::stop_token& stop) {
-    auto parsed = ParsedUrl::parse(url);
-    if (!parsed) {
-        log::warn("[shoutcast] ws: failed to parse URL '{}'", url);
-        return;
-    }
-    while (!stop.stop_requested()) {
-
-        auto conn = winhttp_connect(winhttp_session_, *parsed);
-        if (!conn) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-        HINTERNET hRequest = conn.request.get();
-
-        if (!WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
-            log::warn("[shoutcast] ws: upgrade failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-
-        if (!WinHttpSendRequest(hRequest, nullptr, 0, nullptr, 0, 0, 0)) {
-            log::warn("[shoutcast] ws: SendRequest failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-
-        if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-            log::warn("[shoutcast] ws: ReceiveResponse failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-
-        HINTERNET hWebSocket = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
-        if (!hWebSocket) {
-            log::warn("[shoutcast] ws: upgrade complete failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-        // Wrap the WebSocket in RAII so WinHttpCloseHandle is called even on
-        // early exits (break, stop_requested, etc.).  stop_metadata_poller()
-        // may call WinHttpWebSocketClose on ws_handle_ before we get here;
-        // double-closing is harmless.
-        ScopedWinHttp ws(hWebSocket);
-        // Release the request handle from RAII — it has been upgraded to
-        // a WebSocket handle (hWebSocket, closed manually below). The connect
-        // handle stays in ScopedWinHttp and auto-closes when conn goes out of
-        // scope at the end of this loop iteration.
-        (void)conn.request.release();
-
-        {
-            frdx::ScopedLock lk{ws_mu_};
-            ws_handle_ = hWebSocket;
-        }
-        log::info("[shoutcast] ws: connected to {}", url);
-
-        // Brief settle so the station name is visible in-game
-        // before song metadata overwrites it.
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-
-        int heartbeat_ms    = hb.default_interval_ms;
-        auto last_heartbeat = std::chrono::steady_clock::now();
-
-        if (!hb.message.empty()) {
-            DWORD err = WinHttpWebSocketSend(hWebSocket,
-                                             WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                             const_cast<char*>(hb.message.data()),
-                                             static_cast<DWORD>(hb.message.size()));
-            if (err != ERROR_SUCCESS)
-                log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
-            last_heartbeat = std::chrono::steady_clock::now();
-        }
-
-        // ---- Receive loop ----
-        while (!stop.stop_requested()) {
-            if (!hb.message.empty()) {
-                auto now     = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   now - last_heartbeat)
-                                   .count();
-                if (elapsed >= heartbeat_ms) {
-                    DWORD err = WinHttpWebSocketSend(
-                        hWebSocket, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                        const_cast<char*>(hb.message.data()),
-                        static_cast<DWORD>(hb.message.size()));
-                    if (err != ERROR_SUCCESS) {
-                        log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
-                        break;
-                    }
-                    last_heartbeat = now;
-                }
-            }
-
-            DWORD bytesRead = 0;
-            WINHTTP_WEB_SOCKET_BUFFER_TYPE bufType;
-            char recvBuf[8192];
-
-            DWORD err = WinHttpWebSocketReceive(hWebSocket, recvBuf, sizeof(recvBuf) - 1,
-                                                &bytesRead, &bufType);
-            if (err != ERROR_SUCCESS) {
-                if (err == ERROR_WINHTTP_OPERATION_CANCELLED) break;
-                if (err == ERROR_WINHTTP_TIMEOUT) continue;
-                log::warn("[shoutcast] ws: receive error ({}), reconnecting...", err);
-                break;
-            }
-
-            if (bytesRead == 0) continue;
-            recvBuf[bytesRead] = '\0';
-
-            json msg;
-            try {
-                msg = json::parse(recvBuf, recvBuf + bytesRead);
-            } catch (...) {
-                continue;
-            }
-
-            // Update heartbeat interval from any message (including
-            // the op:0 welcome message which has d.heartbeat but
-            // doesn't pass the track-update filter below). Resolve
-            // against raw msg since welcome fields are top-level.
-            if (!hb.interval_field.empty()) {
-                std::string ival = resolve_json_path(msg, hb.interval_field);
-                if (!ival.empty()) {
-                    try {
-                        int new_interval = std::stoi(ival);
-                        if (new_interval > 0) heartbeat_ms = new_interval;
-                    } catch (...) {}
-                }
-            }
-
-            // Apply message filter.
-            if (!filter.op_field.empty()) {
-                const json* op_node = resolve_json_node(msg, filter.op_field);
-                if (!op_node) continue;
-                int op_val = op_node->is_number_integer()
-                               ? static_cast<int>(op_node->get<int64_t>())
-                               : 0;
-                if (op_val != filter.op_value) continue;
-            }
-            if (!filter.type_field.empty() && !filter.type_value.empty()) {
-                std::string t = resolve_json_path(msg, filter.type_field);
-                if (t != filter.type_value) continue;
-            }
-
-            const json* data_root = &msg;
-            if (!filter.data_field.empty()) {
-                const json* data = resolve_json_node(msg, filter.data_field);
-                if (!data) continue;
-                data_root = data;
-            }
-
-            std::string title = resolve_mapped_value(*data_root, mapping.title, "", "");
-            std::string artist =
-                resolve_mapped_value(*data_root, mapping.artist, mapping.artist_array_field,
-                                     mapping.artist_separator);
-
-            // If ICY metadata has ever been received for this stream
-            // (since the last reset in restart_metadata_for_current),
-            // only let the WS poller update artwork — ICY provides
-            // perfectly-synced title/artist at the audio transition point
-            // and never goes stale (the flag is reset on station change).
-            auto last_icy   = last_icy_ms_.load(std::memory_order_acquire);
-            bool icy_active = (last_icy > 0);
-
-            if (!title.empty() || !artist.empty()) {
-                frdx::ScopedLock lk{mu_};
-                // Skip write if a new station was selected while
-                // we were processing — stop is requested early in
-                // select_station() via stop_metadata_poller().
-                if (!stop.stop_requested()) {
-                    if (!title.empty() && !icy_active)
-                        info_.title = sanitize_brackets(std::move(title));
-                    if (!artist.empty() && !icy_active)
-                        info_.artist = sanitize_brackets(std::move(artist));
-                    info_gen_.fetch_add(1, std::memory_order_release);
-                    log::info("[shoutcast] ws metadata: {} - {} (icy={})", info_.artist,
-                              info_.title, icy_active);
-                }
-            }
-        }
-
-        // Cleanup connection.
-        {
-            frdx::ScopedLock lk{ws_mu_};
-            if (ws_handle_ == hWebSocket) ws_handle_ = nullptr;
-        }
-        if (!stop.stop_requested()) {
-            WinHttpWebSocketClose(hWebSocket, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
-                                  nullptr, 0);
-        }
-        // ws (ScopedWinHttp) auto-closes hWebSocket when it goes out of scope.
-        // conn.connect auto-closed by ScopedWinHttp when conn exits scope;
-        // conn.localSession likewise auto-closed on scope exit.
-
-        if (stop.stop_requested()) break;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-    }
-}
-
-void ShoutcastSource::stop_metadata_poller() {
-    // Force-close any active WebSocket handle to unblock WinHttpWebSocketReceive.
-    // Only send the close frame — do NOT WinHttpCloseHandle here; the thread
-    // owns the handle and will close it in its cleanup path.
-    {
-        frdx::ScopedLock lk{ws_mu_};
-        if (ws_handle_) {
-            WinHttpWebSocketClose(ws_handle_, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
-            ws_handle_ = nullptr;
-        }
-    }
-    if (metadata_thread_.joinable()) metadata_thread_.request_stop();
-    if (metadata_thread_.joinable()) metadata_thread_.join();
-}
-
-void ShoutcastSource::stop_icy_poller() {
-    if (icy_poller_thread_.joinable()) icy_poller_thread_.request_stop();
-    if (icy_poller_thread_.joinable()) icy_poller_thread_.join();
-}
-
-// ---- ICY metadata poller ----
-//
-// Opens a direct HTTP connection to the stream URL with
-//   Icy-MetaData: 1
-//   User-Agent: WinampMPEG/5.0
-//
-// After receiving the response, it reads the icy-metaint header from the
-// raw response headers, then enters a loop that reads:
-//   1. metaint bytes of audio data (discarded)
-//   2. 1 byte of metadata length (length = byte * 16, 0 = no metadata)
-//   3. metadata bytes (pairs of key='value')
-//
-// When a StreamTitle is found, info_ is updated under mu_ and last_icy_ms_
-// is set so the REST/WS pollers skip overwriting title/artist.
-//
-// On connection failure or unexpected disconnect, exits after logging;
-// the caller (restart_metadata_for_current) will restart the poller on the
-// next station change.
-
-void ShoutcastSource::run_icy_poller(const std::string& stream_url,
-                                     const std::stop_token& stop) {
-    // Brief settle so station/stream names are visible in-game before
-    // song metadata overwrites them.
-    for (int i = 0; i < 10; ++i) {
-        if (stop.stop_requested()) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    auto parsed = ParsedUrl::parse(stream_url);
-    if (!parsed) {
-        log::warn("[shoutcast] icy: failed to parse URL '{}'", stream_url);
-        return;
-    }
-
-    while (!stop.stop_requested()) {
-        auto conn = winhttp_connect(winhttp_session_, *parsed);
-        if (!conn) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-        HINTERNET hRequest = conn.request.get();
-
-        // Inject headers via AddRequestHeaders with REPLACE to override any
-        // WinHTTP session-level defaults (e.g. User-Agent).
-        WinHttpAddRequestHeaders(
-            hRequest,
-            L"User-Agent: WinampMPEG/5.0\r\nIcy-MetaData: 1\r\n", -1L,
-            WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-
-        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-
-        if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-
-        // ---- Extract icy-metaint via WINHTTP_QUERY_CUSTOM ----
-        // WinHTTP's RAW_HEADERS_CRLF parser silently drops non-standard
-        // headers like icy-metaint.  Querying by name with _CUSTOM forces
-        // WinHTTP to return the exact value.
-        wchar_t metaint_buf[64] = {};
-        DWORD metaint_len       = sizeof(metaint_buf);
-        int metaint             = 0;
-
-        if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_CUSTOM, L"icy-metaint",
-                                metaint_buf, &metaint_len, WINHTTP_NO_HEADER_INDEX)) {
-            metaint = static_cast<int>(std::wcstol(metaint_buf, nullptr, 10));
-        } else {
-            // Fallback: raw header scan for older/broken WinHTTP builds.
-            DWORD header_size = 0;
-            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                                WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &header_size,
-                                WINHTTP_NO_HEADER_INDEX);
-            if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && header_size > 0) {
-                std::wstring raw_headers(header_size / sizeof(wchar_t) + 1, L'\0');
-                WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                                    WINHTTP_HEADER_NAME_BY_INDEX, raw_headers.data(),
-                                    &header_size, WINHTTP_NO_HEADER_INDEX);
-                std::wstring lowered = raw_headers;
-                for (auto& c : lowered)
-                    if (c >= L'A' && c <= L'Z') c = c - L'A' + L'a';
-                auto ipos = lowered.find(L"icy-metaint:");
-                if (ipos != std::wstring::npos) {
-                    auto vs = ipos + 12;
-                    while (vs < raw_headers.size() &&
-                           (raw_headers[vs] == L' ' || raw_headers[vs] == L'\t'))
-                        vs++;
-                    auto ve = vs;
-                    while (ve < raw_headers.size() && raw_headers[ve] != L'\r' &&
-                           raw_headers[ve] != L'\n')
-                        ve++;
-                    if (ve > vs) {
-                        metaint = static_cast<int>(
-                            std::wcstol(raw_headers.substr(vs, ve - vs).c_str(), nullptr, 10));
-                    }
-                }
-            }
-        }
-
-        if (metaint <= 0) {
-            log::warn("[shoutcast] icy: server did not provide icy-metaint for '{}'",
-                      stream_url);
-            break; // No ICY support — do not retry
-        }
-
-        log::info("[shoutcast] icy: connected, metaint={}", metaint);
-
-        // Per-instance ICY read buffer — persists across poller restarts,
-        // avoiding repeated heap allocations.
-        std::size_t buf_needed = static_cast<std::size_t>(metaint) + 1 + 4096;
-        if (icy_buf_.size() < buf_needed) icy_buf_.resize(buf_needed);
-        char* buf = icy_buf_.data();
-        bool first_title = true;
-
-        while (!stop.stop_requested()) {
-            // Read metaint audio bytes (discard)
-            DWORD audio_read = 0;
-            bool error       = false;
-            while (std::cmp_less(audio_read, metaint) && !stop.stop_requested()) {
-                DWORD chunk = 0;
-                if (!WinHttpReadData(hRequest, buf + audio_read,
-                                     static_cast<DWORD>(metaint) - audio_read, &chunk)) {
-                    error = true;
-                    break;
-                }
-                if (chunk == 0) {
-                    error = true;
-                    break;
-                }
-                audio_read += chunk;
-            }
-            if (error || stop.stop_requested()) break;
-
-            // Read metadata length byte
-            DWORD meta_len_byte_read = 0;
-            if (!WinHttpReadData(hRequest, buf, 1, &meta_len_byte_read) ||
-                meta_len_byte_read != 1)
-                break;
-
-            int meta_len = static_cast<unsigned char>(buf[0]) * 16;
-            if (meta_len <= 0) continue;
-            if (meta_len > 4096) meta_len = 4096; // safety clamp
-
-            // Read metadata block
-            DWORD meta_read = 0;
-            while (std::cmp_less(meta_read, meta_len) && !stop.stop_requested()) {
-                DWORD chunk = 0;
-                if (!WinHttpReadData(hRequest, buf + meta_read,
-                                     static_cast<DWORD>(meta_len) - meta_read, &chunk)) {
-                    error = true;
-                    break;
-                }
-                if (chunk == 0) {
-                    error = true;
-                    break;
-                }
-                meta_read += chunk;
-            }
-            if (error) break;
-
-            // Parse StreamTitle from metadata.
-            // SHOUTcast format: StreamTitle='value';StreamUrl='url';
-            // Embedded apostrophes in the value (e.g. "Pizuya's Cell") are
-            // not escaped — search for the ' that is followed by ; to find
-            // the real end-of-value delimiter.
-            std::string_view meta(buf, meta_read);
-            auto st_pos = meta.find("StreamTitle='");
-            if (st_pos == std::string_view::npos)
-                st_pos = meta.find("StreamTitle=\"");
-            if (st_pos == std::string_view::npos) continue;
-
-            auto val_start  = st_pos + 13;
-            auto quote_char = meta[st_pos + 12];
-            auto val_end    = std::string_view::npos;
-
-            for (auto scan = val_start; scan < meta.size();) {
-                auto q = meta.find(quote_char, scan);
-                if (q == std::string_view::npos) break;
-                auto next = q + 1;
-                while (next < meta.size() && meta[next] == ' ') next++;
-                if (next < meta.size() && meta[next] == ';') {
-                    val_end = q;
-                    break;
-                }
-                scan = q + 1;
-            }
-            if (val_end == std::string_view::npos || val_end <= val_start) continue;
-
-            std::string val(meta.substr(val_start, val_end - val_start));
-            val = sanitize_brackets(std::move(val));
-
-            auto dash = val.find(" - ");
-            {
-                frdx::ScopedLock lk{mu_};
-                if (!stop.stop_requested()) {
-                    if (dash != std::string::npos) {
-                        info_.artist = val.substr(0, dash);
-                        info_.title  = val.substr(dash + 3);
-                    } else {
-                        info_.artist = display_name_;
-                        info_.title  = std::move(val);
-                    }
-                    info_gen_.fetch_add(1, std::memory_order_release);
-                }
-            }
-
-            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                              std::chrono::steady_clock::now().time_since_epoch())
-                              .count();
-            last_icy_ms_.store(now_ms, std::memory_order_release);
-
-            if (first_title) {
-                first_title = false;
-                log::info("[shoutcast] icy: first StreamTitle received");
-            }
-        }
-
-        if (!stop.stop_requested()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-        }
-    }
+    metadata_controller_->start(stream_url, md_url, md_type, mapping,
+                                ws_filter, ws_hb, md_epoch);
 }
 
 // ---- PCM pump ----
@@ -1388,14 +789,14 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         const std::size_t r        = ring.readable();
         const std::uint64_t played = p->bytes_written > r ? p->bytes_written - r : 0;
         position_ms_.store(played * 1000ull / kPcmBytesPerSec, std::memory_order_release);
+        return r;
     };
 
-    // ---- Stderr drain (ffmpeg error/warning logs) ----
-    // ICY metadata is now fetched via a direct HTTP connection (run_icy_poller),
-    // so we no longer parse [icy] StreamTitle from ffmpeg's stderr.
-    // The stderr pipe is kept to capture actual ffmpeg errors.
-    // Once empty, the stderr_empty flag avoids the PeekNamedPipe syscall entirely.
-    if (stderr_pipe && !p->stderr_empty) {
+    // ---- Stderr drain (ffmpeg logs + same-connection ICY metadata) ----
+    // ffmpeg emits ICY StreamTitle lines from the exact stream being decoded.
+    // Those are better synchronized than our fallback direct ICY connection,
+    // which can run ahead of buffered audio on some stations.
+    if (stderr_pipe) {
         for (int safety = 0; safety < 3; ++safety) {
             DWORD eavail = 0;
             if (!PeekNamedPipe(stderr_pipe, nullptr, 0, nullptr, &eavail, nullptr)) {
@@ -1404,7 +805,6 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 break;
             }
             if (eavail == 0) {
-                p->stderr_empty = true;
                 break;
             }
             char ebuf[512];
@@ -1417,27 +817,56 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             p->stderr_buf.append(ebuf, egot);
             if (p->stderr_buf.size() > 65536)
                 p->stderr_buf.erase(0, p->stderr_buf.size() - 32768);
-            std::string local_buf = std::move(p->stderr_buf);
-            p->stderr_buf.clear();
-            if (!local_buf.empty()) {
-                for (;;) {
-                    auto nl = local_buf.find('\n');
-                    if (nl == std::string::npos) break;
-                    std::string line = local_buf.substr(0, nl);
-                    local_buf.erase(0, nl + 1);
-                    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-                        line.pop_back();
-                    if (line.empty()) continue;
+
+            std::size_t consumed = 0;
+            for (;;) {
+                const auto nl = p->stderr_buf.find('\n', consumed);
+                if (nl == std::string::npos) break;
+
+                std::string_view line{p->stderr_buf.data() + consumed, nl - consumed};
+                consumed = nl + 1;
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                    line.remove_suffix(1);
+                if (line.empty()) continue;
+
+                if (auto title = extract_stream_title(line)) {
+                    const auto dash = title->find(" - ");
+                    std::string logged_artist;
+                    std::string logged_title;
+                    const auto now_ms = steady_ms();
+                    bool accepted = false;
+                    {
+                        frdx::ScopedLock lk{mu_};
+                        TrackInfo queued;
+                        if (dash != std::string::npos) {
+                            queued.artist = title->substr(0, dash);
+                            queued.title  = title->substr(dash + 3);
+                        } else {
+                            queued.artist = display_name_;
+                            queued.title  = std::move(*title);
+                        }
+                        logged_artist = queued.artist;
+                        logged_title  = queued.title;
+                        accepted =
+                            queue_timed_metadata_locked(std::move(queued), now_ms, p->metadata_epoch);
+                    }
+                    if (accepted) {
+                        metadata_controller_->notify_ffmpeg_icy_metadata(now_ms);
+                        metadata_controller_->notify_icy_metadata(now_ms);
+                        log::info("[shoutcast] ffmpeg icy metadata queued: {} - {}", logged_artist,
+                                  logged_title);
+                    }
+                } else if (line.find("StreamTitle") == std::string_view::npos) {
                     log::warn("[shoutcast] ffmpeg: {}", line);
                 }
             }
+            if (consumed > 0) p->stderr_buf.erase(0, consumed);
         }
     }
 
     // If ffmpeg has exited and the ring is drained, try reconnecting.
     if (ended) {
-        update_position();
-        if (ring.readable() == 0) {
+        if (update_position() == 0) {
             frdx::UniqueLock lk{mu_};
             int attempts = reconnect_attempts_.load(std::memory_order_acquire);
             if (attempts < 3) {
@@ -1446,6 +875,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                           attempts + 1);
                 info_.title  = display_name_;
                 info_.artist = "Attempting to reconnect to station";
+                clear_pending_metadata_locked();
                 info_gen_.fetch_add(1, std::memory_order_release);
             } else {
                 reconnect_attempts_.store(0, std::memory_order_release);
@@ -1453,6 +883,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 if (!cfg_.presets.empty() || !stations_.empty()) {
                     info_.title  = display_name_;
                     info_.artist = "Unable to reach this station";
+                    clear_pending_metadata_locked();
                     info_gen_.fetch_add(1, std::memory_order_release);
                     cycle_preset();
                 }
@@ -1465,6 +896,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 // Pipe launch failed — restore unreachable status.
                 info_.title   = prev_name;
                 info_.artist  = "Unable to reach this station";
+                clear_pending_metadata_locked();
                 info_gen_.fetch_add(1, std::memory_order_release);
             }
             lk.unlock();
@@ -1493,6 +925,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             frdx::UniqueLock lk{mu_};
             info_.title  = display_name_;
             info_.artist = "Lost connection to station";
+            clear_pending_metadata_locked();
             info_gen_.fetch_add(1, std::memory_order_release);
         }
         if (p->read_pipe) {
@@ -1510,12 +943,12 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         on_eof();
         return;
     }
+    int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
     while (avail > 0) {
         const std::size_t writable = ring.writable();
         if (writable < 4) break;
         std::size_t want = std::min<std::size_t>(writable, avail);
         if (want > 4096) want = 4096;
-        int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
         DWORD got = 0;
         if (!ReadFile(read_pipe, buf, static_cast<DWORD>(want), &got, nullptr) || got == 0) {
             on_eof();
@@ -1525,14 +958,16 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             reconnect_attempts_.store(0, std::memory_order_relaxed);
         }
         ring.write(reinterpret_cast<std::byte*>(buf), got);
+        observe_pcm_for_metadata_sync(buf, got / sizeof(int16_t), p->metadata_epoch);
         p->bytes_written += got;
-        update_position();
         avail = avail > got ? avail - got : 0;
-        if (state_.load(std::memory_order_acquire) == PlaybackState::buffering &&
-            ring.readable() > 32 * 1024)
-            state_.store(PlaybackState::playing, std::memory_order_release);
     }
-    update_position();
+    if (update_position() > 32 * 1024) {
+        auto expected = PlaybackState::buffering;
+        (void)state_.compare_exchange_strong(expected, PlaybackState::playing,
+                                             std::memory_order_release,
+                                             std::memory_order_relaxed);
+    }
 }
 
 } // namespace frdx::sources

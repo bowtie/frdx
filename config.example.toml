@@ -9,7 +9,6 @@
 ring_buffer_mb    = 4
 
 [shoutcast]
-enabled            = true
 default_url        = ""                          # auto-connect on startup
 ffmpeg_path        = ""                          # blank = bundled <game>/mods/frdx/ffmpeg/ffmpeg.exe, then PATH
 presets            = []                          # e.g. ["http://server:8000/stream"]
@@ -17,3 +16,65 @@ presets            = []                          # e.g. ["http://server:8000/str
 [audio]
 output_gain = 1.0
 force_stereo_audio = true   # off => mono + FMOD_2D (clean 3D spatialisation)
+
+[overlay]
+theme = "bess_dark"              # bess_dark, tokyo_night
+music_notifications_enabled = true
+notification_position = "top_left" # top_left, top_center, top_right, bottom_left, bottom_center, bottom_right
+background_blur_enabled = true  # frosted glass blur behind overlay panels
+
+[dualsense]
+enabled = false             # native HID adaptive triggers; set Forza Data Out to this UDP port
+external_helper = true      # run trigger output outside the game process
+udp_port = 5300
+wall_zones = 2
+enable_brake_resistance = true
+brake_deadzone = 50
+brake_baseline_force = 18
+brake_max_force = 80
+brake_curve = 5.0
+brake_wall_engage_at = 250
+brake_wall_release_at = 200
+enable_brake_static_wall = false
+brake_static_wall_at = 128
+brake_static_wall_force = 255
+enable_handbrake_bonus = true
+handbrake_bonus = 60
+enable_abs = true
+abs_brake_threshold = 80
+abs_min_speed_kmh = 15.0
+abs_slip_ratio_threshold = 1.0
+abs_combined_slip_threshold = 1.0
+abs_freq = 10
+abs_amp = 20
+enable_throttle_resistance = true
+accel_deadzone = 50
+throttle_baseline_force = 1
+throttle_max_force = 8
+throttle_curve = 5.0
+throttle_wall_engage_at = 250
+throttle_wall_release_at = 200
+enable_rev_limiter = true
+rev_limit_ratio = 0.93
+rev_limit_freq = 30
+rev_limit_amp = 12
+rev_limit_hold_ms = 120.0
+enable_wheelspin_buzz = true
+wheelspin_amp = 3
+enable_idle_buzz = true
+idle_max_speed_kmh = 5.0
+idle_accel_max = 64
+idle_freq = 30
+idle_amp_low = 1
+idle_amp_high = 30
+idle_period_s = 0.5
+enable_gear_shift = true
+enable_gear_shift_brake = true
+gear_shift_freq = 10
+gear_shift_amp = 255
+gear_shift_duration_ms = 100.0
+enable_startup_pulse = true
+startup_pulse_force = 150
+enable_reconnect = false
+reconnect_interval_s = 5.0
+controller_lock_serial = "" # optional controller MAC/serial lock; blank = first found

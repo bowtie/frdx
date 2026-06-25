@@ -13,7 +13,11 @@
 #   dist\mods\frdx\fonts\FusionPixel12-ja.ttf
 #   dist\mods\frdx\ffmpeg\ffmpeg.exe
 
-param([switch]$Clean, [int]$Jobs = 0, [switch]$NoCache)
+param(
+    [switch]$Clean,
+    [int]$Jobs = 0,
+    [switch]$NoCache
+)
 
 $ErrorActionPreference = "Stop"
 $root  = Split-Path -Parent $PSScriptRoot
@@ -21,6 +25,27 @@ $build = Join-Path $root "build"
 $dist  = Join-Path $root "dist"
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Build-cache inconsistency guard.
+# Detect the silent-stale-DLL trap: if some .obj files for src/overlay
+# are missing or zero-byte while source files have newer mtimes, ninja's
+# incremental tracker can decide "no work to do" and produce a binary
+# that doesn't actually reflect the current source.  Force a clean
+# rebuild in that case so cmake re-stages every object.
+if (Test-Path $build) {
+    $overlayCppFiles = @(Get-ChildItem -Path (Join-Path $root "src\overlay") `
+        -Include *.cpp -Recurse -ErrorAction SilentlyContinue)
+    $overlayObjDir = Join-Path $build "CMakeFiles\version.dir\src\overlay"
+    $overlayObjFiles = @(Get-ChildItem -Path $overlayObjDir `
+        -Filter *.obj -ErrorAction SilentlyContinue)
+    $emptyObjCount = ($overlayObjFiles | Where-Object { $_.Length -eq 0 }).Count
+    $objMissing    = ($overlayObjFiles.Count -lt $overlayCppFiles.Count)
+    $objEmpty      = ($emptyObjCount -gt 0)
+    if ($objMissing -or $objEmpty) {
+        Write-Host ("Build cache INCONSISTENT (src/overlay has {0} .cpp but {1} .obj, {2} empty); forcing clean rebuild." -f $overlayCppFiles.Count, $overlayObjFiles.Count, $emptyObjCount) -ForegroundColor Yellow
+        $Clean = $true
+    }
+}
 
 # Locate cmake.exe. Prefer the one on PATH; otherwise look inside any VS
 # install (which always ships CMake when the C++ workload is selected),
@@ -163,7 +188,28 @@ if (-not $ninja) { $buildArgs += @("--config", "Release") }
 & $cmake @buildArgs | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
 
-if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+$existingConfig = Join-Path $dist "mods\frdx\config.toml"
+$preservedConfig = $null
+if (Test-Path $existingConfig) {
+    $preservedConfig = Get-Content -Raw -Path $existingConfig
+}
+
+if (Test-Path $dist) {
+    # Retry removal — files may be briefly locked by AV or the game.
+    $maxRetries = 3
+    for ($i = 0; $i -lt $maxRetries; $i++) {
+        try {
+            Remove-Item -Recurse -Force $dist -ErrorAction Stop
+            break
+        } catch {
+            if ($i -eq $maxRetries - 1) {
+                Write-Host "Warning: could not fully remove dist/ — stale files may persist." -ForegroundColor Yellow
+            } else {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+}
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\fonts") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\ffmpeg") | Out-Null
@@ -171,12 +217,18 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\ffmpeg") |
 # Ninja outputs to build/ directly; MSBuild puts artifacts under build/Release/
 $dllSrc = if ($ninja) { Join-Path $build "version.dll" } else { Join-Path $build "Release\version.dll" }
 Copy-Item $dllSrc $dist
+$brokerSrc = if ($ninja) { Join-Path $build "frdx_dualsense_broker.exe" } else { Join-Path $build "Release\frdx_dualsense_broker.exe" }
+Copy-Item $brokerSrc $dist
 # frdx_overlay.exe was removed — the overlay is now in-process (version.dll)
 if (Test-Path (Join-Path $root "assets\fonts")) {
     Copy-Item -Recurse (Join-Path $root "assets\fonts\*") (Join-Path $dist "mods\frdx\fonts")
 }
 Copy-Item (Join-Path $root "assets\ffmpeg\ffmpeg.exe") (Join-Path $dist "mods\frdx\ffmpeg\ffmpeg.exe")
-Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "mods\frdx\config.toml")
+if ($null -ne $preservedConfig) {
+    Set-Content -Path (Join-Path $dist "mods\frdx\config.toml") -Value $preservedConfig -NoNewline -Encoding utf8
+} else {
+    Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "mods\frdx\config.toml")
+}
 Copy-Item (Join-Path $root "stations.example.json") (Join-Path $dist "mods\frdx\stations.json")
 
 $readme = @'
@@ -251,6 +303,8 @@ above belong to their respective owners. Provided as-is, no warranty,
 use at your own risk.
 '@
 Set-Content -Path (Join-Path $dist "README.txt") -Value $readme -Encoding utf8
+
+$builtDll = Join-Path $dist "version.dll"
 
 $sw.Stop()
 Write-Host ("`nBuilt + staged in $dist  ({0:f1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green

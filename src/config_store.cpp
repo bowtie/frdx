@@ -22,24 +22,17 @@ void ConfigStore::patch(const std::function<void(Config&)>& mutator) {
         obs  = observers_;
         local_path = path_;
     }
-    // Notify observers outside the lock (fast path).
+    try {
+        save_config(local_path, copy);
+    } catch (const std::exception& e) {
+        log::warn("[config] save failed: {}", e.what());
+    }
+    // Notify observers after the file is current so external helpers that
+    // hot-reload config never race a just-clicked overlay setting.
     for (auto& o : obs) {
         try {
             o(copy);
         } catch (...) {}
-    }
-    // Debounce file I/O — skip if last save was < 200 ms ago.
-    // This prevents a disk write storm during volume slider drag operations.
-    using clock = std::chrono::steady_clock;
-    static thread_local clock::time_point s_last_save{};
-    auto now = clock::now();
-    if (now - s_last_save >= std::chrono::milliseconds(200)) {
-        s_last_save = now;
-        try {
-            save_config(local_path, copy);
-        } catch (const std::exception& e) {
-            log::warn("[config] save failed: {}", e.what());
-        }
     }
 }
 

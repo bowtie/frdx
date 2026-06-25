@@ -1,6 +1,7 @@
 # Build + staging output
 build/
 /dist/
+build_output.txt
 compile_commands.json
 
 # Local artifacts (sandbox images, editor configs, project dumps, scripts)
@@ -11,5 +12,7 @@ project_dump.md
 qwen.ps1
 
 # Downloaded by scripts\get-deps.ps1
-third_party/
-
+third_party/*
+!third_party/imanim/
+!third_party/imanim/**
+src.7z

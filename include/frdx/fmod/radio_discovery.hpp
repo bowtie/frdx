@@ -35,4 +35,22 @@ void* resolve_fmod_system(const PEImage& img, std::byte* radio_stream) noexcept;
 // Empty result means the radio system isn't ready yet; retry later.
 DiscoveryResult discover_radio_instances(const PEImage& img) noexcept;
 
+// ── IRadioTargetProvider ────────────────────────────────────────────────
+//
+// Boundary between the Game Layer (discovery, channel handles) and the
+// FMOD Layer (DSP injection).  Implemented by ControlLoop which owns the
+// discovery/selection cycle; consumed by DSPBridge for retargeting.
+class IRadioTargetProvider {
+public:
+    virtual ~IRadioTargetProvider() = default;
+
+    // The RadioStreamFmod pointer whose +0x20 slot holds the live FMOD
+    // channel handle.  nullptr when no target is acquired.
+    virtual std::byte* radio_stream() const noexcept = 0;
+
+    // The SampleProperties body resolved during discovery; used by the
+    // MetadataInjector to write the radio HUD strings in-game.
+    virtual std::byte* sample_props_body() const noexcept = 0;
+};
+
 } // namespace frdx::fmod_bridge

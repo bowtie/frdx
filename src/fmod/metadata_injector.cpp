@@ -2,7 +2,7 @@
 #include "frdx/log.hpp"
 #include "frdx/safe_mem.hpp"
 
-#include <frdx/detail/win32_handle.hpp>
+#include <frdx/platform/windows/win32_handle.hpp>
 #include <cstring>
 
 namespace frdx::fmod_bridge {

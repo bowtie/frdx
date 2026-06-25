@@ -2,7 +2,7 @@
 // forwarders, and spawns the bridge on DLL_PROCESS_ATTACH so the loader is
 // never blocked on FMOD discovery or HTTP startup.
 
-#include <frdx/detail/win32_handle.hpp>
+#include <frdx/platform/windows/win32_handle.hpp>
 
 // Forwarding to "version.dll" without a path resolves back to us; the
 // absolute system32 path is what breaks the basename collision.
