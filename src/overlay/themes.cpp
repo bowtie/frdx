@@ -135,9 +135,7 @@ void ApplyTheme(int idx) {
         case 0: ApplyBessDark(); break;
         case 1: ApplyTokyoNight(); break;
         default: ApplyBessDark(); break;
-    }
-    save_theme_widget_colors();
-    apply_blur_widget_alpha();
+    }        
 }
 
 int theme_index(std::string_view value) noexcept {

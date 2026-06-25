@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <filesystem>
+#include <algorithm>
 
 #include <MinHook.h>
 #include <imgui.h>
@@ -36,13 +37,14 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
                                                              LPARAM lParam);
 
+#include <mutex>
+
 namespace frdx::overlay {
 using namespace frdx;
-
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 using ResizeBuffers_t          = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT BufferCount,
-                                                     UINT Width, UINT Height, DXGI_FORMAT NewFormat,
-                                                     UINT SwapChainFlags);
+                                                      UINT Width, UINT Height, DXGI_FORMAT NewFormat,
+                                                      UINT SwapChainFlags);
 using CreateSwapChainForHwnd_t = HRESULT(__stdcall*)(
     IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1* pDesc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGIOutput* pRestrictToOutput,
@@ -85,6 +87,11 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 
     if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && wParam == VK_F10) {
         g_ui.console_visible = !g_ui.console_visible;
+        if (g_ctx.store) {
+            g_ctx.store->patch([&](Config& c) {
+                c.overlay.console_visible = g_ui.console_visible.load();
+            });
+        }
         return 0;
     }
 
@@ -100,7 +107,6 @@ void pre_resize() {
 
     wait_for_all_overlay_work();
     ImGui_ImplDX12_InvalidateDeviceObjects();
-    release_blur_resources();
 
     g_dx.fb_bufs.clear();
     g_dx.fb_rtvs.clear();
@@ -117,7 +123,7 @@ void post_resize(IDXGISwapChain* swapChain) {
 
     SIZE_T rtvDescriptorSize =
         g_dx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_dx.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_dx.rtv_heap.cpu_base;
 
     g_dx.fb_bufs.resize(desc.BufferCount);
     g_dx.fb_rtvs.resize(desc.BufferCount);
@@ -133,6 +139,7 @@ void post_resize(IDXGISwapChain* swapChain) {
     }
 
     ImGui_ImplDX12_CreateDeviceObjects();
+
     log::info("[overlay] recovered DX12 backbuffer RTV resources after resize");
 }
 
@@ -197,26 +204,12 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     log::info("[overlay] hooked game window WndProc: 0x{:X}",
               reinterpret_cast<uintptr_t>(original_wnd_proc));
 
-    // SRV descriptor heap (ImGui font textures)
-    D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvHeapDesc.NumDescriptors             = kOverlaySrvCount;
-    srvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(
-            g_dx.device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(g_dx.srv_heap.put()))) ||
-        !g_dx.srv_heap) {
+    if (!g_dx.srv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kOverlaySrvCount, true)) {
         log::error("[overlay] failed to create SRV descriptor heap!");
         return false;
     }
 
-    // RTV descriptor heap (backbuffer renders)
-    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-    rtvHeapDesc.Type                       = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvHeapDesc.NumDescriptors             = desc.BufferCount;
-    rtvHeapDesc.Flags                      = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    if (FAILED(
-            g_dx.device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(g_dx.rtv_heap.put()))) ||
-        !g_dx.rtv_heap) {
+    if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.BufferCount, false)) {
         log::error("[overlay] failed to create RTV descriptor heap!");
         return false;
     }
@@ -260,7 +253,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // Backbuffers and RTVs
     SIZE_T rtvDescriptorSize =
         g_dx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_dx.rtv_heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_dx.rtv_heap.cpu_base;
     g_dx.fb_bufs.resize(desc.BufferCount);
     g_dx.fb_rtvs.resize(desc.BufferCount);
 
@@ -286,9 +279,9 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     init_info.CommandQueue                 = active_queue;
     init_info.NumFramesInFlight            = desc.BufferCount;
     init_info.RTVFormat                    = desc.BufferDesc.Format;
-    init_info.SrvDescriptorHeap            = g_dx.srv_heap.get();
-    init_info.LegacySingleSrvCpuDescriptor = g_dx.srv_heap->GetCPUDescriptorHandleForHeapStart();
-    init_info.LegacySingleSrvGpuDescriptor = g_dx.srv_heap->GetGPUDescriptorHandleForHeapStart();
+    init_info.SrvDescriptorHeap            = g_dx.srv_heap.heap.get();
+    init_info.LegacySingleSrvCpuDescriptor = g_dx.srv_heap.cpu_base;
+    init_info.LegacySingleSrvGpuDescriptor = g_dx.srv_heap.gpu_base;
     if (!ImGui_ImplDX12_Init(&init_info)) {
         log::error("[overlay] ImGui DX12 backend initialization failed");
         ImGui_ImplWin32_Shutdown();
@@ -296,14 +289,12 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         return false;
     }
 
-    // Force font atlas texture upload to the GPU now, not lazily on the
-    // first NewFrame, so the blur callback and initial draw commands have a
-    // valid descriptor heap when they execute.
+    // Force font atlas texture upload to the GPU now so the first draw
+    // commands have a valid descriptor heap when they execute.
     ImGui_ImplDX12_CreateDeviceObjects();
 
     // Load optional background image for sandbox visual testing
     load_background_texture(active_queue);
-    create_shadow_texture(active_queue);
 
     return true;
 }
@@ -328,12 +319,6 @@ void cleanup_imgui_resources() {
     g_dx.fence.reset();
     g_dx.allocators.clear();
     g_dx.allocator_fence_values.clear();
-    g_dx.blur_frame_backbuffer = nullptr;
-    g_dx.blur_frame_rtv        = {};
-    g_dx.blur_frame_format     = DXGI_FORMAT_UNKNOWN;
-    release_blur_resources();
-    g_ui.shadow_texture.reset();
-    g_ui.shadow_texture_id = 0;
     g_ui.bg_texture.reset();
     g_ui.bg_texture_id     = 0;
     g_ui.bg_texture_width  = 0;
@@ -348,7 +333,7 @@ void cleanup_imgui_resources() {
     g_dx.device.reset();
 }
 
-bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
+static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     if (!pSwapChain || !active_queue) return false;
     if (!g_ui.is_init) {
         // Acquire a shared reference to the host's ID3D12Device via the
@@ -412,17 +397,15 @@ bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active
         allocator->Reset();
         g_dx.cmd_list->Reset(allocator, nullptr);
 
-        ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.get()};
+        ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
         g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
 
+        // Transition backbuffer from PRESENT to RENDER_TARGET for ImGui rendering.
+        ID3D12Resource* bb = g_dx.fb_bufs[backBufferIdx].get();
         auto to_render_target =
-            transition_barrier(g_dx.fb_bufs[backBufferIdx].get(), D3D12_RESOURCE_STATE_PRESENT,
+            transition_barrier(bb, D3D12_RESOURCE_STATE_PRESENT,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
         g_dx.cmd_list->ResourceBarrier(1, &to_render_target);
-        const D3D12_RESOURCE_DESC bb_desc = g_dx.fb_bufs[backBufferIdx]->GetDesc();
-        g_dx.blur_frame_backbuffer        = g_dx.fb_bufs[backBufferIdx].get();
-        g_dx.blur_frame_rtv               = g_dx.fb_rtvs[backBufferIdx];
-        g_dx.blur_frame_format            = bb_desc.Format;
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
@@ -439,9 +422,6 @@ bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active
 
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
-        g_dx.blur_frame_backbuffer = nullptr;
-        g_dx.blur_frame_rtv        = {};
-        g_dx.blur_frame_format     = DXGI_FORMAT_UNKNOWN;
 
         // Transition backbuffer back to PRESENT state
         auto barrier =
@@ -470,7 +450,25 @@ bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active
 
 HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
+
+    // First frame: render_overlay_frame handles ImGui initialization.
+    if (!g_ui.is_init) {
+        render_overlay_frame(pSwapChain, active_queue);
+        return original_Present(pSwapChain, SyncInterval, Flags);
+    }
+
+    // Optimization: when no overlay is visible, skip all overlay work.
+    if (!g_ui.player_visible.load(std::memory_order_acquire) &&
+        !g_ui.settings_visible.load(std::memory_order_acquire) &&
+        !g_ui.stations_visible.load(std::memory_order_acquire) &&
+        !g_ui.console_visible.load(std::memory_order_acquire) &&
+        !g_ui.hud_visible.load(std::memory_order_acquire) &&
+        !has_visible_toasts()) {
+        return original_Present(pSwapChain, SyncInterval, Flags);
+    }
+
     render_overlay_frame(pSwapChain, active_queue);
+
     return original_Present(pSwapChain, SyncInterval, Flags);
 }
 
@@ -498,9 +496,8 @@ bool configure_overlay_runtime(AudioSourceManager& mgr, fmod_bridge::DSPBridge& 
     const auto cfg                 = store.snapshot();
     g_ui.theme_idx                 = theme_index(cfg.overlay.theme);
     g_ui.hud_visible               = cfg.overlay.music_notifications_enabled;
-    g_ui.background_blur_enabled   = cfg.overlay.background_blur_enabled;
-    g_ui.drop_shadow_enabled       = cfg.overlay.drop_shadow_enabled;
     g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
+    g_ui.console_visible           = cfg.overlay.console_visible;
     if (!g_runtime_started) {
         start_action_worker();
         g_runtime_started = true;

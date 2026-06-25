@@ -134,17 +134,7 @@ ExternalCtx g_ctx;
 
 // ── UI section: HUD ───────────────────────────────────────────────────
 
-// Draw a frosted-glass blur rect on the current ImGui window.  Drawing on
-// the window draw list puts the blur ON TOP of the window's background but
-// BEHIND the window's content (text, buttons, etc.), which creates a proper
-// frosted-glass overlay effect.
-// When blur is active, scale down the window background alpha so the frosted
-// glass behind it shows through.  Scale proportionally (not cap) so each
-// window keeps its relative opacity.
-// Draw a single drop-shadow quad offset down-right, same size as the
-// window.  Softness comes from the border-fade shadow texture.  Uses the
-// window draw list with PushClipRectFullScreen so the shadow can sit
-// outside the window bounds.
+
 float advance_popup_anim(bool opening, float& anim) {
     const float dt         = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
     const float anim_delta = dt * 5.0f;
@@ -353,21 +343,20 @@ void draw_imgui_ui_impl() {
         close_player_children_except(false, false, false);
         g_ui.cursor_hide_closed_children = true;
     }
+
+    // Log window is INDEPENDENT of the interactive fade.  Draw it BEFORE
+    // the alpha pushvar block so it stays visible even when the cursor
+    // hides and the rest of the overlay fades out.  Console open/close
+    // is gated by g_ui.console_visible (F10 toggles it).
+    draw_console_window();
+
     if (interactive_alpha <= 0.01f) return;
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, interactive_alpha);
 
-    // Queue the blur render pass onto the background draw list so it produces
-    // the blurred texture before per-window add_overlay_blur() calls consume
-    // it during ImGui_ImplDX12_RenderDrawData.
-    queue_overlay_blur_callback();
-
-    if (!g_ui.player_visible) {
-        draw_console_window();
-    } else {
+    if (g_ui.player_visible) {
         auto layout = draw_player_bar(active);
         draw_settings_window(layout);
         draw_stations_browser(active, layout);
-        draw_console_window();
     }
 
     ImGui::PopStyleVar();

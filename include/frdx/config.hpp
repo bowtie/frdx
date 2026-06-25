@@ -27,8 +27,7 @@ struct OverlayConfig {
     std::string theme                 = "bess_dark";
     bool music_notifications_enabled  = true;
     std::string notification_position = "top_left";
-    bool background_blur_enabled      = true;
-    bool drop_shadow_enabled          = false;
+    bool console_visible = false;
 };
 
 struct DualSenseConfig {

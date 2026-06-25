@@ -133,7 +133,7 @@ void draw_toasts() {
         }
         slide.y += (top ? 1.0f : -1.0f) * (1.0f - enter) * 6.0f * static_cast<float>(idx);
 
-        ImGui::SetNextWindowBgAlpha(window_bg_alpha(0.88f * alpha));
+        ImGui::SetNextWindowBgAlpha(0.88f * alpha);
         ImGui::SetNextWindowPos(ImVec2(anchor.x + slide.x, y + slide.y), ImGuiCond_Always, pivot);
         ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(420.0f, 180.0f));
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -145,7 +145,6 @@ void draw_toasts() {
         char window_name[32];
         std::snprintf(window_name, sizeof(window_name), "##frdx_toast_%d", idx);
         ImGui::Begin(window_name, nullptr, flags);
-        apply_window_blur(6.0f);
         ImGui::PushTextWrapPos(390.0f);
         ImGui::TextColored(toast_color(it->kind), "%s", it->title.c_str());
         if (!it->detail.empty()) {

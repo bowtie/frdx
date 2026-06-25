@@ -13,7 +13,11 @@
 #   dist\mods\frdx\fonts\FusionPixel12-ja.ttf
 #   dist\mods\frdx\ffmpeg\ffmpeg.exe
 
-param([switch]$Clean, [int]$Jobs = 0, [switch]$NoCache)
+param(
+    [switch]$Clean,
+    [int]$Jobs = 0,
+    [switch]$NoCache
+)
 
 $ErrorActionPreference = "Stop"
 $root  = Split-Path -Parent $PSScriptRoot
@@ -21,6 +25,27 @@ $build = Join-Path $root "build"
 $dist  = Join-Path $root "dist"
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+# Build-cache inconsistency guard.
+# Detect the silent-stale-DLL trap: if some .obj files for src/overlay
+# are missing or zero-byte while source files have newer mtimes, ninja's
+# incremental tracker can decide "no work to do" and produce a binary
+# that doesn't actually reflect the current source.  Force a clean
+# rebuild in that case so cmake re-stages every object.
+if (Test-Path $build) {
+    $overlayCppFiles = @(Get-ChildItem -Path (Join-Path $root "src\overlay") `
+        -Include *.cpp -Recurse -ErrorAction SilentlyContinue)
+    $overlayObjDir = Join-Path $build "CMakeFiles\version.dir\src\overlay"
+    $overlayObjFiles = @(Get-ChildItem -Path $overlayObjDir `
+        -Filter *.obj -ErrorAction SilentlyContinue)
+    $emptyObjCount = ($overlayObjFiles | Where-Object { $_.Length -eq 0 }).Count
+    $objMissing    = ($overlayObjFiles.Count -lt $overlayCppFiles.Count)
+    $objEmpty      = ($emptyObjCount -gt 0)
+    if ($objMissing -or $objEmpty) {
+        Write-Host ("Build cache INCONSISTENT (src/overlay has {0} .cpp but {1} .obj, {2} empty); forcing clean rebuild." -f $overlayCppFiles.Count, $overlayObjFiles.Count, $emptyObjCount) -ForegroundColor Yellow
+        $Clean = $true
+    }
+}
 
 # Locate cmake.exe. Prefer the one on PATH; otherwise look inside any VS
 # install (which always ships CMake when the C++ workload is selected),
@@ -169,7 +194,22 @@ if (Test-Path $existingConfig) {
     $preservedConfig = Get-Content -Raw -Path $existingConfig
 }
 
-if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
+if (Test-Path $dist) {
+    # Retry removal — files may be briefly locked by AV or the game.
+    $maxRetries = 3
+    for ($i = 0; $i -lt $maxRetries; $i++) {
+        try {
+            Remove-Item -Recurse -Force $dist -ErrorAction Stop
+            break
+        } catch {
+            if ($i -eq $maxRetries - 1) {
+                Write-Host "Warning: could not fully remove dist/ — stale files may persist." -ForegroundColor Yellow
+            } else {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+}
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\fonts") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\ffmpeg") | Out-Null
@@ -263,6 +303,8 @@ above belong to their respective owners. Provided as-is, no warranty,
 use at your own risk.
 '@
 Set-Content -Path (Join-Path $dist "README.txt") -Value $readme -Encoding utf8
+
+$builtDll = Join-Path $dist "version.dll"
 
 $sw.Stop()
 Write-Host ("`nBuilt + staged in $dist  ({0:f1}s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green

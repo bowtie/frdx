@@ -67,18 +67,7 @@ void draw_general_settings_tab() {
     bool show_log = g_ui.console_visible;
     if (ImGui::Checkbox("##log_window", &show_log)) {
         g_ui.console_visible = show_log;
-    }
-
-    label_row("Background Blur");
-    g_ui.background_blur_enabled = cfg.overlay.background_blur_enabled;
-    bool blur                    = g_ui.background_blur_enabled;
-    if (ImGui::Checkbox("##bg_blur", &blur)) {
-        g_ui.background_blur_enabled = blur;
-        apply_blur_widget_alpha();
-        g_ctx.store->patch([&](Config& c) { c.overlay.background_blur_enabled = blur; });
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Frosted glass blur behind overlay panels");
+        g_ctx.store->patch([&](Config& c) { c.overlay.console_visible = show_log; });
     }
 
     ImGui::EndTable();
@@ -102,7 +91,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     const float target_x  = layout.pos.x + (layout.size.x - target_w) * 0.5f;
     ImGui::SetNextWindowPos(ImVec2(target_x, win_top), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(window_bg_alpha(eased * 0.92f * g_ui.interactive_draw_alpha));
+    ImGui::SetNextWindowBgAlpha(eased * 0.92f * g_ui.interactive_draw_alpha);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing |
@@ -120,7 +109,6 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
-        apply_window_blur(6.0f, 0.65f, ImGui::GetFrameHeight());
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {
@@ -132,10 +120,6 @@ void draw_settings_window(const PlayerBarLayout& layout) {
                 }
                 if (ImGui::BeginTabItem("Settings")) {
                     draw_general_settings_tab();
-                    ImGui::EndTabItem();
-                }
-                if (ImGui::BeginTabItem("Blur")) {
-                    draw_blur_debug_tab();
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();
@@ -158,77 +142,6 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::End();
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(3);
-}
-
-void draw_blur_debug_tab() {
-    // ── Status info ──────────────────────────────────────────────────
-    const char* fmt_names[] = {"UNKNOWN", "R8G8B8A8", "R10G10B10A2", "R16G16B16A16"};
-    const char* fmt_str    = "?";
-    switch (g_dx.blur.format) {
-        case DXGI_FORMAT_UNKNOWN:            fmt_str = fmt_names[0]; break;
-        case DXGI_FORMAT_R8G8B8A8_UNORM:     fmt_str = fmt_names[1]; break;
-        case DXGI_FORMAT_R10G10B10A2_UNORM:  fmt_str = fmt_names[2]; break;
-        case DXGI_FORMAT_R16G16B16A16_FLOAT: fmt_str = fmt_names[3]; break;
-        default: break;
-    }
-    ImGui::Text("Blur tex: %s  |  %ux%u  |  format: %s",
-                g_ui.overlay_blur_ready ? "READY" : "stale",
-                g_dx.blur.width, g_dx.blur.height, fmt_str);
-    ImGui::Text("Backbuffer: %s  |  format: %s",
-                g_dx.blur_frame_backbuffer ? "OK" : "null",
-                fmt_str);  // same format for now
-    ImGui::Text("Callback queued: %s",
-                (g_ui.player_visible || g_ui.settings_visible || g_ui.stations_visible ||
-                 g_ui.console_visible || !g_ui.toasts.empty())
-                    ? "yes"
-                    : "no (no windows visible)");
-    ImGui::Separator();
-
-    ImGui::TextUnformatted("Tweak these in real-time until the frosted-glass");
-    ImGui::TextUnformatted("look is right. Changes apply immediately.");
-
-    ImGui::Separator();
-    ImGui::TextUnformatted("Blur Kernel");
-    ImGui::SliderFloat("Offset multiplier", &g_blur_debug_offset_mult, 0.0f, 20.0f, "%.2f");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Scales the blur kernel spread.  0 = no blur, 1 = default, >1 = stronger.");
-    }
-
-    ImGui::Separator();
-    ImGui::TextUnformatted("Window Background");
-    ImGui::SliderFloat("Bg opacity", &g_blur_debug_bg_alpha, 0.0f, 1.0f, "%.2f");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("How opaque the window base is.  0 = fully transparent (blur shows through),"
-                          " 1 = fully opaque (blur hidden behind window bg).");
-    }
-
-    ImGui::Separator();
-    ImGui::TextUnformatted("Widget Transparency");
-    if (ImGui::SliderFloat("Widget alpha", &g_blur_debug_widget_alpha, 0.0f, 1.0f, "%.2f")) {
-        apply_blur_widget_alpha();
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("How opaque widget backgrounds (buttons, frames, tabs) are."
-                          "  Lower = softer blend into the blur, 1.0 = fully opaque.");
-    }
-
-    ImGui::Separator();
-    ImGui::TextUnformatted("Frosted-glass Tint");
-    ImGui::SliderFloat("Opacity", &g_blur_debug_tint_alpha, 0.0f, 1.0f, "%.2f");
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("How opaque the tint is.  0 = fully transparent, 1 = fully opaque.");
-    }
-    ImGui::SliderFloat("Red", &g_blur_debug_tint_r, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Green", &g_blur_debug_tint_g, 0.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Blue", &g_blur_debug_tint_b, 0.0f, 1.0f, "%.2f");
-
-    // Preview swatch
-    ImGui::Separator();
-    ImGui::TextUnformatted("Preview");
-    const ImVec4 swatch(g_blur_debug_tint_r, g_blur_debug_tint_g,
-                        g_blur_debug_tint_b, g_blur_debug_tint_alpha);
-    ImGui::ColorButton("##tint_preview", swatch, ImGuiColorEditFlags_NoTooltip,
-                       ImVec2(ImGui::GetContentRegionAvail().x, 40.0f));
 }
 
 } // namespace frdx::overlay

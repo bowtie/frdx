@@ -38,35 +38,65 @@
 
 namespace frdx::overlay {
 
-// ── Core DX12 / blur resources ──
+// ── Core DX12 resources ──
 
-struct BlurTexture {
-    wil::com_ptr<ID3D12Resource> resource;
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
-    D3D12_CPU_DESCRIPTOR_HANDLE srv_cpu{};
-    D3D12_GPU_DESCRIPTOR_HANDLE srv_gpu{};
-    D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
-    UINT width                  = 0;
-    UINT height                 = 0;
+// Safe wrapper around ID3D12DescriptorHeap that replaces raw pointer
+// arithmetic with indexed slot access (cpu/slot).  Covers both shader-
+// visible (SRV) and non-shader-visible (RTV) heaps.
+struct DescriptorHeap {
+    wil::com_ptr<ID3D12DescriptorHeap> heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu_base{};
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu_base{};
+    UINT increment = 0;
+
+    bool create(ID3D12Device* device, D3D12_DESCRIPTOR_HEAP_TYPE type, UINT num_slots,
+                bool shader_visible) {
+        heap.reset();
+        cpu_base = {};
+        gpu_base = {};
+        increment = device->GetDescriptorHandleIncrementSize(type);
+
+        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+        desc.Type           = type;
+        desc.NumDescriptors = num_slots;
+        desc.Flags          = shader_visible ? D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+                                             : D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (FAILED(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(heap.put()))))
+            return false;
+
+        cpu_base = heap->GetCPUDescriptorHandleForHeapStart();
+        if (shader_visible)
+            gpu_base = heap->GetGPUDescriptorHandleForHeapStart();
+        return true;
+    }
+
+    void reset() {
+        heap.reset();
+        cpu_base = {};
+        gpu_base = {};
+        increment = 0;
+    }
+
+    explicit operator bool() const { return heap != nullptr; }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu(UINT slot) const {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = cpu_base;
+        h.ptr += static_cast<SIZE_T>(slot) * increment;
+        return h;
+    }
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu(UINT slot) const {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = gpu_base;
+        h.ptr += static_cast<SIZE_T>(slot) * increment;
+        return h;
+    }
 };
 
-struct BlurResources {
-    static constexpr UINT kTextureCount = 4;
-    static constexpr UINT kSrvBase      = 2;
-    wil::com_ptr<ID3D12DescriptorHeap> rtv_heap;
-    wil::com_ptr<ID3D12RootSignature> root_signature;
-    wil::com_ptr<ID3D12PipelineState> downsample_pso;
-    wil::com_ptr<ID3D12PipelineState> blur_pso;
-    wil::com_ptr<ID3D12PipelineState> upsample_pso;
-    BlurTexture source, half, ping, pong;
-    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-    UINT width = 0, height = 0;
-    bool ready = false;
-};
+
 
 struct DxResources {
     wil::com_ptr<ID3D12Device> device;
-    wil::com_ptr<ID3D12DescriptorHeap> srv_heap, rtv_heap;
+    DescriptorHeap srv_heap, rtv_heap;
     wil::com_ptr<ID3D12GraphicsCommandList> cmd_list;
     wil::com_ptr<ID3D12Fence> fence;
     HANDLE fence_event = nullptr;
@@ -75,11 +105,10 @@ struct DxResources {
     std::vector<UINT64> allocator_fence_values;
     std::vector<wil::com_ptr<ID3D12Resource>> fb_bufs;
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> fb_rtvs;
-    BlurResources blur;
-    ID3D12Resource* blur_frame_backbuffer = nullptr;
-    D3D12_CPU_DESCRIPTOR_HANDLE blur_frame_rtv{};
-    DXGI_FORMAT blur_frame_format = DXGI_FORMAT_UNKNOWN;
+
 };
+
+
 extern DxResources g_dx;
 
 // ── UI state ──
@@ -102,7 +131,6 @@ struct Toast {
 struct UiState {
     std::atomic<bool> player_visible{true}, settings_visible{false}, stations_visible{false};
     std::atomic<bool> console_visible{false}, hud_visible{true};
-    std::atomic<bool> background_blur_enabled{true}, drop_shadow_enabled{false};
     std::atomic<bool> mouse_capture{false};
     bool is_init = false, cursor_visible = true;
     std::chrono::steady_clock::time_point cursor_hidden_candidate_since{}, cursor_hidden_since{};
@@ -115,10 +143,8 @@ struct UiState {
                                                   "Bottom Left", "Bottom Center", "Bottom Right"};
     int notification_position_idx              = 0;
     wil::com_ptr<ID3D12Resource> bg_texture;
-    ImTextureID bg_texture_id = 0, overlay_blur_texture_id = 0, shadow_texture_id = 0;
+    ImTextureID bg_texture_id = 0;
     UINT bg_texture_width = 0, bg_texture_height = 0;
-    bool overlay_blur_ready = false;
-    wil::com_ptr<ID3D12Resource> shadow_texture;
     ImVec2 btn_min;
     StationComboCache combo_cache;
     int combo_sel = 0, combo_anim_sel = -1, combo_switch_dir = 1;
@@ -193,21 +219,23 @@ struct ExternalCtx {
 };
 extern ExternalCtx g_ctx;
 
-// ── Blur debug tuning knobs ──────────────────────────────────────────
-extern float g_blur_debug_offset_mult;
-extern float g_blur_debug_tint_alpha;
-extern float g_blur_debug_tint_r;
-extern float g_blur_debug_tint_g;
-extern float g_blur_debug_tint_b;
-extern float g_blur_debug_bg_alpha;
-extern float g_blur_debug_widget_alpha;
+
 
 // ── Cross-file constants and function declarations ──
 
 inline constexpr UINT kOverlaySrvCount = 16;
 
-D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
-                                          D3D12_RESOURCE_STATES after);
+inline D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource,
+                                                 D3D12_RESOURCE_STATES before,
+                                                 D3D12_RESOURCE_STATES after) {
+    D3D12_RESOURCE_BARRIER barrier = {};
+    barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource   = resource;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter  = after;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    return barrier;
+}
 
 template <class Fn> inline void patch_dualsense(Fn&& fn) {
     g_ctx.store->patch([&](Config& c) { fn(c.dualsense); });
@@ -223,16 +251,8 @@ void draw_console_window();
 ConsoleLineKind classify_console_line(std::string_view line);
 ImVec4 console_line_color(ConsoleLineKind kind);
 float advance_popup_anim(bool opening, float& anim);
-float window_bg_alpha(float normal);
-int push_blur_widget_style();
-void pop_blur_widget_style(int n);
-void save_theme_widget_colors();
-void apply_blur_widget_alpha();
-
 void mark_overlay_mouse_region();
-void apply_window_blur(float rounding, float tint_alpha = 0.65f, float top_offset = 0.0f);
-void queue_overlay_blur_callback();
-void release_blur_resources();
+
 void draw_toasts();
 ImVec4 toast_color(ToastKind kind);
 bool has_visible_toasts();
@@ -244,7 +264,7 @@ bool should_notify_song_change(IAudioSource* active, const TrackInfo& track, std
                                std::string_view artist);
 void draw_dualsense_settings(const struct DualSenseConfig& ds);
 void draw_general_settings_tab();
-void draw_blur_debug_tab();
+
 void close_player_children_except(bool keep_settings, bool keep_stations, bool reset_anim = true);
 void animate_station_combo_to(int next_idx, int dir);
 void animate_station_combo_by(int dir);
@@ -266,7 +286,6 @@ void stop_action_worker();
 void enqueue_station_switch(std::string station_id, std::string stream_id);
 bool wait_for_fence(UINT64 fence_value);
 void load_overlay_font();
-void create_shadow_texture(ID3D12CommandQueue* queue);
 void load_background_texture(ID3D12CommandQueue* queue);
 void enqueue_action(std::function<void()> action);
 void save_active_shoutcast_station(IAudioSource* active);

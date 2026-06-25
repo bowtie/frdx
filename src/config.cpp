@@ -96,10 +96,6 @@ Config load_config(const std::filesystem::path& path) {
         pick<bool>(ov, "music_notifications_enabled", cfg.overlay.music_notifications_enabled);
     cfg.overlay.notification_position = normalize_notification_position(
         pick<std::string>(ov, "notification_position", cfg.overlay.notification_position));
-    cfg.overlay.background_blur_enabled =
-        pick<bool>(ov, "background_blur_enabled", cfg.overlay.background_blur_enabled);
-    cfg.overlay.drop_shadow_enabled =
-        pick<bool>(ov, "drop_shadow_enabled", cfg.overlay.drop_shadow_enabled);
 
     const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -334,8 +330,6 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("music_notifications_enabled", cfg.overlay.music_notifications_enabled);
     e.kv("notification_position",
          normalize_notification_position(cfg.overlay.notification_position));
-    e.kv("background_blur_enabled", cfg.overlay.background_blur_enabled);
-    e.kv("drop_shadow_enabled", cfg.overlay.drop_shadow_enabled);
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);
