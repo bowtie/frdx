@@ -222,6 +222,29 @@ struct SwapchainMap {
 };
 extern SwapchainMap g_sc;
 
+// ── Multi-queue GPU sync for backdrop blur capture ────────────────────
+// The game can submit 3D work to direct queues that are NOT the present
+// queue.  capture_and_blur_backbuffer() copies the swapchain backbuffer
+// on the present queue; without sync, the copy may race 3D writes that
+// are still in flight on a parallel queue, producing undefined contents.
+//
+// We hook every ID3D12CommandQueue::ExecuteCommandLists and signal a
+// per-queue fence after the submission.  Before the present-queue blur
+// capture, we CPU-wait on every tracked fence (skipping self to avoid
+// deadlock) so the backbuffer is fully rendered when we copy it.
+struct QueueSyncState {
+    wil::com_ptr<ID3D12Fence> fence;
+    HANDLE event = nullptr;
+    UINT64 fence_value = 0;
+};
+struct CommandQueueMap {
+    frdx::Mutex mutex;
+    std::unordered_map<ID3D12CommandQueue*, QueueSyncState> queues FRDX_GUARDED_BY(mutex);
+    FRDX_REQUIRES(mutex)
+    std::unordered_map<ID3D12CommandQueue*, QueueSyncState>& queues_ref() { return queues; }
+};
+extern CommandQueueMap g_cq;
+
 struct ActionQueue {
     frdx::Mutex mutex;
     std::condition_variable cv;
@@ -321,6 +344,11 @@ void enqueue_station_switch(std::string station_id, std::string stream_id);
 bool wait_for_fence(UINT64 fence_value);
 void load_overlay_font();
 void load_background_texture(ID3D12CommandQueue* queue);
+
+// CPU-waits for every tracked direct command queue (other than `self`,
+// which the caller is about to submit into) to flush.  Used before the
+// backdrop blur's CopyResource so we always capture a fully-rendered frame.
+void wait_for_other_queues_sync(ID3D12CommandQueue* self);
 
 // Backdrop blur — real CSS-style backdrop-filter:blur() on overlay windows.
 // Captures the swapchain backbuffer, runs a 9-tap Gaussian into a half-res

@@ -49,10 +49,21 @@ using CreateSwapChainForHwnd_t = HRESULT(__stdcall*)(
     IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1* pDesc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGIOutput* pRestrictToOutput,
     IDXGISwapChain1** ppSwapChain);
+using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
+                                                ID3D12CommandList* const* ppCommandLists);
 
 Present_t original_Present                               = nullptr;
 ResizeBuffers_t original_ResizeBuffers                   = nullptr;
 CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
+ExecuteCommandLists_t original_ExecuteCommandLists       = nullptr;
+
+CommandQueueMap g_cq;
+
+// Forward declarations so hooks installed in initialize() can reference
+// hook trampolines defined later in the file.
+void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
+                                         ID3D12CommandList* const* ppCommandLists);
+void wait_for_other_queues_sync(ID3D12CommandQueue* self);
 
 WNDPROC original_wnd_proc = nullptr;
 bool g_runtime_started    = false;
@@ -415,6 +426,12 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
         g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
 
+        // CPU-wait for every other direct queue the game uses to finish its
+        // most recent submission before we capture the backbuffer.  Without
+        // this, capture_and_blur_backbuffer() can race 3D writes submitted
+        // to a non-present direct queue that haven't completed yet.
+        wait_for_other_queues_sync(active_queue);
+
         // Transition backbuffer from PRESENT to RENDER_TARGET for ImGui rendering.
         ID3D12Resource* bb = g_dx.fb_bufs[backBufferIdx].get();
         auto to_render_target =
@@ -638,20 +655,28 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     void** swapChainVtable = *reinterpret_cast<void***>(swapChain.get());
     // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
     void** factoryVtable = *reinterpret_cast<void***>(factory.get());
+    // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
+    void** commandQueueVtable = *reinterpret_cast<void***>(commandQueue.get());
 
     void* target_Present                = swapChainVtable[8];
     void* target_ResizeBuffers          = swapChainVtable[13];
     void* target_CreateSwapChainForHwnd = factoryVtable[15];
+    // ID3D12CommandQueue::ExecuteCommandLists is vtable slot 8.  Hook it
+    // globally so we can track every direct queue the game uses and signal
+    // a per-queue fence after each submission; render_overlay_frame then
+    // CPU-waits on those fences before copying the swapchain backbuffer.
+    void* target_ExecuteCommandLists    = commandQueueVtable[8];
 
     // Clean up temporary dummy resolution targets (ComPtr destructors handle Release)
     DestroyWindow(hwnd);
     UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
 
     log::info("[overlay] target resolved: Present=0x{:X} ResizeBuffers=0x{:X} "
-              "CreateSwapChainForHwnd=0x{:X}",
+              "CreateSwapChainForHwnd=0x{:X} ExecuteCommandLists=0x{:X}",
               reinterpret_cast<uintptr_t>(target_Present),
               reinterpret_cast<uintptr_t>(target_ResizeBuffers),
-              reinterpret_cast<uintptr_t>(target_CreateSwapChainForHwnd));
+              reinterpret_cast<uintptr_t>(target_CreateSwapChainForHwnd),
+              reinterpret_cast<uintptr_t>(target_ExecuteCommandLists));
 
     // 6. Hook via MinHook
     if (MH_Initialize() != MH_OK) {
@@ -665,8 +690,12 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
                       reinterpret_cast<LPVOID*>(&original_ResizeBuffers)) != MH_OK ||
         MH_CreateHook(target_CreateSwapChainForHwnd,
                       reinterpret_cast<void*>(&hook_CreateSwapChainForHwnd),
-                      reinterpret_cast<LPVOID*>(&original_CreateSwapChainForHwnd)) != MH_OK) {
-        log::error("[overlay] failed to create MinHook Present / Resize / CreateSwapChain detours");
+                      reinterpret_cast<LPVOID*>(&original_CreateSwapChainForHwnd)) != MH_OK ||
+        MH_CreateHook(target_ExecuteCommandLists,
+                      reinterpret_cast<void*>(&hook_ExecuteCommandLists),
+                      reinterpret_cast<LPVOID*>(&original_ExecuteCommandLists)) != MH_OK) {
+        log::error("[overlay] failed to create MinHook Present / Resize / CreateSwapChain / "
+                   "ExecuteCommandLists detours");
         return false;
     }
 
@@ -713,9 +742,81 @@ void shutdown() noexcept {
             g_sc.queues_ref().clear();
         }
 
+        // Close the per-queue sync state created in hook_ExecuteCommandLists.
+        {
+            frdx::ScopedLock lk{g_cq.mutex};
+            for (auto& [queue, state] : g_cq.queues_ref()) {
+                if (state.event) CloseHandle(state.event);
+            }
+            g_cq.queues_ref().clear();
+        }
+
         g_ui.is_init = false;
         log::info("[overlay] Dear ImGui overlay cleaned up safely");
     }
 }
+
+// ── ID3D12CommandQueue::ExecuteCommandLists hook + multi-queue sync ───
+// Forza can submit 3D rendering onto direct queues other than the
+// present queue.  capture_and_blur_backbuffer() copies the swapchain
+// backbuffer on the present queue; without sync, the copy can race
+// against in-flight 3D writes on a parallel queue, producing garbage
+// (or undefined) content.  We hook every queue's ExecuteCommandLists
+// and signal a per-queue fence after the submission.  Before the
+// present-queue blur capture, we CPU-wait for every queued fence value
+// (skipping the present queue to avoid a self-deadlock).
+
+void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
+                                         ID3D12CommandList* const* ppCommandLists) {
+    if (original_ExecuteCommandLists) {
+        original_ExecuteCommandLists(pQueue, NumCommandLists, ppCommandLists);
+    }
+    if (!pQueue) return;
+    // Track every queue type (DIRECT + COMPUTE + COPY) so post-process
+    // middleware (DLSS, XeSS, FSR 2 RT) that uses a COMPUTE queue to
+    // touch the backbuffer still gets flushed before our capture.
+
+    frdx::ScopedLock lk{g_cq.mutex};
+    auto& state     = g_cq.queues_ref()[pQueue];
+    if (!state.fence) {
+        wil::com_ptr<ID3D12Device> dev;
+        if (SUCCEEDED(pQueue->GetDevice(IID_PPV_ARGS(dev.put())))) {
+            if (SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                            IID_PPV_ARGS(state.fence.put())))) {
+                state.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            }
+        }
+    }
+    if (state.fence) {
+        const UINT64 new_val = ++state.fence_value;
+        pQueue->Signal(state.fence.get(), new_val);
+    }
+}
+
+void wait_for_other_queues_sync(ID3D12CommandQueue* self) {
+    // Snapshot each QueueSyncState* under the lock, then release the lock
+    // before doing the potentially-infinite WaitForSingleObject on each
+    // fence.  Holding the mutex across the wait would block any queue
+    // trampoline that tries to signal into g_cq while we're flushing a
+    // different queue.  The pointers stay valid because the only place
+    // entries are added/removed is the trampoline (under the lock) and
+    // shutdown (after MinHook has disabled the trampoline).
+    std::vector<QueueSyncState*> snapshot;
+    {
+        frdx::ScopedLock lk{g_cq.mutex};
+        snapshot.reserve(g_cq.queues_ref().size());
+        for (auto& [queue, state] : g_cq.queues_ref()) {
+            if (queue == self) continue;
+            snapshot.push_back(&state);
+        }
+    }
+    for (QueueSyncState* s : snapshot) {
+        if (!s->fence || !s->event) continue;
+        if (s->fence->GetCompletedValue() >= s->fence_value) continue;
+        s->fence->SetEventOnCompletion(s->fence_value, s->event);
+        WaitForSingleObject(s->event, INFINITE);
+    }
+}
+
 
 } // namespace frdx::overlay
