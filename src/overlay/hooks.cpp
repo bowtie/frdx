@@ -52,6 +52,20 @@ using CreateSwapChainForHwnd_t = HRESULT(__stdcall*)(
 using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
                                                 ID3D12CommandList* const* ppCommandLists);
 
+// ID3D12CommandQueue vtable (Windows 10 1903+ / 26100 d3d12.h):
+//   0-2   IUnknown          : QI / AddRef / Release
+//   3-6   ID3D12Object      : SetPrivateData / SetPrivateDataInterface /
+//                             GetPrivateData / SetName
+//   7     ID3D12DeviceChild : GetDevice
+//   8     ID3D12CommandQueue: UpdateTileMappings
+//   9     ID3D12CommandQueue: CopyTileMappings
+//   10    ID3D12CommandQueue: ExecuteCommandLists  <-- kExecuteCommandListsSlot
+//   ...    (SetMarker / BeginEvent / EndEvent / Signal / Wait / GetDesc)
+// Hoist the hook slot into a named constant: hijacking any other slot (notably
+// UpdateTileMappings on slot 8, called per-frame for Hi-Z) triggers a video
+// card crash within seconds.
+static constexpr UINT kExecuteCommandListsSlot = 10;
+
 Present_t original_Present                               = nullptr;
 ResizeBuffers_t original_ResizeBuffers                   = nullptr;
 CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
@@ -661,11 +675,10 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     void* target_Present                = swapChainVtable[8];
     void* target_ResizeBuffers          = swapChainVtable[13];
     void* target_CreateSwapChainForHwnd = factoryVtable[15];
-    // ID3D12CommandQueue::ExecuteCommandLists is vtable slot 8.  Hook it
-    // globally so we can track every direct queue the game uses and signal
-    // a per-queue fence after each submission; render_overlay_frame then
-    // CPU-waits on those fences before copying the swapchain backbuffer.
-    void* target_ExecuteCommandLists    = commandQueueVtable[8];
+    // See kExecuteCommandListsSlot at top of namespace for the ID3D12CommandQueue
+    // vtable layout and the rationale pinning the hook to slot 10 (hooked slot
+    // 8 in an earlier draft hijacked UpdateTileMappings and TDR'd the GPU).
+    void* target_ExecuteCommandLists    = commandQueueVtable[kExecuteCommandListsSlot];
 
     // Clean up temporary dummy resolution targets (ComPtr destructors handle Release)
     DestroyWindow(hwnd);
