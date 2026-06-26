@@ -2,6 +2,7 @@
 #include "frdx/overlay/overlay_priv.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/platform/windows/subprocess.hpp"
+#include "frdx/re_log.hpp"
 
 #include <windows.h>
 #include <array>
@@ -272,19 +273,19 @@ static bool compile_blur_shader(const char* src, const char* target, ID3DBlob** 
     HMODULE mod = LoadLibraryW(L"d3dcompiler_47.dll");
     if (!mod) mod = LoadLibraryW(L"d3dcompiler_43.dll");
     if (!mod) {
-        log::warn("[overlay] d3dcompiler unavailable; backdrop blur disabled");
+        re_log::warn("d3dcompiler unavailable; backdrop blur disabled");
         return false;
     }
     auto fn = reinterpret_cast<CompileFn>(GetProcAddress(mod, "D3DCompile"));
     if (!fn) {
-        log::warn("[overlay] D3DCompile missing; backdrop blur disabled");
+        re_log::warn("D3DCompile missing; backdrop blur disabled");
         return false;
     }
     auto hr = fn(src, std::strlen(src), nullptr, nullptr, nullptr, "main", target, flags, 0,
                  out, errors.put());
     if (FAILED(hr)) {
         const char* msg = errors ? static_cast<const char*>(errors->GetBufferPointer()) : "";
-        log::warn("[overlay] blur shader compile ({}): {}", target, msg);
+        re_log::warn("blur shader compile ({}): {}", target, msg);
         return false;
     }
     return true;
@@ -365,12 +366,12 @@ static bool create_blur_root_signature(ID3D12Device* device, ID3D12RootSignature
     wil::com_ptr<ID3DBlob> blob, errors;
     if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, blob.put(),
                                             errors.put()))) {
-        log::warn("[overlay] blur root signature serialize failed");
+        re_log::warn("blur root signature serialize failed");
         return false;
     }
     if (FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                            IID_PPV_ARGS(out)))) {
-        log::warn("[overlay] blur root signature create failed");
+        re_log::warn("blur root signature create failed");
         return false;
     }
     return true;
@@ -436,8 +437,8 @@ static bool recreate_blur_textures(UINT width, UINT height, DXGI_FORMAT format) 
         FAILED(g_dx.device->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &blurDesc,
                                                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                                     nullptr, IID_PPV_ARGS(blur.put())))) {
-        log::error("[overlay] failed to allocate backdrop blur textures ({}x{} / {}x{})", width,
-                   height, half_w, half_h);
+        re_log::error("failed to allocate backdrop blur textures ({}x{} / {}x{})", width,
+                      height, half_w, half_h);
         return false;
     }
 
@@ -458,8 +459,8 @@ static bool recreate_blur_textures(UINT width, UINT height, DXGI_FORMAT format) 
 
     // Blurred RTV — sits one slot past the fb_rtvs range in the heap.
     if (g_dx.blurred_rtv_index == 0) {
-        log::error("[overlay] blurred_rtv_index not set; init_backdrop_blur must be called from "
-                   "init_imgui after rtv_heap is sized");
+        re_log::error("blurred_rtv_index not set; init_backdrop_blur must be called from "
+                      "init_imgui after rtv_heap is sized");
         return false;
     }
     g_dx.blurred_rtv_cpu = g_dx.rtv_heap.cpu(g_dx.blurred_rtv_index);
@@ -475,10 +476,10 @@ static bool recreate_blur_textures(UINT width, UINT height, DXGI_FORMAT format) 
     g_dx.blur_width     = width;
     g_dx.blur_height    = height;
     g_dx.blur_ready     = true;
-    log::info("[overlay] backdrop blur textures ready ({}x{} → {}x{} fmt={}); capture_srv slot={}, "
-              "blurred_srv slot={}, blurred_rtv slot={}",
-              width, height, half_w, half_h, static_cast<unsigned>(format),
-              DxResources::kCaptureSrvSlot, DxResources::kBlurredSrvSlot, g_dx.blurred_rtv_index);
+    re_log::info("backdrop blur textures ready ({}x{} → {}x{} fmt={}); capture_srv slot={}, "
+                 "blurred_srv slot={}, blurred_rtv slot={}",
+                 width, height, half_w, half_h, static_cast<unsigned>(format),
+                 DxResources::kCaptureSrvSlot, DxResources::kBlurredSrvSlot, g_dx.blurred_rtv_index);
     return true;
 }
 
@@ -533,7 +534,7 @@ static bool is_supported_blur_format(DXGI_FORMAT format) {
 void init_backdrop_blur(ID3D12CommandQueue* /*queue*/, UINT width, UINT height,
                         DXGI_FORMAT format) {
     if (!g_dx.device || !g_dx.rtv_heap.heap) {
-        log::warn("[overlay] init_backdrop_blur called before D3D12 heap ready");
+        re_log::warn("init_backdrop_blur called before D3D12 heap ready");
         return;
     }
     // Log the detected format (int + name) BEFORE the supported-check so a
@@ -541,11 +542,11 @@ void init_backdrop_blur(ID3D12CommandQueue* /*queue*/, UINT width, UINT height,
     // identify the format without grep'ing the DXGI enum.  Forza Horizon 6
     // presents R10G10B10A2_UNORM regardless of Windows display HDR mode --
     // a plain "format 24" log line by itself would be a guessing game.
-    log::info("[overlay] backdrop blur init: swapchain format {} ({})",
-              static_cast<unsigned>(format), dxgi_format_name(format));
+    re_log::info("backdrop blur init: swapchain format {} ({})",
+                 static_cast<unsigned>(format), dxgi_format_name(format));
     if (!is_supported_blur_format(format)) {
-        log::warn("[overlay] backdrop blur disabled: backbuffer format {} ({}) is not supported",
-                  static_cast<unsigned>(format), dxgi_format_name(format));
+        re_log::warn("backdrop blur disabled: backbuffer format {} ({}) is not supported",
+                     static_cast<unsigned>(format), dxgi_format_name(format));
         return;
     }
     if (g_dx.blur_root_sig && g_dx.blur_pso && g_dx.blur_format == format) {
@@ -569,11 +570,11 @@ void resize_backdrop_blur(ID3D12CommandQueue* /*queue*/, UINT width, UINT height
                           DXGI_FORMAT format) {
     // Same context-for-the-gate treatment as init_backdrop_blur(): log the
     // format (int + name) so a WARN line on resize is self-explanatory.
-    log::info("[overlay] backdrop blur resize: swapchain format {} ({})",
-              static_cast<unsigned>(format), dxgi_format_name(format));
+    re_log::info("backdrop blur resize: swapchain format {} ({})",
+                 static_cast<unsigned>(format), dxgi_format_name(format));
     if (!is_supported_blur_format(format)) {
-        log::warn("[overlay] resize_backdrop_blur called with unsupported format {} ({}); "
-                  "skipping recreate", static_cast<unsigned>(format), dxgi_format_name(format));
+        re_log::warn("resize_backdrop_blur called with unsupported format {} ({}); "
+                     "skipping recreate", static_cast<unsigned>(format), dxgi_format_name(format));
         return;
     }
     if (!g_dx.blur_ready || g_dx.blur_width != width || g_dx.blur_height != height ||

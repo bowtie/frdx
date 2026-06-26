@@ -6,6 +6,7 @@
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/log.hpp"
+#include "frdx/re_log.hpp"
 #include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
@@ -136,7 +137,7 @@ void pre_resize() {
     g_dx.fb_bufs.clear();
     g_dx.fb_rtvs.clear();
 
-    log::info("[overlay] released DX12 backbuffer RTV resources before resize");
+    re_log::info("released DX12 backbuffer RTV resources before resize");
 }
 
 // Re-creates the RTV descriptors and g_dx.fb_bufs immediately after ResizeBuffers
@@ -171,7 +172,7 @@ void post_resize(IDXGISwapChain* swapChain) {
     resize_backdrop_blur(nullptr, desc.BufferDesc.Width, desc.BufferDesc.Height,
                          desc.BufferDesc.Format);
 
-    log::info("[overlay] recovered DX12 backbuffer RTV resources after resize");
+    re_log::info("recovered DX12 backbuffer RTV resources after resize");
 }
 
 ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
@@ -208,10 +209,10 @@ hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWn
             }
             // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
             g_sc.queues_ref()[*ppSwapChain] = queue;
-            log::info("[overlay] intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to "
-                      "command queue 0x{:X}",
-                      reinterpret_cast<uintptr_t>(*ppSwapChain),
-                      reinterpret_cast<uintptr_t>(queue));
+            re_log::info("intercepted CreateSwapChainForHwnd: mapped swapchain 0x{:X} to "
+                         "command queue 0x{:X}",
+                         reinterpret_cast<uintptr_t>(*ppSwapChain),
+                         reinterpret_cast<uintptr_t>(queue));
         }
     }
     return hr;
@@ -222,27 +223,27 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     pSwapChain->GetDesc(&desc);
 
     if (!desc.OutputWindow) {
-        log::error("[overlay] SwapChain OutputWindow is NULL! Aborting ImGui initialization.");
+        re_log::error("SwapChain OutputWindow is NULL! Aborting ImGui initialization.");
         return false;
     }
 
     original_wnd_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
         desc.OutputWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wnd_proc_hook)));
     if (!original_wnd_proc) {
-        log::error("[overlay] failed to hook game window WndProc! Aborting ImGui initialization.");
+        re_log::error("failed to hook game window WndProc! Aborting ImGui initialization.");
         return false;
     }
-    log::info("[overlay] hooked game window WndProc: 0x{:X}",
-              reinterpret_cast<uintptr_t>(original_wnd_proc));
+    re_log::info("hooked game window WndProc: 0x{:X}",
+                 reinterpret_cast<uintptr_t>(original_wnd_proc));
 
     if (!g_dx.srv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kOverlaySrvCount, true)) {
-        log::error("[overlay] failed to create SRV descriptor heap!");
+        re_log::error("failed to create SRV descriptor heap!");
         return false;
     }
 
     if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.BufferCount + 1,
                               false)) {
-        log::error("[overlay] failed to create RTV descriptor heap!");
+        re_log::error("failed to create RTV descriptor heap!");
         return false;
     }
     // Slot [BufferCount] is reserved for the blurred_tex RTV that the
@@ -256,7 +257,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         if (FAILED(g_dx.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                        IID_PPV_ARGS(g_dx.allocators[i].put()))) ||
             !g_dx.allocators[i]) {
-            log::error("[overlay] failed to create command allocator {}!", i);
+            re_log::error("failed to create command allocator {}!", i);
             return false;
         }
     }
@@ -266,7 +267,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
                                               g_dx.allocators[0].get(), nullptr,
                                               IID_PPV_ARGS(g_dx.cmd_list.put()))) ||
         !g_dx.cmd_list) {
-        log::error("[overlay] failed to create ImGui graphics command list!");
+        re_log::error("failed to create ImGui graphics command list!");
         return false;
     }
     g_dx.cmd_list->Close();
@@ -275,13 +276,13 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     if (FAILED(
             g_dx.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(g_dx.fence.put()))) ||
         !g_dx.fence) {
-        log::error("[overlay] failed to create ImGui GPU fence!");
+        re_log::error("failed to create ImGui GPU fence!");
         return false;
     }
 
     g_dx.fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!g_dx.fence_event) {
-        log::error("[overlay] failed to create ImGui GPU fence event!");
+        re_log::error("failed to create ImGui GPU fence event!");
         return false;
     }
 
@@ -295,7 +296,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     for (UINT i = 0; i < desc.BufferCount; i++) {
         wil::com_ptr<ID3D12Resource> tmp;
         if (FAILED(pSwapChain->GetBuffer(i, IID_PPV_ARGS(tmp.put()))) || !tmp) {
-            log::error("[overlay] failed to query swapchain backbuffer {}!", i);
+            re_log::error("failed to query swapchain backbuffer {}!", i);
             return false;
         }
         g_dx.fb_bufs[i] = std::move(tmp);
@@ -330,7 +331,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     init_info.LegacySingleSrvCpuDescriptor = g_dx.srv_heap.cpu_base;
     init_info.LegacySingleSrvGpuDescriptor = g_dx.srv_heap.gpu_base;
     if (!ImGui_ImplDX12_Init(&init_info)) {
-        log::error("[overlay] ImGui DX12 backend initialization failed");
+        re_log::error("ImGui DX12 backend initialization failed");
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         return false;
@@ -402,8 +403,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
                 ApplyTheme(g_ui.theme_idx);
                 g_ui.is_init                   = true;
                 ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
-                log::info(
-                    "[overlay] Direct3D 12 Dear ImGui Overlay context initialized successfully!");
+                re_log::info(
+                    "Direct3D 12 Dear ImGui Overlay context initialized successfully!");
             } else {
                 cleanup_imgui_resources();
             }
@@ -433,16 +434,16 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         if (backBufferIdx >= g_dx.allocators.size() || backBufferIdx >= g_dx.fb_bufs.size() ||
             !g_dx.fb_bufs[backBufferIdx]) {
-            log::error("[overlay] backBufferIdx {} is out of bounds or backbuffer is NULL! "
-                       "size={}, buf_size={}",
-                       backBufferIdx, g_dx.allocators.size(), g_dx.fb_bufs.size());
+            re_log::error("backBufferIdx {} is out of bounds or backbuffer is NULL! "
+                          "size={}, buf_size={}",
+                          backBufferIdx, g_dx.allocators.size(), g_dx.fb_bufs.size());
             return false;
         }
         ID3D12CommandAllocator* allocator = g_dx.allocators[backBufferIdx].get();
 
         if (!wait_for_fence(g_dx.allocator_fence_values[backBufferIdx])) {
-            log::warn("[overlay] skipped frame because GPU did not release command allocator {}",
-                      backBufferIdx);
+            re_log::warn("skipped frame because GPU did not release command allocator {}",
+                         backBufferIdx);
             return false;
         }
 
@@ -516,7 +517,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         if (SUCCEEDED(active_queue->Signal(g_dx.fence.get(), fence_value))) {
             g_dx.allocator_fence_values[backBufferIdx] = fence_value;
         } else {
-            log::warn("[overlay] failed to signal ImGui GPU fence");
+            re_log::warn("failed to signal ImGui GPU fence");
         }
         return true;
     }
@@ -605,7 +606,7 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     if (!configure_overlay_runtime(mgr, bridge, store, dualsense)) return false;
     if (g_hooks_installed) return true;
 
-    log::info("[overlay] starting dummy Direct3D 12 device context resolver...");
+    re_log::info("starting dummy Direct3D 12 device context resolver...");
 
     // 1. Create dummy window
     WNDCLASSEXW windowClass = {sizeof(WNDCLASSEXW),
@@ -628,7 +629,7 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     wil::com_ptr<ID3D12Device> device;
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
                                  reinterpret_cast<void**>(device.put())))) {
-        log::error("[overlay] failed to create dummy D3D12 Device context");
+        re_log::error("failed to create dummy D3D12 Device context");
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         return false;
@@ -640,7 +641,7 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     wil::com_ptr<ID3D12CommandQueue> commandQueue;
     if (FAILED(device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue),
                                           reinterpret_cast<void**>(commandQueue.put())))) {
-        log::error("[overlay] failed to create dummy Direct Command Queue");
+        re_log::error("failed to create dummy Direct Command Queue");
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         return false;
@@ -650,7 +651,7 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     wil::com_ptr<IDXGIFactory4> factory;
     if (FAILED(
             CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(factory.put())))) {
-        log::error("[overlay] failed to create dummy DXGI Factory context");
+        re_log::error("failed to create dummy DXGI Factory context");
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         return false;
@@ -670,7 +671,7 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     if (FAILED(factory->CreateSwapChainForHwnd(
             commandQueue.get(), hwnd, &swapChainDesc, nullptr, nullptr,
             reinterpret_cast<IDXGISwapChain1**>(swapChain.put())))) {
-        log::error("[overlay] failed to create dummy DXGI Swap Chain context");
+        re_log::error("failed to create dummy DXGI Swap Chain context");
         DestroyWindow(hwnd);
         UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
         return false;
@@ -696,16 +697,16 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     DestroyWindow(hwnd);
     UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
 
-    log::info("[overlay] target resolved: Present=0x{:X} ResizeBuffers=0x{:X} "
-              "CreateSwapChainForHwnd=0x{:X} ExecuteCommandLists=0x{:X}",
-              reinterpret_cast<uintptr_t>(target_Present),
-              reinterpret_cast<uintptr_t>(target_ResizeBuffers),
-              reinterpret_cast<uintptr_t>(target_CreateSwapChainForHwnd),
-              reinterpret_cast<uintptr_t>(target_ExecuteCommandLists));
+    re_log::info("target resolved: Present=0x{:X} ResizeBuffers=0x{:X} "
+                 "CreateSwapChainForHwnd=0x{:X} ExecuteCommandLists=0x{:X}",
+                 reinterpret_cast<uintptr_t>(target_Present),
+                 reinterpret_cast<uintptr_t>(target_ResizeBuffers),
+                 reinterpret_cast<uintptr_t>(target_CreateSwapChainForHwnd),
+                 reinterpret_cast<uintptr_t>(target_ExecuteCommandLists));
 
     // 6. Hook via MinHook
     if (MH_Initialize() != MH_OK) {
-        log::error("[overlay] failed to initialize MinHook context");
+        re_log::error("failed to initialize MinHook context");
         return false;
     }
 
@@ -719,18 +720,18 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
         MH_CreateHook(target_ExecuteCommandLists,
                       reinterpret_cast<void*>(&hook_ExecuteCommandLists),
                       reinterpret_cast<LPVOID*>(&original_ExecuteCommandLists)) != MH_OK) {
-        log::error("[overlay] failed to create MinHook Present / Resize / CreateSwapChain / "
-                   "ExecuteCommandLists detours");
+        re_log::error("failed to create MinHook Present / Resize / CreateSwapChain / "
+                      "ExecuteCommandLists detours");
         return false;
     }
 
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
-        log::error("[overlay] failed to enable MinHook overlay detours");
+        re_log::error("failed to enable MinHook overlay detours");
         return false;
     }
 
     g_hooks_installed = true;
-    log::info("[overlay] D3D12/DXGI Present and Resize hooks established successfully!");
+    re_log::info("D3D12/DXGI Present and Resize hooks established successfully!");
     return true;
 }
 
@@ -739,8 +740,7 @@ void shutdown() noexcept {
         stop_action_worker();
         g_runtime_started = false;
     }
-    if (g_hooks_installed) {
-        log::info("[overlay] disabling MinHook overlay detours...");
+    if (g_hooks_installed) {            re_log::info("disabling MinHook overlay detours...");
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
         g_hooks_installed               = false;
@@ -777,7 +777,7 @@ void shutdown() noexcept {
         }
 
         g_ui.is_init = false;
-        log::info("[overlay] Dear ImGui overlay cleaned up safely");
+        re_log::info("Dear ImGui overlay cleaned up safely");
     }
 }
 
