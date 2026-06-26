@@ -70,7 +70,11 @@ void draw_console_window() {
     // actually clicked during this frame).  See code-review thread
     // "advance_popup_anim+fade-out sentinel" for the full reasoning.
     bool local_open = true;
-    if (ImGui::Begin("FRDX Console (F10)##frdx_console", &local_open, flags)) {
+    // NoScrollbar — the BeginChild log scroll below already provides one;
+    // without this flag the outer window grows its own (redundant) scrollbar
+    // whenever the wrapped log content exceeds the window's content rect.
+    if (ImGui::Begin("FRDX Console##frdx_console", &local_open,
+                     flags | ImGuiWindowFlags_NoScrollbar)) {
         // Backdrop blur does not fade with the cursor here — the console
         // window stays readable while other overlay content fades out.
         draw_backdrop_blur(1.0f);
