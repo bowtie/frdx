@@ -122,6 +122,11 @@ void draw_console_window() {
         ImGui::BeginChild("##console_scroll", ImVec2(0.0f, 0.0f), false);
         const bool stick_to_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         size_t shown = 0;
+        // Compute the wrap target once per frame — every TextUnformatted()
+        // call below uses it so long log lines wrap at the panel width
+        // instead of overflowing horizontally.  GetContentRegionAvail().x is
+        // the inner width of the BeginChild above (panel minus scrollbar).
+        const float wrap_width = ImGui::GetContentRegionAvail().x;
         for (size_t line_idx = 0; line_idx < g_ui.console_lines.size(); ++line_idx) {
             const ConsoleLineKind kind = line_idx < g_ui.console_line_kinds.size()
                                            ? g_ui.console_line_kinds[line_idx]
@@ -130,15 +135,19 @@ void draw_console_window() {
             const auto& line = g_ui.console_lines[line_idx];
             ImGui::PushID(static_cast<int>(line_idx));
             ImGui::PushStyleColor(ImGuiCol_Text, console_line_color(kind));
-            // ImGui::Selectable gives us per-line text selection plus the
-            // highlighted hit-region under the mouse.  Long lines overflow
-            // horizontally; the BeginChild above auto-hscrolls.  Double-click
-            // copies the line to the clipboard (the only way to copy now
-            // that the standalone "Copy" / "Close" buttons are gone — the
-            // close button is the native titlebar X).
-            ImGui::Selectable(line.c_str(), false,
-                              ImGuiSelectableFlags_AllowDoubleClick |
-                              ImGuiSelectableFlags_DontClosePopups);
+            // PushTextWrapPos lets TextUnformatted wrap a long line at our
+            // precomputed wrap_width boundary.  Single-line Selectable would
+            // be wrong here -- it renders each line as a single horizontal
+            // item that overflows the scroll child, leaving the right side
+            // of long tracebacks / RVA strings unreadable.  Wrapped text
+            // keeps line-by-line interactivity (double-click to copy, right-
+            // click context menu) because the wrapped block is submitted as
+            // one ImGui item whose bounding rect includes all wrapped lines.
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + wrap_width);
+            ImGui::TextUnformatted(line.c_str(), nullptr);
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 ImGui::SetClipboardText(line.c_str());
             }
@@ -148,7 +157,6 @@ void draw_console_window() {
                 }
                 ImGui::EndPopup();
             }
-            ImGui::PopStyleColor();
             ImGui::PopID();
             ++shown;
         }
