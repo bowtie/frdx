@@ -286,8 +286,11 @@ void draw_console_window() {
                                  g_ui.console_filter_text_search,
                                  sizeof(g_ui.console_filter_text_search));
         // Escape clears the search field.  ImGui InputText does NOT
-        // auto-clear on Escape by default, so wire it explicitly while
-        // the field is active.  Mirrors IDE search convention.
+        // auto-clear on Escape by default.  This explicit clear is
+        // additive to ImGui's native Escape handling (popup close /
+        // nav cancel still fire on contexts where the search field is
+        // inactive) — the IsItemActive() gate isolates the two paths.
+        // Mirrors IDE search convention.
         if (ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             g_ui.console_filter_text_search[0] = '\0';
         }
@@ -304,7 +307,18 @@ void draw_console_window() {
         char counter_text[32];
         std::snprintf(counter_text, sizeof(counter_text), "%zu / %zu recent",
                       shown_count, total_lines);
-        const float counter_w    = ImGui::CalcTextSize(counter_text).x;
+        // Cache CalcTextSize across frames: only recompute when shown or
+        // total changes.  Cuts one float sub per frame in the static
+        // draw path (counter is only mutated on dedup/filter/mute flips).
+        static size_t s_last_shown = static_cast<size_t>(-1);
+        static size_t s_last_total = static_cast<size_t>(-1);
+        static float  s_cached_w   = 0.0f;
+        if (s_last_shown != shown_count || s_last_total != total_lines) {
+            s_cached_w    = ImGui::CalcTextSize(counter_text).x;
+            s_last_shown  = shown_count;
+            s_last_total  = total_lines;
+        }
+        const float counter_w    = s_cached_w;
         const float clear_w      = ImGui::CalcTextSize("Clear").x +
                                    ImGui::GetStyle().FramePadding.x * 2.0f;
         const float row_max_x    = ImGui::GetContentRegionMax().x;
@@ -360,8 +374,13 @@ void draw_console_window() {
             const char* msg = "No lines match current filters";
             const ImVec2 text_size = ImGui::CalcTextSize(msg);
             const ImVec2 window_size = ImGui::GetContentRegionAvail();
-            ImGui::SetCursorPos(ImVec2((window_size.x - text_size.x) * 0.5f,
-                                        window_size.y * 0.4f));
+            // Fixed `+8.0f` offset from current cursor (post-Separator) so
+            // the hint always lands a predictable distance below the
+            // filter row regardless of BeginChild height — avoids the
+            // previous `window_size.y * 0.4f` collision risk on sub-200px
+            // console heights where 40% put the hint under the filter row.
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
+            ImGui::SetCursorPosX((window_size.x - text_size.x) * 0.5f);
             ImGui::TextUnformatted(msg);
             ImGui::PopStyleColor();
         }
