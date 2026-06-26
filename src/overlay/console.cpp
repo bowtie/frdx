@@ -307,16 +307,25 @@ void draw_console_window() {
         char counter_text[32];
         std::snprintf(counter_text, sizeof(counter_text), "%zu / %zu recent",
                       shown_count, total_lines);
-        // Cache CalcTextSize across frames: only recompute when shown or
-        // total changes.  Cuts one float sub per frame in the static
-        // draw path (counter is only mutated on dedup/filter/mute flips).
-        static size_t s_last_shown = static_cast<size_t>(-1);
-        static size_t s_last_total = static_cast<size_t>(-1);
-        static float  s_cached_w   = 0.0f;
-        if (s_last_shown != shown_count || s_last_total != total_lines) {
+        // Cache CalcTextSize across frames: only recompute when shown,
+        // total, OR the active font changes.  Cuts one float sub per
+        // frame in the static draw path (counter is mutated on
+        // dedup/filter/mute flips; ApplyTheme swaps fonts via
+        // ImGui::GetIO().Fonts->... so the font pointer is the right
+        // invalidation key for theme switches across the project's two
+        // themes "Bess Dark" + "Tokyo Night").
+        static size_t       s_last_shown = static_cast<size_t>(-1);
+        static size_t       s_last_total = static_cast<size_t>(-1);
+        static const ImFont* s_last_font = nullptr;
+        static float        s_cached_w   = 0.0f;
+        const ImFont*       cur_font     = ImGui::GetFont();
+        if (s_last_shown != shown_count ||
+            s_last_total != total_lines ||
+            s_last_font  != cur_font) {
             s_cached_w    = ImGui::CalcTextSize(counter_text).x;
             s_last_shown  = shown_count;
             s_last_total  = total_lines;
+            s_last_font   = cur_font;
         }
         const float counter_w    = s_cached_w;
         const float clear_w      = ImGui::CalcTextSize("Clear").x +
