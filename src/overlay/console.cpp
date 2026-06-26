@@ -76,6 +76,20 @@ void draw_console_window() {
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f, vp_pos.y + vp_size.y - 16.0f),
                             ImGuiCond_FirstUseEver, ImVec2(1.0f, 1.0f));
     ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    // Size floor so the panel can't be collapsed past legibility.
+    // 480 px is the WRAP-THRESHOLD width: above it the filter row stays
+    // single-line for short Subsystems labels; below it ImGui wraps to
+    // 2 lines and the right-aligned counter/Clear visually split off.
+    // Bump to ~540 px to enforce a strict single-line invariant.
+    // 165 px tall absorbs a wrapped row + scrollbar so the height floor
+    // doesn't fight the wrap.  Combine with the global
+    // ConfigWindowsResizeFromEdges = false in init_imgui() (hooks.cpp)
+    // so the bottom-right grip is the only resize handle.  Ceiling
+    // stays loose (viewport minus 16 px margin on each side) so the
+    // panel can still grow near-fullscreen during scan bursts.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f, 165.0f),
+                                         ImVec2(vp_size.x - 16.0f,
+                                                vp_size.y - 16.0f));
     ImGui::SetNextWindowBgAlpha(0.94f * eased);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |

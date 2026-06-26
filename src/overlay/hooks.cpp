@@ -306,6 +306,18 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
 
     // ImGui Win32 + DX12 contexts
     ImGui::CreateContext();
+    // Force the resize handle to a single bottom-right grip across the
+    // whole overlay.  ImGui 1.86+ defaults ConfigResizeWindowsFromEdges
+    // to true, which lets the user drag from any window edge to resize --
+    // surprising on game-overlay panels where the user mainly wants to
+    // grow the panel, not shrink it from the top.  Pin to false so all
+    // resize happens via the small bottom-right triangle grip (ImGui's
+    // original contract).  Player bar / settings / toasts already opt
+    // out via ImGuiWindowFlags_NoResize, so this only affects the
+    // console window in practice -- but setting it here makes the
+    // behaviour global and survives any future window that enables
+    // resize by default.
+    ImGui::GetIO().ConfigWindowsResizeFromEdges = false;
     load_overlay_font();
     ImGui_ImplWin32_Init(desc.OutputWindow);
 
