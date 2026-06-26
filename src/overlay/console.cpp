@@ -119,11 +119,10 @@ void draw_console_window() {
             }
 
             // Walk the freshly-refreshed console_lines and assign each line
-            // a stable subsystem id (UINT16_MAX = no subsystem).  New ids
-            // get appended to console_subsystems (visible=true).  This runs
-            // ONLY on refresh (typically <once per second-frame burst),
-            // and is the only place a std::string allocation happens in the
-            // subsystem pipeline — passes_filter() never allocates.
+            // a stable subsystem id (UINT16_MAX = no subsystem).  New
+            // `[bracket]` names are inserted as visible-by-default — see
+            // the v.push_back site below for the trade-off rationale.
+            // This runs ONLY on refresh; passes_filter() never allocates.
             auto& v  = g_ui.console_subsystems;
             auto& ix = g_ui.console_subsystem_index;
             auto& id = g_ui.console_subsystem_id;
@@ -135,6 +134,13 @@ void draw_console_window() {
                 std::string key(s);
                 auto it = ix.find(key);
                 if (it == ix.end()) {
+                    // AUTO-MUTE-NEW = FALSE: brand-new subsystems surface
+                    // immediately (visible=true).  Picked over TRUE (land
+                    // muted, user opt-in) because RE work typically wants
+                    // new diagnostic subsystems to be visible; the
+                    // Subsystems (V / M muted) popup provides after-the-
+                    // fact mute.  If we ever need a "Mute new" filter
+                    // row toggle it belongs there, not here.
                     const uint16_t new_id = static_cast<uint16_t>(v.size());
                     v.push_back({std::move(key), true});
                     it = ix.emplace(v.back().name, new_id).first;
@@ -240,7 +246,11 @@ void draw_console_window() {
             } else {
                 // Sort pointers (not entries) so we don't disturb the
                 // stable id ordering used by parallel `console_subsystem_id`.
-                std::vector<SubsystemState*> sorted;
+                // thread_local so the per-popup-open allocation disappears
+                // after the first open of the dll session — render thread
+                // is single-threaded so this is safe.
+                thread_local std::vector<SubsystemState*> sorted;
+                sorted.clear();
                 sorted.reserve(g_ui.console_subsystems.size());
                 for (auto& s : g_ui.console_subsystems) sorted.push_back(&s);
                 std::sort(sorted.begin(), sorted.end(),
@@ -259,8 +269,16 @@ void draw_console_window() {
         ImGui::SameLine();
         // Substring search.  Width 180 px fits beside the rest of the
         // controls at the typical 760-wide console window.
-        ImGui::SetNextItemWidth(180.0f);
-        ImGui::InputTextWithHint("##console_search", "Search...", g_ui.console_filter_text_search,
+        ImGui::SetNextItemWidth(140.0f);
+        // Hint explicitly says the search combines with the subsystem /
+        // category filters (AND) — so a muted `[shoutcast]` line still
+        // hides even when the user types `ERROR`.  Without this hint the
+        // AND semantics reads as a missing-feature bug.  Width shrunk
+        // from 180 -> 140 px so the filter row (7 coarse checkboxes +
+        // Subsystems + Search + Pause auto-scroll + counter + Clear)
+        // fits within the typical 760px panel without SameLine overflow.
+        ImGui::InputTextWithHint("##console_search", "Search (mute-aware)...",
+                                 g_ui.console_filter_text_search,
                                  sizeof(g_ui.console_filter_text_search));
         ImGui::SameLine();
         // Pause auto-scroll — when ticked, new log lines still arrive but
