@@ -104,7 +104,7 @@ void draw_console_window() {
         }
 
         // Resolve a single line's visibility from the user's filter toggles.
-        // "normal" is always visible — it's the catch-all for unclassed
+        // "normal" is always visible -- it's the catch-all for unclassed
         // lines and the user shouldn't be able to mute them by accident.
         auto visible = [](ConsoleLineKind k) {
             switch (k) {
@@ -116,6 +116,58 @@ void draw_console_window() {
                 case ConsoleLineKind::normal:    return true;
             }
             return true;
+        };
+
+        // Precompute visible-count once per frame so the right-click menu
+        // labels ("Copy visible (N / M)") carry an accurate total even when
+        // the popup fires mid-render — partial `shown` from inside the loop
+        // would otherwise under-report the number of lines that will end up
+        // in the joined clip text.
+        size_t visible_count = 0;
+        for (size_t i = 0; i < g_ui.console_lines.size(); ++i) {
+            const ConsoleLineKind k = i < g_ui.console_line_kinds.size()
+                                      ? g_ui.console_line_kinds[i]
+                                      : ConsoleLineKind::normal;
+            if (visible(k)) ++visible_count;
+        }
+        const size_t total_count = g_ui.console_lines.size();
+
+        // Join visible-only lines into a single clip string.
+        // Walks console_lines once and applies the same `visible` filter so
+        // the join stays consistent with what the user sees in the panel.
+        auto copy_visible_to_clipboard = [&] {
+            std::string joined;
+            size_t capacity = 0;
+            for (size_t i = 0; i < g_ui.console_lines.size(); ++i) {
+                const ConsoleLineKind k = i < g_ui.console_line_kinds.size()
+                                          ? g_ui.console_line_kinds[i]
+                                          : ConsoleLineKind::normal;
+                if (!visible(k)) continue;
+                capacity += g_ui.console_lines[i].size() + 1;
+            }
+            joined.reserve(capacity);
+            for (size_t i = 0; i < g_ui.console_lines.size(); ++i) {
+                const ConsoleLineKind k = i < g_ui.console_line_kinds.size()
+                                          ? g_ui.console_line_kinds[i]
+                                          : ConsoleLineKind::normal;
+                if (!visible(k)) continue;
+                joined += g_ui.console_lines[i];
+                joined += '\n';
+            }
+            ImGui::SetClipboardText(joined.c_str());
+        };
+        // Join every recent line.  Same shape as copy_visible_to_clipboard
+        // but without the filter gate -- used by the "Copy all" menu item.
+        auto copy_all_to_clipboard = [&] {
+            std::string joined;
+            size_t capacity = 0;
+            for (const auto& ln : g_ui.console_lines) capacity += ln.size() + 1;
+            joined.reserve(capacity);
+            for (const auto& ln : g_ui.console_lines) {
+                joined += ln;
+                joined += '\n';
+            }
+            ImGui::SetClipboardText(joined.c_str());
         };
 
         ImGui::Separator();
@@ -154,6 +206,22 @@ void draw_console_window() {
             if (ImGui::BeginPopupContextItem("##line_menu")) {
                 if (ImGui::MenuItem("Copy line")) {
                     ImGui::SetClipboardText(line.c_str());
+                }
+                ImGui::Separator();
+                // Build menu labels with the active counts so the user
+                // knows what they're about to copy before clicking.
+                // std::to_string is the cheapest path that doesn't pull in
+                // <cstdio> / <format>; the labels live only one frame.
+                const std::string cv_label = "Copy visible (" +
+                                             std::to_string(visible_count) + " / " +
+                                             std::to_string(total_count) + ")";
+                const std::string ca_label =
+                    "Copy all (" + std::to_string(total_count) + ")";
+                if (ImGui::MenuItem(cv_label.c_str(), nullptr, false, visible_count > 0)) {
+                    copy_visible_to_clipboard();
+                }
+                if (ImGui::MenuItem(ca_label.c_str(), nullptr, false, total_count > 0)) {
+                    copy_all_to_clipboard();
                 }
                 ImGui::EndPopup();
             }
