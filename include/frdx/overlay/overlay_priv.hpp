@@ -203,12 +203,10 @@ struct UiState {
     // catalogue chatter, which drowns out the overlay / GPU debug lines you
     // actually want while reversing.  Toggle from the filter row in the
     // console window's title bar.
-    bool console_filter_errors    = true;
-    bool console_filter_warnings  = true;
-    bool console_filter_overlay   = true;
-    bool console_filter_dualsense = false;
-    bool console_filter_radio     = false;
-    bool console_filter_normal    = true;
+    // The 7 coarse category gates (Errors / Warnings / Overlay / DualSense
+    // / Radio / Normal) were dropped when the Subsystems popup became the
+    // single source of truth for line visibility; kind still classifies each
+    // line, but only as a color hint via console_line_color(kind).
     bool console_filter_dedup     = false;
     // Substring search across the filtered log.  Empty == no filter.  Capped
     // at 127 printable chars (sizeof(buffer)-1) for stable ImGui InputText

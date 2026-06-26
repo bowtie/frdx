@@ -12,9 +12,13 @@ using namespace frdx;
 // be muted independently.  Without this, "[overlay] WARN foo" would be
 // classified as warn and the user's "Overlay" checkbox could not suppress
 // it, defeating the per-category filter.  In the subsystem-filter rework
-// classify_console_line is UNCHANGED: it still drives the 7 coarse category
-// checkboxes.  The per-subsystem filter is *additive* and is evaluated by
-// passes_filter() against a precomputed id parallel to console_lines.
+// classify_console_line is UNCHANGED: ConsoleLineKind classification is now
+// a color hint only via console_line_color(kind) — the 6 coarse category
+// checkboxes that used to gate visibility were dropped (kept Dedup as a
+// presentation toggle -- see the filter-row comment in draw_console_window
+// for the rationale).  The per-subsystem filter is *additive* and is
+// evaluated by passes_filter() against a precomputed id parallel to
+// console_lines.
 //
 // This split is intentional: classify_console_line has the right priority
 // order (subsystem-prefix-before-keyword) for KIND classification, while
@@ -152,29 +156,14 @@ void draw_console_window() {
             s_last_dedup_state          = dedup;
         }
 
-        // Per-kind category gate (the 7 coarse checkboxes in the filter
-        // row).  Per-subsystem + text-search filters are evaluated by
-        // passes_filter below because they're per-line and don't map to
-        // a category enum.
-        auto visible_kind = [](ConsoleLineKind k) {
-            switch (k) {
-                case ConsoleLineKind::error:     return g_ui.console_filter_errors;
-                case ConsoleLineKind::warn:      return g_ui.console_filter_warnings;
-                case ConsoleLineKind::overlay:   return g_ui.console_filter_overlay;
-                case ConsoleLineKind::dualsense: return g_ui.console_filter_dualsense;
-                case ConsoleLineKind::radio:     return g_ui.console_filter_radio;
-                case ConsoleLineKind::normal:    return g_ui.console_filter_normal;
-            }
-            return true;
-        };
-        // Combined per-line filter: category ∧ subsystem ∧ text-search.
-        // Zero heap allocation — subsystem is one index lookup, text is
-        // one strchr/strstr over the cached buffer.
+        // Combined per-line filter: subsystem visible AND text-search matches.
+        // Subsystem default-mute via the Subsystems (V / M muted) popup;
+        // text-search via the Search InputText.  Both *plus* the recently
+        // dropped 6 coarse category checkboxes (Errors / Warnings /
+        // Overlay / DualSense / Radio / Normal): kind classification is
+        // now a *color* hint only, set in console_line_color(kind) and
+        // consulted nowhere in the visibility path.
         auto passes_filter = [&](size_t line_idx) -> bool {
-            const ConsoleLineKind k = line_idx < g_ui.console_line_kinds.size()
-                                          ? g_ui.console_line_kinds[line_idx]
-                                          : ConsoleLineKind::normal;
-            if (!visible_kind(k)) return false;
             const uint16_t sid = line_idx < g_ui.console_subsystem_id.size()
                                      ? g_ui.console_subsystem_id[line_idx]
                                      : UINT16_MAX;
@@ -207,18 +196,19 @@ void draw_console_window() {
         }
 
         // ── Filter row (under the native titlebar) ───────────────────
-        ImGui::Checkbox("Errors", &g_ui.console_filter_errors);
-        ImGui::SameLine();
-        ImGui::Checkbox("Warnings", &g_ui.console_filter_warnings);
-        ImGui::SameLine();
-        ImGui::Checkbox("Overlay", &g_ui.console_filter_overlay);
-        ImGui::SameLine();
-        ImGui::Checkbox("DualSense", &g_ui.console_filter_dualsense);
-        ImGui::SameLine();
-        ImGui::Checkbox("Radio", &g_ui.console_filter_radio);
-        ImGui::SameLine();
-        ImGui::Checkbox("Normal", &g_ui.console_filter_normal);
-        ImGui::SameLine();
+        // Dedup (left, kept — it is a presentation toggle, not a
+        // visibility filter; collapses consecutive duplicate lines so a
+        // [shoutcast] / [fmod] scan burst doesn't dominate the buffer) +
+        // Subsystems (N / M muted) popup + substring Search + Pause
+        // auto-scroll + counter + Clear (right).  The 6 coarse category
+        // checkboxes (Errors / Warnings / Overlay / DualSense / Radio /
+        // Normal) dropped when the Subsystems popup became the single
+        // source of truth for line visibility; ConsoleLineKind now
+        // drives ONLY console_line_color(kind), not line visibility, so
+        // dropping those checkboxes is a clean simplification — the
+        // per-subsystem filter is evaluated by the same passes_filter()
+        // the user already learned from the popup's toggle feedback, so
+        // no new mental model is being introduced.
         ImGui::Checkbox("Dedup", &g_ui.console_filter_dedup);
         ImGui::SameLine();
 
@@ -262,10 +252,11 @@ void draw_console_window() {
                     std::snprintf(label, sizeof(label), "[%s]%s", s->name.c_str(),
                                   s->visible ? "" : " (muted)");
                     // Checkbox (not MenuItem) so the interaction shape
-                    // matches the 7 coarse category checkboxes above —
-                    // same hover/click affordance = easier to learn.
-                    // Writes back to the durable SubsystemState::visible
-                    // field; no map entry is created just by rendering.
+                    // matches the surviving Dedup checkbox in the filter
+                    // row above — same hover/click affordance = easier
+                    // to learn.  Writes back to the durable
+                    // SubsystemState::visible field; no map entry is
+                    // created just by rendering.
                     ImGui::Checkbox(label, &s->visible);
                 }
             }
@@ -275,13 +266,13 @@ void draw_console_window() {
         // Substring search.  Width 180 px fits beside the rest of the
         // controls at the typical 760-wide console window.
         ImGui::SetNextItemWidth(140.0f);
-        // Hint explicitly says the search combines with the subsystem /
-        // category filters (AND) — so a muted `[shoutcast]` line still
-        // hides even when the user types `ERROR`.  Without this hint the
-        // AND semantics reads as a missing-feature bug.  Width shrunk
-        // from 180 -> 140 px so the filter row (7 coarse checkboxes +
-        // Subsystems + Search + Pause auto-scroll + counter + Clear)
-        // fits within the typical 760px panel without SameLine overflow.
+        // Hint explicitly says the search combines with the subsystem
+        // filter (AND) — so a muted `[shoutcast]` line still hides even
+        // when the user types `ERROR`.  Without this hint the AND
+        // semantics reads as a missing-feature bug.  Width kept at
+        // 140 px so the filter row (Dedup + Subsystems + Search +
+        // Pause auto-scroll + counter + Clear) fits within the
+        // typical 760px panel without SameLine overflow.
         ImGui::InputTextWithHint("##console_search", "Search (mute-aware)...",
                                  g_ui.console_filter_text_search,
                                  sizeof(g_ui.console_filter_text_search));
