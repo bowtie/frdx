@@ -482,6 +482,29 @@ static bool recreate_blur_textures(UINT width, UINT height, DXGI_FORMAT format) 
     return true;
 }
 
+// Human-readable name for the DXGI formats we expect to encounter, so the
+// "backbuffer format N is not supported" log lines carry enough info to
+// identify the format without grep'ing the DXGI enum table.  Defaults to
+// a placeholder for anything not enumerated -- the format value is still
+// in the log line so debugging is possible even off-list.
+static const char* dxgi_format_name(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_UNKNOWN:               return "DXGI_FORMAT_UNKNOWN";
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:     return "DXGI_FORMAT_R8G8B8A8_TYPELESS";
+        case DXGI_FORMAT_R8G8B8A8_UNORM:        return "DXGI_FORMAT_R8G8B8A8_UNORM";
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:   return "DXGI_FORMAT_R8G8B8A8_UNORM_SRGB";
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:     return "DXGI_FORMAT_B8G8R8A8_TYPELESS";
+        case DXGI_FORMAT_B8G8R8A8_UNORM:        return "DXGI_FORMAT_B8G8R8A8_UNORM";
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:   return "DXGI_FORMAT_B8G8R8A8_UNORM_SRGB";
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:  return "DXGI_FORMAT_R10G10B10A2_TYPELESS";
+        case DXGI_FORMAT_R10G10B10A2_UNORM:     return "DXGI_FORMAT_R10G10B10A2_UNORM";
+        case DXGI_FORMAT_R10G10B10A2_UINT:      return "DXGI_FORMAT_R10G10B10A2_UINT";
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS: return "DXGI_FORMAT_R16G16B16A16_TYPELESS";
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:    return "DXGI_FORMAT_R16G16B16A16_FLOAT";
+        default:                                return "DXGI_FORMAT_(unmapped)";
+    }
+}
+
 // Backdrop blur requires a format that supports both
 // PIXEL_SHADER_RESOURCE AND RENDER_TARGET.  All four 8-bit SDR formats
 // (the common DXGI defaults) work as before.  HDR10 swapchains use
@@ -513,9 +536,16 @@ void init_backdrop_blur(ID3D12CommandQueue* /*queue*/, UINT width, UINT height,
         log::warn("[overlay] init_backdrop_blur called before D3D12 heap ready");
         return;
     }
+    // Log the detected format (int + name) BEFORE the supported-check so a
+    // future "format N is not supported" WARN carries enough context to
+    // identify the format without grep'ing the DXGI enum.  Forza Horizon 6
+    // presents R10G10B10A2_UNORM regardless of Windows display HDR mode --
+    // a plain "format 24" log line by itself would be a guessing game.
+    log::info("[overlay] backdrop blur init: swapchain format {} ({})",
+              static_cast<unsigned>(format), dxgi_format_name(format));
     if (!is_supported_blur_format(format)) {
-        log::warn("[overlay] backdrop blur disabled: backbuffer format {} is not supported",
-                  static_cast<unsigned>(format));
+        log::warn("[overlay] backdrop blur disabled: backbuffer format {} ({}) is not supported",
+                  static_cast<unsigned>(format), dxgi_format_name(format));
         return;
     }
     if (g_dx.blur_root_sig && g_dx.blur_pso && g_dx.blur_format == format) {
@@ -537,9 +567,13 @@ void init_backdrop_blur(ID3D12CommandQueue* /*queue*/, UINT width, UINT height,
 
 void resize_backdrop_blur(ID3D12CommandQueue* /*queue*/, UINT width, UINT height,
                           DXGI_FORMAT format) {
+    // Same context-for-the-gate treatment as init_backdrop_blur(): log the
+    // format (int + name) so a WARN line on resize is self-explanatory.
+    log::info("[overlay] backdrop blur resize: swapchain format {} ({})",
+              static_cast<unsigned>(format), dxgi_format_name(format));
     if (!is_supported_blur_format(format)) {
-        log::warn("[overlay] resize_backdrop_blur called with unsupported format {}; "
-                  "skipping recreate", static_cast<unsigned>(format));
+        log::warn("[overlay] resize_backdrop_blur called with unsupported format {} ({}); "
+                  "skipping recreate", static_cast<unsigned>(format), dxgi_format_name(format));
         return;
     }
     if (!g_dx.blur_ready || g_dx.blur_width != width || g_dx.blur_height != height ||
