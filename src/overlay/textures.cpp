@@ -483,14 +483,28 @@ static bool recreate_blur_textures(UINT width, UINT height, DXGI_FORMAT format) 
 }
 
 // Backdrop blur requires a format that supports both
-// PIXEL_SHADER_RESOURCE AND RENDER_TARGET.  HDR / float backbuffer formats
-// (R10G10B10A2, R16G16B16A16_FLOAT, etc.) fail CreateRenderTargetView or
-// shader sampling.  Bail out gracefully on those.
+// PIXEL_SHADER_RESOURCE AND RENDER_TARGET.  All four 8-bit SDR formats
+// (the common DXGI defaults) work as before.  HDR10 swapchains use
+// R10G10B10A2 (UNORM + TYPELESS aliased views) -- the standard 30-bit
+// XR-HDR backbuffer; sampling as Texture2D<float4> returns normalised
+// [0,1] floats, blending is format-agnostic.  HDR16 FLOAT swapchains
+// (R16G16B16A16_FLOAT, used by Hollywood-grade engines) round-trip
+// through the blur pipeline natively -- sample/load both return raw
+// float with no conversion, so HDR > 1.0 energy is preserved through
+// the blur and arrives at the ImGui AddImageRounded call still in
+// float space.  Both HDR families have been feature-level-supported
+// for SRV + RTV since DX12 11_0, so the prior "fail CreateRenderTargetView
+// or shader sampling" remark is stale -- formats like NV12 / YUY2 / depth
+// are still rejected by is_supported_blur_format by virtue of NOT being
+// added here.
 static bool is_supported_blur_format(DXGI_FORMAT format) {
     return format == DXGI_FORMAT_R8G8B8A8_UNORM ||
            format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
            format == DXGI_FORMAT_B8G8R8A8_UNORM ||
-           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+           format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+           format == DXGI_FORMAT_R10G10B10A2_TYPELESS ||
+           format == DXGI_FORMAT_R10G10B10A2_UNORM ||
+           format == DXGI_FORMAT_R16G16B16A16_FLOAT;
 }
 
 void init_backdrop_blur(ID3D12CommandQueue* /*queue*/, UINT width, UINT height,
