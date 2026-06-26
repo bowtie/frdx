@@ -67,7 +67,7 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
         auto* fresh          = static_cast<std::byte*>(
             VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
         if (!fresh) {
-            log::warn("[meta] VirtualAlloc failed for {} bytes", bytes);
+            log::warn("[shoutcast] VirtualAlloc failed for {} bytes", bytes);
             return false;
         }
         unique_virtual mem{fresh}; // RAII: auto-frees on failure paths
@@ -106,7 +106,7 @@ void MetadataInjector::set_target(std::byte* sample_props_body) noexcept {
     if (body_ == sample_props_body) return;
     body_ = sample_props_body;
     reset_cache();
-    log::info("[meta] target set to SampleProperties body @0x{:X}",
+    log::info("[shoutcast] target set to SampleProperties body @0x{:X}",
               reinterpret_cast<uintptr_t>(body_));
 }
 
@@ -125,7 +125,7 @@ std::expected<void, MetadataInjectorError> MetadataInjector::update(std::string_
         if (write_string_slot(body_ + kTitleOffset, title)) {
             last_title_.assign(title);
         } else {
-            log::warn("[meta] title write failed (len={})", title.size());
+            log::warn("[shoutcast] title write failed (len={})", title.size());
             ok = false;
         }
     }
@@ -133,12 +133,12 @@ std::expected<void, MetadataInjectorError> MetadataInjector::update(std::string_
         if (write_string_slot(body_ + kArtistOffset, artist)) {
             last_artist_.assign(artist);
         } else {
-            log::warn("[meta] artist write failed (len={})", artist.size());
+            log::warn("[shoutcast] artist write failed (len={})", artist.size());
             ok = false;
         }
     }
     if (ok) {
-        log::info(R"([meta] wrote "{}" / "{}")", title, artist);
+        log::info(R"([shoutcast] wrote "{}" / "{}")", title, artist);
         return {};
     }
     return std::unexpected{MetadataInjectorError::write_failed};
