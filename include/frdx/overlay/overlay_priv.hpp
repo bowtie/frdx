@@ -152,7 +152,11 @@ struct StationComboCache {
     const void* source_ptr = nullptr;
 };
 
-enum class ConsoleLineKind : uint8_t { normal, error, warn, overlay, dualsense };
+// Source-subsystem tag for a log line.  Drives the per-category filter in
+// the console window (`g_ui.console_filter_*`); "radio" lumps the FMOD
+// discovery / control-loop chatter that floods the log while RE work is
+// going on, so it has its own (default-muted) filter.
+enum class ConsoleLineKind : uint8_t { normal, error, warn, overlay, dualsense, radio };
 enum class ToastKind : uint8_t { info, success, warn };
 
 struct Toast {
@@ -188,6 +192,16 @@ struct UiState {
     std::vector<std::string> console_lines;
     std::vector<ConsoleLineKind> console_line_kinds;
     uint64_t console_log_generation = 0;
+    // Per-category filter for the console window.  "radio" and "dualsense"
+    // are muted by default — those subsystems flood the log with routine
+    // catalogue chatter, which drowns out the overlay / GPU debug lines you
+    // actually want while reversing.  Toggle from the filter row in the
+    // console window's title bar.
+    bool console_filter_errors    = true;
+    bool console_filter_warnings  = true;
+    bool console_filter_overlay   = true;
+    bool console_filter_dualsense = false;
+    bool console_filter_radio     = false;
     std::deque<Toast> toasts;
     std::vector<dualsense::ControllerDevice> dualsense_devices;
     dualsense::RuntimeStatus helper_status;
