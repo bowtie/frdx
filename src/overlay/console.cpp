@@ -258,10 +258,15 @@ void draw_console_window() {
                               return a->name < b->name;
                           });
                 for (auto* s : sorted) {
-                    char item[48];
-                    std::snprintf(item, sizeof(item), "[%s]%s", s->name.c_str(),
+                    char label[48];
+                    std::snprintf(label, sizeof(label), "[%s]%s", s->name.c_str(),
                                   s->visible ? "" : " (muted)");
-                    ImGui::MenuItem(item, nullptr, &s->visible);
+                    // Checkbox (not MenuItem) so the interaction shape
+                    // matches the 7 coarse category checkboxes above —
+                    // same hover/click affordance = easier to learn.
+                    // Writes back to the durable SubsystemState::visible
+                    // field; no map entry is created just by rendering.
+                    ImGui::Checkbox(label, &s->visible);
                 }
             }
             ImGui::EndPopup();
@@ -280,21 +285,31 @@ void draw_console_window() {
         ImGui::InputTextWithHint("##console_search", "Search (mute-aware)...",
                                  g_ui.console_filter_text_search,
                                  sizeof(g_ui.console_filter_text_search));
+        // Escape clears the search field.  ImGui InputText does NOT
+        // auto-clear on Escape by default, so wire it explicitly while
+        // the field is active.  Mirrors IDE search convention.
+        if (ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            g_ui.console_filter_text_search[0] = '\0';
+        }
         ImGui::SameLine();
         // Pause auto-scroll — when ticked, new log lines still arrive but
         // scroll position is left alone.  Renamed from "Pause" so the
         // intent is obvious (we have other things that auto-scroll).
         ImGui::Checkbox("Pause auto-scroll", &g_ui.console_filter_pause_scroll);
 
-        // Right-aligned counter + Clear button.
-        const std::string counter_text =
-            std::to_string(shown_count) + " / " + std::to_string(total_lines) + " recent";
-        const float counter_w    = ImGui::CalcTextSize(counter_text.c_str()).x;
+        // Right-aligned counter + Clear button.  Using a char buffer
+        // instead of std::string avoids the 2 std::to_string allocs + 3
+        // string concatenations every frame — nanomatter, but the buffer
+        // fits in a register anyway and null-terminates cleanly.
+        char counter_text[32];
+        std::snprintf(counter_text, sizeof(counter_text), "%zu / %zu recent",
+                      shown_count, total_lines);
+        const float counter_w    = ImGui::CalcTextSize(counter_text).x;
         const float clear_w      = ImGui::CalcTextSize("Clear").x +
                                    ImGui::GetStyle().FramePadding.x * 2.0f;
         const float row_max_x    = ImGui::GetContentRegionMax().x;
         ImGui::SameLine(row_max_x - clear_w - counter_w - 8.0f);
-        ImGui::TextDisabled("%s", counter_text.c_str());
+        ImGui::TextDisabled("%s", counter_text);
         ImGui::SameLine();
         if (ImGui::SmallButton("Clear")) {
             log::clear_recent();
@@ -336,6 +351,20 @@ void draw_console_window() {
 
         ImGui::Separator();
         ImGui::BeginChild("##console_scroll", ImVec2(0.0f, 0.0f), false);
+        // Empty-state hint when filters hide every line.  Without this
+        // the panel renders entirely blank and the user can't tell whether
+        // the buffer is empty or whether the filters ate everything.
+        if (shown_count == 0 && total_lines > 0) {
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            const char* msg = "No lines match current filters";
+            const ImVec2 text_size = ImGui::CalcTextSize(msg);
+            const ImVec2 window_size = ImGui::GetContentRegionAvail();
+            ImGui::SetCursorPos(ImVec2((window_size.x - text_size.x) * 0.5f,
+                                        window_size.y * 0.4f));
+            ImGui::TextUnformatted(msg);
+            ImGui::PopStyleColor();
+        }
         const bool stick_to_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         const float wrap_width = ImGui::GetContentRegionAvail().x;
         for (size_t line_idx = 0; line_idx < g_ui.console_lines.size(); ++line_idx) {
