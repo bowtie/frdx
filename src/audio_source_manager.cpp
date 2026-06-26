@@ -23,9 +23,9 @@ void AudioSourceManager::set_source(IAudioSource* src) {
     if (src) {
         active_.store(src, std::memory_order_release);
         src->play();
-        log::info("[mgr] active source = '{}'", src->name());
+        log::info("[shoutcast] active source = '{}'", src->name());
     } else {
-        log::info("[mgr] source deactivated");
+        log::info("[shoutcast] source deactivated");
     }
 }
 
@@ -35,8 +35,7 @@ void AudioSourceManager::shutdown() {
 
     prev->pause();
     ring_.drain();
-    prev->shutdown();
-    log::info("[mgr] source shut down");
+    prev->shutdown();        log::info("[shoutcast] source shut down");
 }
 
 void AudioSourceManager::pump_once() {
