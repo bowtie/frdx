@@ -157,6 +157,11 @@ struct StationComboCache {
 // discovery / control-loop chatter that floods the log while RE work is
 // going on, so it has its own (default-muted) filter.
 enum class ConsoleLineKind : uint8_t { normal, error, warn, overlay, dualsense, radio };
+// Per-subsystem filter state.  Built incrementally as subsystems are
+// discovered in log lines; never shrinks so muted entries that fall out
+// of the 500-line buffer keep their row in the popup and remain
+// re-enableable.
+struct SubsystemState { std::string name; bool visible = true; };
 enum class ToastKind : uint8_t { info, success, warn };
 
 struct Toast {
@@ -205,6 +210,24 @@ struct UiState {
     bool console_filter_radio     = false;
     bool console_filter_normal    = true;
     bool console_filter_dedup     = false;
+    // Substring search across the filtered log.  Empty == no filter.  Capped
+    // at 127 printable chars (sizeof(buffer)-1) for stable ImGui InputText
+    // handling; ImGui never writes an unterminated buffer so a check on
+    // index 0 is sufficient to know if the search is active.
+    char console_filter_text_search[128] = {};
+    // When ticked, new log lines still arrive but scroll position is left
+    // alone — no SetScrollHereY(1.0f).  Useful for reading mid-scroll during
+    // FMOD scan floods without losing your place.
+    bool console_filter_pause_scroll = false;
+    // Durable subsystem registry — see SubsystemState above.  Each entry's
+    // index is its stable 16-bit id; parallel `console_subsystem_id` stores
+    // each line's id (UINT16_MAX = no subsystem) so passes_filter() is an
+    // O(1) lookup with NO heap allocation on the render thread.  Refresh
+    // inserts new ids but never removes them — muted subsystems that fall
+    // out of the 500-line buffer stay in the registry for re-enabling.
+    std::vector<SubsystemState> console_subsystems;
+    std::unordered_map<std::string, uint16_t> console_subsystem_index;
+    std::vector<uint16_t> console_subsystem_id;
     std::deque<Toast> toasts;
     std::vector<dualsense::ControllerDevice> dualsense_devices;
     dualsense::RuntimeStatus helper_status;
