@@ -92,4 +92,10 @@ std::vector<std::string> recent_lines() noexcept {
     return {g_recent.begin(), g_recent.end()};
 }
 
+void clear_recent() noexcept {
+    std::scoped_lock lk{g_mu};
+    g_recent.clear();
+    g_recent_generation.fetch_add(1, std::memory_order_release);
+}
+
 } // namespace frdx::log

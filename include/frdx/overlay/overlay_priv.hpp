@@ -191,6 +191,7 @@ struct UiState {
     std::string combo_prev_label;
     std::vector<std::string> console_lines;
     std::vector<ConsoleLineKind> console_line_kinds;
+    std::vector<size_t> console_line_counts;
     uint64_t console_log_generation = 0;
     // Per-category filter for the console window.  "radio" and "dualsense"
     // are muted by default — those subsystems flood the log with routine
@@ -202,6 +203,8 @@ struct UiState {
     bool console_filter_overlay   = true;
     bool console_filter_dualsense = false;
     bool console_filter_radio     = false;
+    bool console_filter_normal    = true;
+    bool console_filter_dedup     = false;
     std::deque<Toast> toasts;
     std::vector<dualsense::ControllerDevice> dualsense_devices;
     dualsense::RuntimeStatus helper_status;
