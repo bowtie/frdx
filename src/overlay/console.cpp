@@ -232,7 +232,7 @@ void draw_console_window() {
                           ? "Subsystems (%zu / %zu muted)##console_subsys_btn"
                           : "Subsystems (%zu)##console_subsys_btn",
                       visible_sub_count, muted_sub_count);
-        if (ImGui::SmallButton(subsys_label)) ImGui::OpenPopup("##subsys_popup");
+        if (ImGui::Button(subsys_label)) ImGui::OpenPopup("##subsys_popup");
         if (ImGui::BeginPopup("##subsys_popup")) {
             if (g_ui.console_subsystems.empty()) {
                 // Two distinct empty states so the user isn't confused
@@ -334,7 +334,7 @@ void draw_console_window() {
         ImGui::SameLine(row_max_x - clear_w - counter_w - 8.0f);
         ImGui::TextDisabled("%s", counter_text);
         ImGui::SameLine();
-        if (ImGui::SmallButton("Clear")) {
+        if (ImGui::Button("Clear")) {
             log::clear_recent();
             g_ui.console_log_generation       = UINT64_MAX;
             g_ui.console_lines.clear();
