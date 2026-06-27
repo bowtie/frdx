@@ -147,6 +147,7 @@ void draw_toasts() {
         ImGui::Begin(window_name, nullptr, flags);
         // Backdrop blur, faded with the toast's enter/exit animation.
         draw_backdrop_blur(alpha);
+        const int blur_widget_pushes = push_blur_widget_styles(alpha);
         ImGui::PushTextWrapPos(390.0f);
         ImGui::TextColored(toast_color(it->kind), "%s", it->title.c_str());
         if (!it->detail.empty()) {
@@ -154,6 +155,7 @@ void draw_toasts() {
         }
         ImGui::PopTextWrapPos();
         y += (top ? 1.0f : -1.0f) * (ImGui::GetWindowSize().y + 8.0f);
+        pop_blur_widget_styles(blur_widget_pushes);
         ImGui::End();
         ImGui::PopStyleVar(2);
     }

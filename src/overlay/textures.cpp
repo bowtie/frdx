@@ -701,6 +701,64 @@ void draw_backdrop_blur(float alpha_scalar) {
                                     static_cast<int>(tint_a * 255.0f));
         dl->AddRectFilled(p_min, p_max, tint, rounding);
     }
+
+    // 3) A translucent glass-edge border, drawn as part of the backdrop
+    //    compositing (not ImGui's built-in window border, which is opaque).
+    //    Brighten the tint colour so the edge reads as a subtle highlight.
+    const float border_a = 0.45f * alpha;
+    if (border_a > 0.0f) {
+        const float br = std::clamp(cfg.blur_tint_r + 0.20f, 0.0f, 1.0f);
+        const float bg = std::clamp(cfg.blur_tint_g + 0.20f, 0.0f, 1.0f);
+        const float bb = std::clamp(cfg.blur_tint_b + 0.20f, 0.0f, 1.0f);
+        const ImU32 border =
+            IM_COL32(static_cast<int>(br * 255.0f), static_cast<int>(bg * 255.0f),
+                     static_cast<int>(bb * 255.0f), static_cast<int>(border_a * 255.0f));
+        dl->AddRect(p_min, p_max, border, rounding, 0, 1.0f);
+    }
+}
+
+int push_blur_widget_styles(float alpha_scalar) {
+    if (!g_ctx.store) return 0;
+    auto cfg = g_ctx.store->snapshot().overlay;
+    if (!cfg.blur_enabled) return 0;
+    if (cfg.blur_widget_opacity >= 1.0f) return 0;
+    if (alpha_scalar <= 0.0f) return 0;
+
+    const float scale =
+        std::clamp(cfg.blur_widget_opacity, 0.0f, 1.0f) * std::clamp(alpha_scalar, 0.0f, 1.0f);
+
+    auto push_scaled = [&](ImGuiCol col) {
+        ImVec4 c = ImGui::GetStyleColorVec4(col);
+        c.w *= scale;
+        ImGui::PushStyleColor(col, c);
+    };
+
+    push_scaled(ImGuiCol_Button);
+    push_scaled(ImGuiCol_ButtonHovered);
+    push_scaled(ImGuiCol_ButtonActive);
+    push_scaled(ImGuiCol_FrameBg);
+    push_scaled(ImGuiCol_FrameBgHovered);
+    push_scaled(ImGuiCol_FrameBgActive);
+    push_scaled(ImGuiCol_Tab);
+    push_scaled(ImGuiCol_TabHovered);
+    push_scaled(ImGuiCol_TabActive);
+    push_scaled(ImGuiCol_TabUnfocused);
+    push_scaled(ImGuiCol_TabUnfocusedActive);
+    push_scaled(ImGuiCol_Header);
+    push_scaled(ImGuiCol_HeaderHovered);
+    push_scaled(ImGuiCol_HeaderActive);
+    push_scaled(ImGuiCol_ScrollbarBg);
+    push_scaled(ImGuiCol_ScrollbarGrab);
+    push_scaled(ImGuiCol_ScrollbarGrabHovered);
+    push_scaled(ImGuiCol_ScrollbarGrabActive);
+    push_scaled(ImGuiCol_Separator);
+    push_scaled(ImGuiCol_SeparatorHovered);
+    push_scaled(ImGuiCol_SeparatorActive);
+    return 21;
+}
+
+void pop_blur_widget_styles(int pushed_count) {
+    if (pushed_count > 0) ImGui::PopStyleColor(pushed_count);
 }
 
 } // namespace frdx::overlay

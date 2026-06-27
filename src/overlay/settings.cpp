@@ -113,6 +113,18 @@ void draw_general_settings_tab() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("0 = pure blur, 1 = solid tint colour");
         }
+
+        label_row("Widget Opacity");
+        float widget_opacity = std::clamp(cfg.overlay.blur_widget_opacity, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("##blur_widget_opacity", &widget_opacity, 0.0f, 1.0f, "%.2f")) {
+            widget_opacity = std::clamp(widget_opacity, 0.0f, 1.0f);
+            g_ctx.store->patch(
+                [&](Config& c) { c.overlay.blur_widget_opacity = widget_opacity; });
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("1 = opaque widgets (blur only in gaps), 0 = invisible widgets");
+        }
     }
 
     ImGui::EndTable();
@@ -153,9 +165,11 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
+    int blur_widget_pushes = 0;
     if (ImGui::Begin("##Settings", nullptr, flags)) {
         // Backdrop blur, faded with the popup open/close + cursor alpha.
         draw_backdrop_blur(eased * g_ui.interactive_draw_alpha);
+        blur_widget_pushes = push_blur_widget_styles(eased * g_ui.interactive_draw_alpha);
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {
@@ -186,6 +200,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
         }
         mark_overlay_mouse_region();
     }
+    pop_blur_widget_styles(blur_widget_pushes);
     ImGui::End();
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(3);

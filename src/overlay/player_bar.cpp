@@ -76,6 +76,18 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
 
     const float rounding = 6.0f;
 
+    // When blur is on, disable ImGui's built-in opaque window border —
+    // draw_backdrop_blur() composites a translucent glass-edge border as
+    // part of the backdrop instead.
+    bool blur_border = false;
+    if (g_ctx.store) {
+        auto cfg = g_ctx.store->snapshot().overlay;
+        if (cfg.blur_enabled && g_ui.interactive_draw_alpha > 0.0f) {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            blur_border = true;
+        }
+    }
+
     ImGuiWindowFlags barFlags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar |
                                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
@@ -86,6 +98,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // Dual-Kawase backdrop blur — first thing inside Begin so widget chrome
     // sits on top of the blurred scene.  Fades with the cursor.
     draw_backdrop_blur(g_ui.interactive_draw_alpha);
+    const int blur_widget_pushes = push_blur_widget_styles(g_ui.interactive_draw_alpha);
 
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
     const float btn_w     = 27.0f;
@@ -397,8 +410,12 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     layout.size       = ImGui::GetWindowSize();
 
     mark_overlay_mouse_region();
+    pop_blur_widget_styles(blur_widget_pushes);
     ImGui::End();
     ImGui::PopStyleVar();
+    if (blur_border) {
+        ImGui::PopStyleVar();
+    }
 
     return layout;
 }
@@ -458,9 +475,11 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
     ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
+    int stations_blur_pushes = 0;
     if (ImGui::Begin("##Stations", nullptr, stFlags)) {
         // Backdrop blur, faded with the popup open/close + cursor alpha.
         draw_backdrop_blur(eased * g_ui.interactive_draw_alpha);
+        stations_blur_pushes = push_blur_widget_styles(eased * g_ui.interactive_draw_alpha);
         auto [active_st, active_str] = sc_st->active_station_stream();
         {
             frdx::ScopedLock lk{g_station_switch.mutex};
@@ -527,6 +546,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
 
         mark_overlay_mouse_region();
     }
+    pop_blur_widget_styles(stations_blur_pushes);
     ImGui::End();
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(3);

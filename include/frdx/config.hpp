@@ -47,6 +47,11 @@ struct OverlayConfig {
     float blur_tint_g       = 0.08f;
     float blur_tint_b       = 0.10f;
     float blur_tint_opacity = 0.35f;
+    // Scales the alpha of widget backgrounds (Button, FrameBg, Tab, Header,
+    // Scrollbar, Separator) when blur is enabled, so the frosted glass shows
+    // through the controls instead of being hidden behind fully-opaque widgets.
+    // 1.0 = opaque widgets (blur only visible in padding), 0.0 = invisible.
+    float blur_widget_opacity = 0.6f;
 };
 
 struct DualSenseConfig {

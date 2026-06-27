@@ -399,6 +399,13 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
 // fades the backdrop with the cursor; pass -1.0f to suppress.
 void draw_backdrop_blur(float alpha_scalar = 1.0f);
 
+// When blur is enabled, pushes modified ImGui style colors with widget
+// background alphas scaled by blur_widget_opacity so the frosted glass shows
+// through the controls.  Returns the number of PushStyleColor calls made
+// (pass to pop_blur_widget_styles).  No-op (returns 0) when blur is off.
+int push_blur_widget_styles(float alpha_scalar);
+void pop_blur_widget_styles(int pushed_count);
+
 // CPU-waits for every tracked direct command queue (other than `self`,
 // which the caller is about to submit into) to flush.
 void wait_for_other_queues_sync(ID3D12CommandQueue* self);
