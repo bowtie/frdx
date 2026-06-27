@@ -99,7 +99,6 @@ void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     bool local_open = true;
     if (ImGui::Begin("FRDX Console##frdx_console", &local_open, flags)) {
-        draw_backdrop_blur(1.0f);
 
         // ── Refresh from the global logger (with optional dedup). ────
         // When log generation bumps OR the dedup toggle flips, we rebuild

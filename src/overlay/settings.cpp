@@ -70,46 +70,6 @@ void draw_general_settings_tab() {
         g_ctx.store->patch([&](Config& c) { c.overlay.console_visible = show_log; });
     }
 
-    // ── Backdrop blur (real CSS-style backdrop-filter:blur on overlay windows) ──
-    label_row("Backdrop Blur");
-    bool blur = cfg.overlay.blur_enabled;
-    if (ImGui::Checkbox("##blur_enabled", &blur)) {
-        g_ctx.store->patch([&](Config& c) { c.overlay.blur_enabled = blur; });
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "Blurs the actual game scene under each ImGui window \xe2\x80\x94 CSS-style "
-            "backdrop-filter:blur(). Has a small performance cost.");
-    }
-
-    if (cfg.overlay.blur_enabled) {
-        label_row("Blur Strength");
-        int strength = cfg.overlay.blur_strength;
-        ImGui::SetNextItemWidth(-1.0f);
-        if (ImGui::SliderInt("##blur_strength", &strength, 1, 15)) {
-            g_ctx.store->patch([&](Config& c) { c.overlay.blur_strength = strength; });
-        }
-
-        label_row("Blur Tint");
-        ImVec4 tint = ImVec4(cfg.overlay.blur_tint_r, cfg.overlay.blur_tint_g,
-                              cfg.overlay.blur_tint_b, cfg.overlay.blur_tint_a);
-        ImGui::SetNextItemWidth(-1.0f);
-        if (ImGui::ColorEdit4("##blur_tint", &tint.x,
-                              ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs)) {
-            g_ctx.store->patch([&](Config& c) {
-                c.overlay.blur_tint_r = tint.x;
-                c.overlay.blur_tint_g = tint.y;
-                c.overlay.blur_tint_b = tint.z;
-                c.overlay.blur_tint_a = tint.w;
-            });
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "RGBA tint multiplied onto the blurred scene. Alpha acts as a "
-                "global backdrop opacity.\nStrength = 9-tap Gaussian radius multiplier.");
-        }
-    }
-
     ImGui::EndTable();
 }
 
@@ -149,8 +109,6 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
-        // Backdrop blur under the settings panel — fades with cursor too.
-        draw_backdrop_blur(g_ui.interactive_draw_alpha);
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {

@@ -166,12 +166,6 @@ void post_resize(IDXGISwapChain* swapChain) {
 
     ImGui_ImplDX12_CreateDeviceObjects();
 
-    // Re-allocate backdrop blur textures at the new resolution.  The RTV
-    // heap is sized desc.BufferCount+1 at init so blurred_rtv_index stays
-    // valid; recreate_blur_textures() will pick it up.
-    resize_backdrop_blur(nullptr, desc.BufferDesc.Width, desc.BufferDesc.Height,
-                         desc.BufferDesc.Format);
-
     re_log::info("recovered DX12 backbuffer RTV resources after resize");
 }
 
@@ -241,14 +235,11 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         return false;
     }
 
-    if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.BufferCount + 1,
+    if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.BufferCount,
                               false)) {
         re_log::error("failed to create RTV descriptor heap!");
         return false;
     }
-    // Slot [BufferCount] is reserved for the blurred_tex RTV that the
-    // backdrop-blur pipeline creates during init_backdrop_blur().
-    g_dx.blurred_rtv_index = desc.BufferCount;
 
     // Command allocators
     g_dx.allocators.resize(desc.BufferCount);
@@ -344,10 +335,6 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // Load optional background image for sandbox visual testing
     load_background_texture(active_queue);
 
-    // Backdrop blur pipeline — CSS-style blurred scene under overlay windows.
-    init_backdrop_blur(active_queue, desc.BufferDesc.Width, desc.BufferDesc.Height,
-                       desc.BufferDesc.Format);
-
     return true;
 }
 
@@ -375,7 +362,6 @@ void cleanup_imgui_resources() {
     g_ui.bg_texture_id     = 0;
     g_ui.bg_texture_width  = 0;
     g_ui.bg_texture_height = 0;
-    release_backdrop_blur();
     g_dx.srv_heap.reset();
     g_dx.rtv_heap.reset();
     // Release the overlay's reference to the shared device.
@@ -454,9 +440,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
 
         // CPU-wait for every other direct queue the game uses to finish its
-        // most recent submission before we capture the backbuffer.  Without
-        // this, capture_and_blur_backbuffer() can race 3D writes submitted
-        // to a non-present direct queue that haven't completed yet.
+        // most recent submission before we touch the backbuffer.
         wait_for_other_queues_sync(active_queue);
 
         // Transition backbuffer from PRESENT to RENDER_TARGET for ImGui rendering.
@@ -465,20 +449,6 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             transition_barrier(bb, D3D12_RESOURCE_STATE_PRESENT,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
         g_dx.cmd_list->ResourceBarrier(1, &to_render_target);
-        // Mark the swapchain backbuffer state so capture_and_blur_backbuffer
-        // can transition off RENDER_TARGET without re-emitting the
-        // PRESENT→RENDER_TARGET barrier.
-        g_dx.bb_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-
-        // Capture the (now-render-target) backbuffer into our copy texture,
-        // then run the 9-tap Gaussian blur into a half-res RTV.  Leaves
-        // the backbuffer in RENDER_TARGET and blurred_tex in
-        // PIXEL_SHADER_RESOURCE so ImGui can sample it via AddImage later.
-        if (!capture_and_blur_backbuffer(g_dx.cmd_list.get(), bb)) {
-            // If the user has backdrop blur disabled, the helper still
-            // returns true but performs no work.  False is a hard pipeline
-            // error; we still proceed so ImGui can draw.
-        }
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
@@ -501,10 +471,6 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             transition_barrier(g_dx.fb_bufs[backBufferIdx].get(),
                                D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
         g_dx.cmd_list->ResourceBarrier(1, &barrier);
-        // Now the backbuffer has been put into PRESENT state on the GPU;
-        // mirror that in our tracker so next frame's capture pipeline can
-        // reason about backwards-into-COPY_SOURCE correctly.
-        g_dx.bb_state = D3D12_RESOURCE_STATE_PRESENT;
 
         g_dx.cmd_list->Close();
 
@@ -783,13 +749,10 @@ void shutdown() noexcept {
 
 // ── ID3D12CommandQueue::ExecuteCommandLists hook + multi-queue sync ───
 // Forza can submit 3D rendering onto direct queues other than the
-// present queue.  capture_and_blur_backbuffer() copies the swapchain
-// backbuffer on the present queue; without sync, the copy can race
-// against in-flight 3D writes on a parallel queue, producing garbage
-// (or undefined) content.  We hook every queue's ExecuteCommandLists
-// and signal a per-queue fence after the submission.  Before the
-// present-queue blur capture, we CPU-wait for every queued fence value
-// (skipping the present queue to avoid a self-deadlock).
+// present queue.  We hook every queue's ExecuteCommandLists and signal a
+// per-queue fence after the submission.  Callers can CPU-wait for every
+// queued fence value (skipping the present queue to avoid a self-deadlock)
+// before submitting dependent work.
 
 void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
                                          ID3D12CommandList* const* ppCommandLists) {

@@ -105,41 +105,6 @@ struct DxResources {
     std::vector<UINT64> allocator_fence_values;
     std::vector<wil::com_ptr<ID3D12Resource>> fb_bufs;
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> fb_rtvs;
-
-    // ── Backdrop blur pipeline ──
-    // Real CSS-style backdrop-filter:blur().  Each frame:
-    //   1. capture_and_blur_backbuffer(cmd, bb) copies the swapchain
-    //      backbuffer (post 3D scene) into bb_capture_tex, then renders
-    //      a 9-tap Gaussian into blurred_tex at half resolution.
-    //   2. draw_backdrop_blur() in each ImGui window samples
-    //      blurred_tex as the window backdrop.
-    //
-    // Slot layout: 0 = ImGui font, 1 = bg_texture, 2 = bb_capture_tex
-    // SRV, 3 = blurred_tex SRV.  RTV heap sized desc.BufferCount+1 —
-    // slot desc.BufferCount holds the blurred render target.
-    static constexpr UINT kCaptureSrvSlot = 2;
-    static constexpr UINT kBlurredSrvSlot = 3;
-    UINT  blurred_rtv_index = 0;     // rtv_heap slot for blurred_tex
-    wil::com_ptr<ID3D12Resource> bb_capture_tex;
-    wil::com_ptr<ID3D12Resource> blurred_tex;
-    D3D12_CPU_DESCRIPTOR_HANDLE blurred_rtv_cpu{};
-    D3D12_CPU_DESCRIPTOR_HANDLE capture_srv_cpu{};
-    D3D12_GPU_DESCRIPTOR_HANDLE capture_srv_gpu{};
-    D3D12_CPU_DESCRIPTOR_HANDLE blurred_srv_cpu{};
-    D3D12_GPU_DESCRIPTOR_HANDLE blurred_srv_gpu{};
-    DXGI_FORMAT blur_format = DXGI_FORMAT_UNKNOWN;
-    UINT        blur_width  = 0;
-    UINT        blur_height = 0;
-    wil::com_ptr<ID3D12PipelineState>  blur_pso;
-    wil::com_ptr<ID3D12RootSignature>  blur_root_sig;
-    bool blur_ready = false;
-    // Tracked resource states for the backdrop blur resources, used by the
-    // helper `transition_to(...)` in textures.cpp to skip same-state barriers
-    // and avoid D3D12 validation-layer errors.  `bb_state` tracks the
-    // backbuffer across the capture-and-blur sequence each frame.
-    D3D12_RESOURCE_STATES bb_state         = D3D12_RESOURCE_STATE_PRESENT;
-    D3D12_RESOURCE_STATES bb_capture_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    D3D12_RESOURCE_STATES blurred_state    = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 };
 
 
@@ -260,16 +225,12 @@ struct SwapchainMap {
 };
 extern SwapchainMap g_sc;
 
-// ── Multi-queue GPU sync for backdrop blur capture ────────────────────
+// ── Multi-queue GPU sync ───────────────────────────────────────────────
 // The game can submit 3D work to direct queues that are NOT the present
-// queue.  capture_and_blur_backbuffer() copies the swapchain backbuffer
-// on the present queue; without sync, the copy may race 3D writes that
-// are still in flight on a parallel queue, producing undefined contents.
-//
-// We hook every ID3D12CommandQueue::ExecuteCommandLists and signal a
-// per-queue fence after the submission.  Before the present-queue blur
-// capture, we CPU-wait on every tracked fence (skipping self to avoid
-// deadlock) so the backbuffer is fully rendered when we copy it.
+// queue.  We hook every ID3D12CommandQueue::ExecuteCommandLists and signal a
+// per-queue fence after the submission so callers can CPU-wait on every
+// tracked fence (skipping self to avoid deadlock) before submitting
+// dependent work.
 struct QueueSyncState {
     wil::com_ptr<ID3D12Fence> fence;
     HANDLE event = nullptr;
@@ -384,29 +345,9 @@ void load_overlay_font();
 void load_background_texture(ID3D12CommandQueue* queue);
 
 // CPU-waits for every tracked direct command queue (other than `self`,
-// which the caller is about to submit into) to flush.  Used before the
-// backdrop blur's CopyResource so we always capture a fully-rendered frame.
+// which the caller is about to submit into) to flush.
 void wait_for_other_queues_sync(ID3D12CommandQueue* self);
 
-// Backdrop blur — real CSS-style backdrop-filter:blur() on overlay windows.
-// Captures the swapchain backbuffer, runs a 9-tap Gaussian into a half-res
-// texture.  draw_backdrop_blur() adds the result as the backdrop of the
-// current ImGui window (must be called between Begin/End).
-void init_backdrop_blur(ID3D12CommandQueue* queue, UINT width, UINT height, DXGI_FORMAT format);
-void resize_backdrop_blur(ID3D12CommandQueue* queue, UINT width, UINT height, DXGI_FORMAT format);
-void release_backdrop_blur();
-
-// Run the capture-from-backbuffer + blur dispatch.  Returns false if the
-// pipeline isn't initialised yet.  Issues no queue submissions, just
-// records GPU work into `cmd` (which the caller is expected to submit).
-bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuffer);
-
-// Adds the current blurred scene as a rounded-rect AddImage below the
-// current ImGui window.  No-op if blur is disabled / failed to load.
-// Default alpha_scalar=1.0f; pass g_ui.interactive_draw_alpha to fade the
-// backdrop with the cursor; pass -1.0f to suppress (e.g. for the log
-// window which never fades).
-void draw_backdrop_blur(float alpha_scalar = 1.0f);
 void enqueue_action(std::function<void()> action);
 void save_active_shoutcast_station(IAudioSource* active);
 void wait_for_all_overlay_work();

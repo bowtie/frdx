@@ -28,19 +28,6 @@ struct OverlayConfig {
     bool music_notifications_enabled  = true;
     std::string notification_position = "top_left";
     bool console_visible = false;
-
-    // Real CSS-style `backdrop-filter: blur()` on the overlay windows.
-    // Captures the swapchain backbuffer (post-3D scene) into a full-res
-    // texture, downsamples + 9-tap Gaussian-blurs it into a half-res
-    // texture, and ImGui samples that as the window backdrop at every
-    // Begin.  Disabled by default for performance; switch on via the
-    // Settings > Backdrop Blur section.
-    bool blur_enabled = false;
-    int blur_strength = 8;        // 0..15 (9-tap radius scaling)
-    float blur_tint_r = 1.00f;    // 0..1 tint R
-    float blur_tint_g = 1.00f;    // 0..1 tint G
-    float blur_tint_b = 1.00f;    // 0..1 tint B
-    float blur_tint_a = 0.85f;    // 0..1 tint A
 };
 
 struct DualSenseConfig {
