@@ -21,6 +21,12 @@ force_stereo_audio = true   # off => mono + FMOD_2D (clean 3D spatialisation)
 theme = "bess_dark"              # bess_dark, tokyo_night
 music_notifications_enabled = true
 notification_position = "top_left" # top_left, top_center, top_right, bottom_left, bottom_center, bottom_right
+blur_enabled = false             # Dual-Kawase backdrop blur behind overlay panels
+blur_strength = 5                # 1..15 (downsample iterations + sample offset)
+blur_tint_r = 0.08               # frosted-glass tint colour over the blur (0..1)
+blur_tint_g = 0.08
+blur_tint_b = 0.10
+blur_tint_opacity = 0.35         # 0 = pure blur, 1 = solid tint colour
 
 [dualsense]
 enabled = false             # native HID adaptive triggers; set Forza Data Out to this UDP port

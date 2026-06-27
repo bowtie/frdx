@@ -28,6 +28,25 @@ struct OverlayConfig {
     bool music_notifications_enabled  = true;
     std::string notification_position = "top_left";
     bool console_visible = false;
+
+    // Real CSS-style `backdrop-filter: blur()` behind the overlay panels.
+    // Implemented as a Dual-Kawase blur (the same algorithm KWin uses): the
+    // swapchain backbuffer is captured, run through a downsample + upsample
+    // mip chain, and ImGui composites the result behind each window.  The
+    // strength slider (1..15) maps to a curated {downsample-iterations,
+    // sample-offset} curve ported from KWin's BlurEffect.  Disabled by
+    // default for performance; toggle via Settings > General.
+    bool blur_enabled = false;
+    int blur_strength = 5; // 1..15
+    // Frosted-glass tint drawn over the blurred backdrop.  The blur alone is
+    // an undimmed copy of the scene, so opaque widgets sitting on it look
+    // disconnected and bright scenes wash out the panel; a translucent tint
+    // gives the panel a surface to sit on.  RGB in 0..1, opacity in 0..1
+    // (0 = pure blur, 1 = solid colour).
+    float blur_tint_r       = 0.08f;
+    float blur_tint_g       = 0.08f;
+    float blur_tint_b       = 0.10f;
+    float blur_tint_opacity = 0.35f;
 };
 
 struct DualSenseConfig {

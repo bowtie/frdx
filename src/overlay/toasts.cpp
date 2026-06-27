@@ -145,6 +145,8 @@ void draw_toasts() {
         char window_name[32];
         std::snprintf(window_name, sizeof(window_name), "##frdx_toast_%d", idx);
         ImGui::Begin(window_name, nullptr, flags);
+        // Backdrop blur, faded with the toast's enter/exit animation.
+        draw_backdrop_blur(alpha);
         ImGui::PushTextWrapPos(390.0f);
         ImGui::TextColored(toast_color(it->kind), "%s", it->title.c_str());
         if (!it->detail.empty()) {

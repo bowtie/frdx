@@ -83,6 +83,10 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, rounding);
     ImGui::Begin("Forza Radio DX", nullptr, barFlags);
 
+    // Dual-Kawase backdrop blur — first thing inside Begin so widget chrome
+    // sits on top of the blurred scene.  Fades with the cursor.
+    draw_backdrop_blur(g_ui.interactive_draw_alpha);
+
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
     const float btn_w     = 27.0f;
     const float btn_h     = 24.0f;
@@ -455,6 +459,8 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Stations", nullptr, stFlags)) {
+        // Backdrop blur, faded with the popup open/close + cursor alpha.
+        draw_backdrop_blur(eased * g_ui.interactive_draw_alpha);
         auto [active_st, active_str] = sc_st->active_station_stream();
         {
             frdx::ScopedLock lk{g_station_switch.mutex};

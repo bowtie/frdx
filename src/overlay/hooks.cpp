@@ -166,6 +166,10 @@ void post_resize(IDXGISwapChain* swapChain) {
 
     ImGui_ImplDX12_CreateDeviceObjects();
 
+    // Re-allocate the blur mip-chain textures at the new resolution (the
+    // PSOs/root signature survive and are reused).
+    resize_backdrop_blur(desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+
     re_log::info("recovered DX12 backbuffer RTV resources after resize");
 }
 
@@ -235,8 +239,10 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         return false;
     }
 
-    if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, desc.BufferCount,
-                              false)) {
+    // RTV heap holds the backbuffer RTVs plus kBlurMaxLevels extra slots for
+    // the dual-Kawase blur mip chain (which live past the backbuffer RTVs).
+    if (!g_dx.rtv_heap.create(g_dx.device.get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+                              desc.BufferCount + DxResources::kBlurMaxLevels, false)) {
         re_log::error("failed to create RTV descriptor heap!");
         return false;
     }
@@ -335,6 +341,9 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // Load optional background image for sandbox visual testing
     load_background_texture(active_queue);
 
+    // Build the dual-Kawase backdrop blur pipeline + mip-chain textures.
+    init_backdrop_blur(desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+
     return true;
 }
 
@@ -347,6 +356,8 @@ void cleanup_imgui_resources() {
         }
         g_sc.cache3_ref().clear();
     }
+    release_backdrop_blur();
+
     g_dx.fb_bufs.clear();
     g_dx.fb_rtvs.clear();
 
@@ -449,6 +460,11 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             transition_barrier(bb, D3D12_RESOURCE_STATE_PRESENT,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
         g_dx.cmd_list->ResourceBarrier(1, &to_render_target);
+
+        // Dual-Kawase backdrop blur: capture the freshly-rendered backbuffer
+        // (now in RENDER_TARGET) and run the down/up-sample passes into
+        // blur_tex[0].  No-op when disabled.  Restores bb to RENDER_TARGET.
+        capture_and_blur_backbuffer(g_dx.cmd_list.get(), bb);
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 

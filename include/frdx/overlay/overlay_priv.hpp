@@ -9,6 +9,7 @@
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/audio_source.hpp"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -105,6 +106,40 @@ struct DxResources {
     std::vector<UINT64> allocator_fence_values;
     std::vector<wil::com_ptr<ID3D12Resource>> fb_bufs;
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> fb_rtvs;
+
+    // ── Dual-Kawase backdrop blur ──
+    // KWin-style dual Kawase: capture the swapchain backbuffer into a
+    // full-res texture (blur_tex[0]), downsample it through a mip chain
+    // (blur_tex[1..N], each half the previous size) using the 5-tap Kawase
+    // downsample kernel, then upsample back to full res with the 8-tap
+    // upsample kernel.  blur_tex[0] holds the final blurred image, which
+    // draw_backdrop_blur() composites behind each ImGui window.
+    //
+    // We allocate the maximum mip count once (iterationCount maxes out at 4,
+    // so 5 textures) and only walk the first (iterationCount + 1) levels per
+    // frame, so changing the strength slider never reallocates textures.
+    //
+    // Descriptor slots: SRV 0 = ImGui font, 1 = bg_texture, 2..6 = blur mip
+    // SRVs.  RTV heap is sized desc.BufferCount + kBlurMaxLevels; the blur
+    // RTVs live in the slots past the backbuffer RTVs (blur_rtv_base..).
+    static constexpr UINT kBlurMaxLevels   = 5;  // max iterationCount(4) + 1
+    static constexpr UINT kBlurSrvSlotBase = 2;  // SRV slots 2..6
+    std::array<wil::com_ptr<ID3D12Resource>, kBlurMaxLevels> blur_tex;
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, kBlurMaxLevels> blur_srv_cpu{};
+    std::array<D3D12_GPU_DESCRIPTOR_HANDLE, kBlurMaxLevels> blur_srv_gpu{};
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, kBlurMaxLevels> blur_rtv_cpu{};
+    std::array<UINT, kBlurMaxLevels> blur_level_w{};
+    std::array<UINT, kBlurMaxLevels> blur_level_h{};
+    // Per-level resource state, tracked so transition_to() can skip
+    // redundant same-state barriers (a D3D12 validation-layer error).
+    std::array<D3D12_RESOURCE_STATES, kBlurMaxLevels> blur_state{};
+    UINT        blur_rtv_base = 0;     // first RTV heap slot for the mip chain
+    UINT        blur_width    = 0;
+    UINT        blur_height   = 0;
+    DXGI_FORMAT blur_format   = DXGI_FORMAT_UNKNOWN;
+    wil::com_ptr<ID3D12RootSignature> blur_root_sig;
+    wil::com_ptr<ID3D12PipelineState> blur_down_pso, blur_up_pso;
+    bool blur_ready = false;
 };
 
 
@@ -343,6 +378,26 @@ void enqueue_station_switch(std::string station_id, std::string stream_id);
 bool wait_for_fence(UINT64 fence_value);
 void load_overlay_font();
 void load_background_texture(ID3D12CommandQueue* queue);
+
+// ── Dual-Kawase backdrop blur (KWin-style) ──
+// init/resize allocate the mip-chain textures + descriptors (and build the
+// PSOs/root signature on first init).  release tears it all down.  These
+// issue no queue submissions.
+void init_backdrop_blur(UINT width, UINT height, DXGI_FORMAT format);
+void resize_backdrop_blur(UINT width, UINT height, DXGI_FORMAT format);
+void release_backdrop_blur();
+
+// Records the capture-from-backbuffer + downsample/upsample dual-Kawase
+// passes into `cmd` (caller submits it).  Expects `backbuffer` to be in
+// RENDER_TARGET state and restores it to RENDER_TARGET before returning.
+// No-op (returns true) when blur is disabled; returns false only if the
+// pipeline isn't ready.
+bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuffer);
+
+// Composites the blurred backbuffer behind the current ImGui window (call
+// between Begin/End).  No-op when blur is disabled or not ready.  alpha_scalar
+// fades the backdrop with the cursor; pass -1.0f to suppress.
+void draw_backdrop_blur(float alpha_scalar = 1.0f);
 
 // CPU-waits for every tracked direct command queue (other than `self`,
 // which the caller is about to submit into) to flush.

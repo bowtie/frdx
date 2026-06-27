@@ -70,6 +70,51 @@ void draw_general_settings_tab() {
         g_ctx.store->patch([&](Config& c) { c.overlay.console_visible = show_log; });
     }
 
+    label_row("Backdrop Blur");
+    bool blur = cfg.overlay.blur_enabled;
+    if (ImGui::Checkbox("##backdrop_blur", &blur)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.blur_enabled = blur; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Dual-Kawase blur of the game scene behind the overlay panels");
+    }
+
+    if (blur) {
+        label_row("Blur Strength");
+        int strength = std::clamp(cfg.overlay.blur_strength, 1, 15);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderInt("##blur_strength", &strength, 1, 15)) {
+            strength = std::clamp(strength, 1, 15);
+            g_ctx.store->patch([&](Config& c) { c.overlay.blur_strength = strength; });
+        }
+
+        label_row("Tint Color");
+        float tint[3] = {cfg.overlay.blur_tint_r, cfg.overlay.blur_tint_g, cfg.overlay.blur_tint_b};
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::ColorEdit3("##blur_tint", tint,
+                              ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+            g_ctx.store->patch([&](Config& c) {
+                c.overlay.blur_tint_r = std::clamp(tint[0], 0.0f, 1.0f);
+                c.overlay.blur_tint_g = std::clamp(tint[1], 0.0f, 1.0f);
+                c.overlay.blur_tint_b = std::clamp(tint[2], 0.0f, 1.0f);
+            });
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Frosted-glass tint colour drawn over the blur");
+        }
+
+        label_row("Tint Opacity");
+        float tint_opacity = std::clamp(cfg.overlay.blur_tint_opacity, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::SliderFloat("##blur_tint_opacity", &tint_opacity, 0.0f, 1.0f, "%.2f")) {
+            tint_opacity = std::clamp(tint_opacity, 0.0f, 1.0f);
+            g_ctx.store->patch([&](Config& c) { c.overlay.blur_tint_opacity = tint_opacity; });
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("0 = pure blur, 1 = solid tint colour");
+        }
+    }
+
     ImGui::EndTable();
 }
 
@@ -109,6 +154,8 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
 
     if (ImGui::Begin("##Settings", nullptr, flags)) {
+        // Backdrop blur, faded with the popup open/close + cursor alpha.
+        draw_backdrop_blur(eased * g_ui.interactive_draw_alpha);
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {

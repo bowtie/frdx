@@ -96,6 +96,21 @@ Config load_config(const std::filesystem::path& path) {
         pick<bool>(ov, "music_notifications_enabled", cfg.overlay.music_notifications_enabled);
     cfg.overlay.notification_position = normalize_notification_position(
         pick<std::string>(ov, "notification_position", cfg.overlay.notification_position));
+    cfg.overlay.blur_enabled = pick<bool>(ov, "blur_enabled", cfg.overlay.blur_enabled);
+    cfg.overlay.blur_strength =
+        std::clamp(pick<int>(ov, "blur_strength", cfg.overlay.blur_strength), 1, 15);
+    cfg.overlay.blur_tint_r =
+        std::clamp(static_cast<float>(pick<double>(ov, "blur_tint_r", cfg.overlay.blur_tint_r)),
+                   0.0f, 1.0f);
+    cfg.overlay.blur_tint_g =
+        std::clamp(static_cast<float>(pick<double>(ov, "blur_tint_g", cfg.overlay.blur_tint_g)),
+                   0.0f, 1.0f);
+    cfg.overlay.blur_tint_b =
+        std::clamp(static_cast<float>(pick<double>(ov, "blur_tint_b", cfg.overlay.blur_tint_b)),
+                   0.0f, 1.0f);
+    cfg.overlay.blur_tint_opacity = std::clamp(
+        static_cast<float>(pick<double>(ov, "blur_tint_opacity", cfg.overlay.blur_tint_opacity)),
+        0.0f, 1.0f);
 
     const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -330,6 +345,12 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("music_notifications_enabled", cfg.overlay.music_notifications_enabled);
     e.kv("notification_position",
          normalize_notification_position(cfg.overlay.notification_position));
+    e.kv("blur_enabled", cfg.overlay.blur_enabled);
+    e.kv("blur_strength", static_cast<int64_t>(cfg.overlay.blur_strength));
+    e.kv("blur_tint_r", static_cast<double>(cfg.overlay.blur_tint_r));
+    e.kv("blur_tint_g", static_cast<double>(cfg.overlay.blur_tint_g));
+    e.kv("blur_tint_b", static_cast<double>(cfg.overlay.blur_tint_b));
+    e.kv("blur_tint_opacity", static_cast<double>(cfg.overlay.blur_tint_opacity));
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);
