@@ -164,6 +164,14 @@ void run_bridge(HMODULE self) noexcept {
     }
     maybe_launch_external_helper(dir, cfg.dualsense);
 
+    // If the helper is running from a previous session but triggers are now
+    // disabled, stop it — otherwise it keeps scanning for controllers with
+    // no game to feed it telemetry.
+    if (helper_already_running() && !dualsense_external_helper_should_launch(cfg.dualsense)) {
+        log::info("[dualsense] stopping stale external helper (triggers disabled in config)");
+        stop_external_helper();
+    }
+
     auto img = fmod_bridge::parse(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)));
     if (!img.valid()) {
         log::error("[bridge] failed to parse host PE image; aborting");
@@ -210,11 +218,16 @@ void run_bridge(HMODULE self) noexcept {
         }
         if (!sel_station.empty() && !sel_stream.empty()) {
             shoutcast->select_station(sel_station, sel_stream);
+            // select_station starts the ffmpeg pipe; pause() stops it so we
+            // don't buffer a stream with nowhere to go.  The user starts
+            // playback manually via the overlay's play button.
+            shoutcast->pause();
             store.patch([&](Config& c) {
                 c.shoutcast.last_station_id = sel_station;
                 c.shoutcast.last_stream_id  = sel_stream;
             });
-            log::info("[bridge] restored station '{}' stream '{}'", sel_station, sel_stream);
+            log::info("[bridge] restored station '{}' stream '{}' (paused; user starts playback)",
+                      sel_station, sel_stream);
         }
     }
 

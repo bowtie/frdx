@@ -147,7 +147,20 @@ public:
     // True while our currently-installed channel handle is still resolvable.
     // Goes false when FMOD destroys the channel without writing a fresh
     // handle to +0x20 (e.g. the placeholder sample reached its natural end).
+    // Used internally by the control loop for retarget/staleness decisions.
+    // NOT intended for per-frame UI gating — validate_handle() does an
+    // SEH-protected FMOD call that can flicker.  Use dsp_installed() for that.
     bool current_handle_alive() const noexcept;
+
+    // True when our DSP is installed on a FMOD channel.  Lightweight: just
+    // checks current_dsp_ != nullptr with no FMOD calls or SEH.  Use this
+    // for per-frame UI gating (overlay transport buttons, volume bar, etc.)
+    // instead of current_handle_alive().  The control loop's staleness
+    // watchdog keeps this accurate by detaching dead handles.
+    bool dsp_installed() const noexcept {
+        std::scoped_lock lk{dsp_mu_};
+        return current_dsp_ != nullptr;
+    }
 
     // True when `radio_stream`+0x20 holds a live, resolvable FMOD channel
     // handle. Lets the control loop prefer the instance actually carrying

@@ -94,3 +94,4 @@ poll_ms = 80                 # monitor poll interval (ms)
 enter_spammer = false        # auto-press Enter through post-skip prompts
 enter_interval_ms = 120      # Enter key interval while spamming (ms)
 enter_window_ms = 12000      # stop spamming this long after the skip (ms)
+mute_during_intro = true     # mute game audio during intro to avoid abrupt cut

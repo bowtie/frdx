@@ -200,7 +200,15 @@ void run_station_switch(const PendingStationSwitch& request) {
 
     shoutcast->select_station(request.station_id, request.stream_id);
     g_ctx.mgr->ring().drain();
-    shoutcast->play();
+    // Auto-play only if the FMOD DSP bridge is live.  Otherwise the station
+    // is just selected — the FMOD-ready transition will auto-play it.
+    const bool fmod_ready = g_ctx.bridge && g_ctx.bridge->dsp_installed();
+    if (fmod_ready) {
+        shoutcast->play();
+    } else {
+        log::info("[overlay] station '{}' selected; playback deferred until FMOD is ready",
+                  request.station_id);
+    }
     if (g_ctx.store) {
         g_ctx.store->patch([&](Config& c) {
             c.shoutcast.last_station_id = request.station_id;
@@ -304,6 +312,18 @@ void draw_imgui_ui_impl() {
     }
     auto* active = g_ctx.mgr->active();
 
+    // Auto-play once when FMOD first becomes ready.  A station may have been
+    // selected at startup or from the browser while FMOD wasn't ready yet.
+    // After the first auto-play, playback is entirely user-controlled —
+    // retargets (handle changes) must NOT re-trigger auto-play.
+    static bool s_auto_played = false;
+    const bool fmod_ready = g_ctx.bridge && g_ctx.bridge->dsp_installed();
+    if (fmod_ready && !s_auto_played && active) {
+        s_auto_played = true;
+        log::info("[overlay] FMOD became ready — auto-playing selected station");
+        enqueue_action([active] { active->play(); });
+    }
+
     // Track info cache - only calls current_track() when source or generation changes.
     static IAudioSource* s_track_source = nullptr;
     static uint64_t s_track_gen         = 0;
@@ -351,6 +371,15 @@ void draw_imgui_ui_impl() {
         s_toast_source = nullptr;
         s_toast_title.clear();
         s_toast_artist.clear();
+    }
+
+    // Suppress all interactive overlay UI (toasts, player bar, settings,
+    // stations) during the intro skip — showing it over the black screen /
+    // Bink video looks jarring.  The console (below) is independent and
+    // stays available for debugging.
+    if (!fastboot::intro_done()) {
+        draw_console_window();
+        return;
     }
 
     draw_toasts();

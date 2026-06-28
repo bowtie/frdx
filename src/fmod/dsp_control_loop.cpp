@@ -61,13 +61,22 @@ void ControlLoop::run(const std::stop_token& tok) {
         const bool busy = active && (active->playback_state() == PlaybackState::playing ||
                                      active->playback_state() == PlaybackState::buffering);
         if (busy && !was_busy && !target_acquired) next_discovery = now;
+        // Also trigger discovery when a source exists but is paused — we
+        // still need to hook the FMOD radio channel so it's ready when the
+        // user presses play.
+        const bool has_source = active != nullptr;
         if (!target_acquired && now >= next_discovery) {
+            // Use the fast retry (5s) when we have a source — the user may
+            // turn on the in-game radio at any time.  The 30s idle retry
+            // only applies when there's no source at all.
             target_acquired = acquire_target().has_value();
-            next_discovery  = now + (busy ? kDiscoveryRetry : kIdleDiscoveryRetry);
+            next_discovery  = now + (has_source ? kDiscoveryRetry : kIdleDiscoveryRetry);
         }
-        if (busy && target_acquired) {
+        // Keep the DSP installed as long as we have a source (even if paused)
+        // so the radio channel stays hooked and is ready when playback starts.
+        if (has_source && target_acquired) {
             bridge_.retarget_if_needed();
-        } else {
+        } else if (!has_source) {
             bridge_.detach();
         }
 
@@ -76,14 +85,14 @@ void ControlLoop::run(const std::stop_token& tok) {
             push_metadata();
         }
 
-        // Staleness watchdog: while a source is actively producing audio,
-        // FMOD's mixer should be invoking our read_callback every tick.
-        // If call_count() freezes and the channel handle is gone, the game
-        // may have reallocated the radio wrapper or the player may have turned
-        // the in-game radio off. Re-discover only; never force the game station
-        // back on from here.
+        // Staleness watchdog: while we have a source, FMOD's mixer should be
+        // invoking our read_callback (when playing) or at least keeping the
+        // channel handle alive.  If the handle dies — the game reallocated
+        // the radio wrapper or the player turned the in-game radio off and
+        // back on — re-discover so we reattach.  Runs for both playing and
+        // paused states so a handle death while paused is also caught.
         const std::uint64_t c = bridge_.call_count();
-        if (busy && c == prev_calls_) {
+        if (has_source && target_acquired && c == prev_calls_) {
             if (++stale_ticks_ >= kStaleTickThreshold) {
                 stale_ticks_ = 0;
                 if (!bridge_.current_handle_alive()) {

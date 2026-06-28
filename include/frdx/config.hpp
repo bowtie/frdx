@@ -134,6 +134,7 @@ struct FastBootConfig {
     bool enter_spammer    = false;
     int64_t enter_interval_ms = 120;
     int64_t enter_window_ms   = 12'000;
+    bool mute_during_intro = true;
 };
 
 struct Config {

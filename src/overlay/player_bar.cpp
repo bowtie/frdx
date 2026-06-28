@@ -101,6 +101,10 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     const int blur_widget_pushes = push_blur_widget_styles(g_ui.interactive_draw_alpha);
 
     const bool is_playing = active && active->playback_state() == PlaybackState::playing;
+    // The FMOD DSP bridge must be installed on a live channel before playback
+    // is meaningful — otherwise the shoutcast stream buffers but the audio has
+    // nowhere to go.  Disable transport until the radio channel is discovered.
+    const bool fmod_ready = g_ctx.bridge && g_ctx.bridge->dsp_installed();
     const float btn_w     = 27.0f;
     const float btn_h     = 24.0f;
 
@@ -312,7 +316,11 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::SameLine(0, 20);
 
     // ── Transport buttons ──
-    if (draw_icon_btn("##prev", "\u23EE") && active) {
+    // Dim and disable when FMOD isn't ready yet — clicking play would start a
+    // network stream that goes nowhere.
+    if (!fmod_ready) ImGui::BeginDisabled(true);
+
+    if (draw_icon_btn("##prev", "\u23EE") && active && fmod_ready) {
         g_ui.combo_switch_dir = -1;
         animate_station_combo_by(-1);
         enqueue_action([active] {
@@ -322,7 +330,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         });
     }
     ImGui::SameLine(0, 3);
-    if (draw_icon_btn("##play", is_playing ? "\u23F8" : "\u23F5") && active) {
+    if (draw_icon_btn("##play", is_playing ? "\u23F8" : "\u23F5") && active && fmod_ready) {
         enqueue_action([active, is_playing] {
             if (is_playing) {
                 active->pause();
@@ -334,7 +342,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         });
     }
     ImGui::SameLine(0, 3);
-    if (draw_icon_btn("##next", "\u23ED") && active) {
+    if (draw_icon_btn("##next", "\u23ED") && active && fmod_ready) {
         g_ui.combo_switch_dir = 1;
         animate_station_combo_by(1);
         enqueue_action([active] {
@@ -344,13 +352,27 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         });
     }
 
+    if (!fmod_ready) ImGui::EndDisabled();
+
     ImGui::SameLine(0, 20);
 
     // ── Volume progress bar (clickable + scroll) ──
+    // Read the configured gain from the config store, NOT bridge->gain().
+    // The control loop fades bridge->gain() to 0 on pause for smooth audio
+    // transitions, so reading the runtime gain would show 0% when paused and
+    // fighting the control loop when scrolling.
+    //
+    // Gated on `active` (source exists) rather than `fmod_ready` (DSP
+    // installed) because the volume writes to the config store, not the
+    // live DSP, so it's safe to adjust even before FMOD connects.
+    if (!active) ImGui::BeginDisabled(true);
     {
+        const float configured_gain = g_ctx.store
+            ? g_ctx.store->snapshot().audio.output_gain
+            : 1.0f;
         bool vol_active        = false;
-        float vol_pending_gain = 1.0f;
-        float gain_pct         = g_ctx.bridge->gain() * 100.0f;
+        float vol_pending_gain = configured_gain;
+        float gain_pct         = configured_gain * 100.0f;
         char label[16];
         std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
         ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(100.0f, btn_h), label);
@@ -358,13 +380,13 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         if (ImGui::IsItemHovered()) {
             float wheel = ImGui::GetIO().MouseWheel;
             if (wheel != 0.0f) {
-                float new_gain = std::clamp(g_ctx.bridge->gain() + wheel * 0.05f, 0.0f, 1.0f);
-                g_ctx.bridge->set_gain(new_gain);
+                float new_gain = std::clamp(configured_gain + wheel * 0.05f, 0.0f, 1.0f);
+                if (g_ctx.bridge) g_ctx.bridge->set_gain(new_gain);
                 g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_gain; });
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 vol_active       = true;
-                vol_pending_gain = g_ctx.bridge->gain();
+                vol_pending_gain = configured_gain;
             }
         }
 
@@ -374,12 +396,13 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             float mouse_x    = ImGui::GetMousePos().x;
             float new_val    = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
             vol_pending_gain = new_val;
-            g_ctx.bridge->set_gain(new_val);
+            if (g_ctx.bridge) g_ctx.bridge->set_gain(new_val);
         } else if (vol_active) {
             vol_active = false;
             g_ctx.store->patch([&](Config& c) { c.audio.output_gain = vol_pending_gain; });
         }
     }
+    if (!active) ImGui::EndDisabled();
 
     ImGui::SameLine(0, 3);
 

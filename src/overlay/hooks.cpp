@@ -376,10 +376,8 @@ void cleanup_imgui_resources() {
     g_dx.srv_heap.reset();
     g_dx.rtv_heap.reset();
     // Release the overlay's reference to the shared device.
-    // This device is the same COM object as the sandbox/game's dx.device
-    // (acquired via pSwapChain->GetDevice in hook_Present).  The sandbox's
-    // destroy_dx() still holds the final reference and will drop it to zero
-    // during host teardown — see sandbox_main.cpp cleanup step 7e.
+    // This device is the same COM object as the game's dx.device
+    // (acquired via pSwapChain->GetDevice in hook_Present).
     g_dx.device.reset();
 }
 
@@ -388,9 +386,9 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
     if (!g_ui.is_init) {
         // Acquire a shared reference to the host's ID3D12Device via the
         // swapchain.  GetDevice() AddRef's — this is the same COM object
-        // as the sandbox/game's dx.device pointer.  The overlay releases
-        // its reference in cleanup_imgui_resources(); the host drops the
-        // final reference in destroy_dx().
+        // as the game's dx.device pointer.  The overlay releases
+        // its reference in cleanup_imgui_resources(); the game drops the
+        // final reference on shutdown.
         ID3D12Device* rawDev = nullptr;
         if (SUCCEEDED(
                 pSwapChain->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&rawDev))) &&

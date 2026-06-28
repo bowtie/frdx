@@ -263,6 +263,8 @@ Config load_config(const std::filesystem::path& path) {
         std::clamp(pick<int64_t>(fb, "enter_interval_ms", cfg.fastboot.enter_interval_ms), 10LL, 5000LL);
     cfg.fastboot.enter_window_ms =
         std::clamp(pick<int64_t>(fb, "enter_window_ms", cfg.fastboot.enter_window_ms), 1000LL, 60'000LL);
+    cfg.fastboot.mute_during_intro =
+        pick<bool>(fb, "mute_during_intro", cfg.fastboot.mute_during_intro);
 
     return cfg;
 }
@@ -440,6 +442,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("enter_spammer", cfg.fastboot.enter_spammer);
     e.kv("enter_interval_ms", cfg.fastboot.enter_interval_ms);
     e.kv("enter_window_ms", cfg.fastboot.enter_window_ms);
+    e.kv("mute_during_intro", cfg.fastboot.mute_during_intro);
 
     auto tmp  = path;
     tmp      += ".tmp";

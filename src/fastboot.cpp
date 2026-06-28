@@ -5,10 +5,14 @@
 #include "frdx/config.hpp"
 #include "frdx/log.hpp"
 
+#include <wil/com.h>
+
 #include <MinHook.h>
 
 #include <windows.h>
 #include <psapi.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
 
 #include <atomic>
 #include <cstdint>
@@ -30,6 +34,96 @@ std::filesystem::path exe_dir() {
     const DWORD n = GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
     if (n == 0) return {};
     return std::filesystem::path(std::wstring_view(buf, n)).parent_path();
+}
+
+// ───────────────────────── per-process audio mute ─────────────────────────
+// Mutes the game process via the Windows Core Audio API (ISimpleAudioVolume).
+// This silences the Bink intro video's audio so the clock-jump skip doesn't
+// produce an abrupt audio cut.  Unmuted when intro_done fires.
+
+bool g_was_muted = false;  // tracks whether we currently have the process muted
+
+bool set_process_mute(bool mute) {
+    // CoInitialize is needed for COM; the game already has it, but be safe.
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool uninit = SUCCEEDED(hr);
+    // RPC_E_CHANGED_MODE means the thread already has a different COM apartment;
+    // that's fine — the call still works.
+
+    wil::com_ptr_nothrow<IMMDeviceEnumerator> enum_;
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                          IID_PPV_ARGS(enum_.put()));
+    if (FAILED(hr) || !enum_) {
+        if (uninit) CoUninitialize();
+        return false;
+    }
+
+    wil::com_ptr_nothrow<IMMDevice> device;
+    hr = enum_->GetDefaultAudioEndpoint(eRender, eConsole, device.put());
+    if (FAILED(hr) || !device) {
+        if (uninit) CoUninitialize();
+        return false;
+    }
+
+    wil::com_ptr_nothrow<IAudioSessionManager2> mgr;
+    hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                          reinterpret_cast<void**>(mgr.put()));
+    if (FAILED(hr) || !mgr) {
+        if (uninit) CoUninitialize();
+        return false;
+    }
+
+    wil::com_ptr_nothrow<IAudioSessionEnumerator> sessions;
+    hr = mgr->GetSessionEnumerator(sessions.put());
+    if (FAILED(hr) || !sessions) {
+        if (uninit) CoUninitialize();
+        return false;
+    }
+
+    const DWORD our_pid = GetCurrentProcessId();
+    int count = 0;
+    sessions->GetCount(&count);
+    int muted_count = 0;
+    for (int i = 0; i < count; ++i) {
+        wil::com_ptr_nothrow<IAudioSessionControl> ctrl;
+        hr = sessions->GetSession(i, ctrl.put());
+        if (FAILED(hr) || !ctrl) continue;
+
+        wil::com_ptr_nothrow<IAudioSessionControl2> ctrl2;
+        hr = ctrl->QueryInterface(IID_PPV_ARGS(ctrl2.put()));
+        if (FAILED(hr) || !ctrl2) continue;
+
+        DWORD pid = 0;
+        ctrl2->GetProcessId(&pid);
+        if (pid != our_pid) continue;
+
+        wil::com_ptr_nothrow<ISimpleAudioVolume> vol;
+        hr = ctrl->QueryInterface(IID_PPV_ARGS(vol.put()));
+        if (FAILED(hr) || !vol) continue;
+
+        hr = vol->SetMute(mute ? TRUE : FALSE, nullptr);
+        if (SUCCEEDED(hr)) ++muted_count;
+    }
+
+    if (uninit) CoUninitialize();
+    return muted_count > 0;
+}
+
+void mute_game_process() {
+    if (set_process_mute(true)) {
+        g_was_muted = true;
+        frdx::log::info("[fastboot] muted game process for intro skip");
+    }
+    // Don't log failure here — it's called in a retry loop and will log
+    // once it succeeds.  The absence of the success log is the signal.
+}
+
+void unmute_game_process() {
+    if (!g_was_muted) return;
+    if (set_process_mute(false)) {
+        g_was_muted = false;
+        frdx::log::info("[fastboot] unmuted game process (intro done)");
+    }
 }
 
 // ───────────────────────── virtual clock (RCU snapshot) ─────────────────────────
@@ -239,6 +333,7 @@ void hk_bkclose(intptr_t b) {
     if (is_intro) {
         g_intro_closed.store(true, std::memory_order_relaxed);
         g_intro_done.store(true, std::memory_order_release);
+        unmute_game_process();
     }
     if (is_intro || (kVerbose && boot_window())) {
         int64_t el = now_ms() - g_start_ms.load(std::memory_order_relaxed);
@@ -413,6 +508,13 @@ void monitor() {
         int64_t t = now_ms();
         int64_t el = t - t0;
 
+        // Retry the process mute until it succeeds — the game may not have
+        // created audio sessions yet when hooks are first installed (FMOD/
+        // Bink not initialized).  Once muted, stop retrying.
+        if (g_cfg.mute_during_intro && !g_was_muted && !done) {
+            mute_game_process();
+        }
+
         uint64_t cum = read_bytes();
         uint64_t q = g_qpc_n.load(std::memory_order_relaxed);
         uint64_t dq = q - pq;
@@ -474,6 +576,7 @@ void monitor() {
                 done = true;
                 disarm_t = t;
                 g_intro_done.store(true, std::memory_order_release);
+                unmute_game_process();
                 g_watch_files.store(false, std::memory_order_relaxed);
                 char buf[256];
                 snprintf(buf, sizeof(buf),
@@ -519,6 +622,7 @@ void monitor() {
                             done = true;
                             disarm_t = t;
                             g_intro_done.store(true, std::memory_order_release);
+                            unmute_game_process();
                             g_watch_files.store(false, std::memory_order_relaxed);
                             char buf[256];
                             snprintf(buf, sizeof(buf),
@@ -604,7 +708,16 @@ DWORD WINAPI worker(LPVOID) {
     MH_Initialize();
     install_hooks();
     frdx::log::info("[fastboot] hooks enabled");
+
+    // Mute the game process during the intro to avoid the abrupt audio cut
+    // from the clock-jump skip.  Unmuted when intro_done fires (in monitor).
+    // The mute is retried in the monitor loop because the game may not have
+    // created any audio sessions yet at this point (FMOD/Bink not initialized).
     monitor();
+
+    // Safety: ensure we unmute even if the monitor exits without setting
+    // intro_done (e.g. timeout, crash in another thread).
+    unmute_game_process();
     return 0;
 }
 
