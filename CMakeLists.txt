@@ -30,6 +30,7 @@ add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
 
 add_library(version SHARED
     src/proxy/dll_main.cpp
+    src/fastboot.cpp
     src/bridge.cpp
     src/log.cpp
     src/config.cpp
@@ -108,6 +109,7 @@ set_target_properties(version PROPERTIES
 # real draw_imgui_ui() runs identically.
 add_executable(frdx_sandbox
     src/sandbox_main.cpp
+    src/fastboot.cpp
     src/bridge.cpp
     src/log.cpp
     src/config.cpp

@@ -126,12 +126,23 @@ struct DualSenseConfig {
     std::string controller_lock_serial;
 };
 
+struct FastBootConfig {
+    bool enabled          = true;
+    std::string intro_video = "T10_MS_Combined";
+    int64_t jump_ms       = 30'000;
+    uint32_t poll_ms      = 80;
+    bool enter_spammer    = false;
+    int64_t enter_interval_ms = 120;
+    int64_t enter_window_ms   = 12'000;
+};
+
 struct Config {
     GeneralConfig general;
     ShoutcastConfig shoutcast;
     AudioConfig audio;
     OverlayConfig overlay;
     DualSenseConfig dualsense;
+    FastBootConfig fastboot;
 };
 
 // Missing file is fine, defaults are returned.

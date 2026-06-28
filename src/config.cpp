@@ -248,6 +248,22 @@ Config load_config(const std::filesystem::path& path) {
     cfg.dualsense.controller_lock_serial =
         pick<std::string>(ds, "controller_lock_serial", cfg.dualsense.controller_lock_serial);
 
+    const auto& fb = section(root, "fastboot");
+    cfg.fastboot.enabled =
+        pick<bool>(fb, "enabled", cfg.fastboot.enabled);
+    cfg.fastboot.intro_video =
+        pick<std::string>(fb, "intro_video", cfg.fastboot.intro_video);
+    cfg.fastboot.jump_ms =
+        std::clamp(pick<int64_t>(fb, "jump_ms", cfg.fastboot.jump_ms), 1000LL, 120'000LL);
+    cfg.fastboot.poll_ms =
+        static_cast<uint32_t>(std::clamp(pick<int>(fb, "poll_ms", static_cast<int>(cfg.fastboot.poll_ms)), 10, 1000));
+    cfg.fastboot.enter_spammer =
+        pick<bool>(fb, "enter_spammer", cfg.fastboot.enter_spammer);
+    cfg.fastboot.enter_interval_ms =
+        std::clamp(pick<int64_t>(fb, "enter_interval_ms", cfg.fastboot.enter_interval_ms), 10LL, 5000LL);
+    cfg.fastboot.enter_window_ms =
+        std::clamp(pick<int64_t>(fb, "enter_window_ms", cfg.fastboot.enter_window_ms), 1000LL, 60'000LL);
+
     return cfg;
 }
 
@@ -415,6 +431,15 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("enable_reconnect", cfg.dualsense.enable_reconnect);
     e.kv("reconnect_interval_s", static_cast<double>(cfg.dualsense.reconnect_interval_s));
     e.kv("controller_lock_serial", cfg.dualsense.controller_lock_serial);
+
+    e.header("fastboot");
+    e.kv("enabled", cfg.fastboot.enabled);
+    e.kv("intro_video", cfg.fastboot.intro_video);
+    e.kv("jump_ms", cfg.fastboot.jump_ms);
+    e.kv("poll_ms", static_cast<int64_t>(cfg.fastboot.poll_ms));
+    e.kv("enter_spammer", cfg.fastboot.enter_spammer);
+    e.kv("enter_interval_ms", cfg.fastboot.enter_interval_ms);
+    e.kv("enter_window_ms", cfg.fastboot.enter_window_ms);
 
     auto tmp  = path;
     tmp      += ".tmp";

@@ -85,3 +85,12 @@ startup_pulse_force = 150
 enable_reconnect = false
 reconnect_interval_s = 5.0
 controller_lock_serial = "" # optional controller MAC/serial lock; blank = first found
+
+[fastboot]
+enabled = true               # skip the ~25s startup black-screen hold
+intro_video = "T10_MS_Combined" # startup video filename (substring); skip runs only while this plays
+jump_ms = 30000              # how far to push the clock per detected hold (ms)
+poll_ms = 80                 # monitor poll interval (ms)
+enter_spammer = false        # auto-press Enter through post-skip prompts
+enter_interval_ms = 120      # Enter key interval while spamming (ms)
+enter_window_ms = 12000      # stop spamming this long after the skip (ms)

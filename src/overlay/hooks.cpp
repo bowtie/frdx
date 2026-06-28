@@ -705,7 +705,9 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
                  reinterpret_cast<uintptr_t>(target_ExecuteCommandLists));
 
     // 6. Hook via MinHook
-    if (MH_Initialize() != MH_OK) {
+    // MH_Initialize may have already been called by fastboot — that's fine.
+    const MH_STATUS init = MH_Initialize();
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
         re_log::error("failed to initialize MinHook context");
         return false;
     }

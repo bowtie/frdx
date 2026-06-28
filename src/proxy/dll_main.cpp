@@ -3,6 +3,7 @@
 // never blocked on FMOD discovery or HTTP startup.
 
 #include <frdx/platform/windows/win32_handle.hpp>
+#include <frdx/fastboot.hpp>
 
 // Forwarding to "version.dll" without a path resolves back to us; the
 // absolute system32 path is what breaks the basename collision.
@@ -46,6 +47,9 @@ DWORD WINAPI bridge_thread(LPVOID self) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        // FastBoot must start before the game's startup sequence begins —
+        // the timer hooks need to be in place before the intro video hold.
+        frdx::fastboot::start();
         frdx::detail::unique_handle{CreateThread(nullptr, 0, bridge_thread, hModule, 0, nullptr)};
     }
     return TRUE;
