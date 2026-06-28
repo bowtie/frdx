@@ -98,7 +98,12 @@ float update_interactive_overlay_alpha() {
         !g_ui.cursor_visible && now - g_ui.cursor_hidden_since >= std::chrono::seconds(1);
     g_ui.cursor_hide_delay_elapsed =
         !g_ui.cursor_visible && now - g_ui.cursor_hidden_since >= std::chrono::seconds(2);
-    const float target   = g_ui.cursor_hide_delay_elapsed ? 0.0f : 1.0f;
+    // When player_bar_always_visible is enabled, keep the overlay at full
+    // alpha regardless of cursor visibility — no cinematic fade-out.
+    const bool always_visible =
+        g_ctx.store && g_ctx.store->snapshot().overlay.player_bar_always_visible;
+    const float target = always_visible ? 1.0f
+                                        : (g_ui.cursor_hide_delay_elapsed ? 0.0f : 1.0f);
     const float dt       = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
     const float duration = g_ui.cursor_visible ? 0.45f : 0.75f;
     const float step     = dt / duration;

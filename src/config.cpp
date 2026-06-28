@@ -96,6 +96,8 @@ Config load_config(const std::filesystem::path& path) {
         pick<bool>(ov, "music_notifications_enabled", cfg.overlay.music_notifications_enabled);
     cfg.overlay.notification_position = normalize_notification_position(
         pick<std::string>(ov, "notification_position", cfg.overlay.notification_position));
+    cfg.overlay.player_bar_always_visible =
+        pick<bool>(ov, "player_bar_always_visible", cfg.overlay.player_bar_always_visible);
     cfg.overlay.blur_enabled = pick<bool>(ov, "blur_enabled", cfg.overlay.blur_enabled);
     cfg.overlay.blur_strength =
         std::clamp(pick<int>(ov, "blur_strength", cfg.overlay.blur_strength), 1, 15);
@@ -348,6 +350,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("music_notifications_enabled", cfg.overlay.music_notifications_enabled);
     e.kv("notification_position",
          normalize_notification_position(cfg.overlay.notification_position));
+    e.kv("player_bar_always_visible", cfg.overlay.player_bar_always_visible);
     e.kv("blur_enabled", cfg.overlay.blur_enabled);
     e.kv("blur_strength", static_cast<int64_t>(cfg.overlay.blur_strength));
     e.kv("blur_tint_r", static_cast<double>(cfg.overlay.blur_tint_r));
@@ -423,7 +426,16 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     }
     std::error_code ec;
     std::filesystem::rename(tmp, path, ec);
-    if (ec) throw std::system_error{ec};
+    if (ec) {
+        // Atomic rename failed — likely because the external helper has the
+        // file open for hot-reload.  Fall back to a direct write (non-atomic
+        // but functional).  Clean up the temp file first.
+        std::filesystem::remove(tmp, ec);
+        std::ofstream os{path, std::ios::binary | std::ios::trunc};
+        if (!os) throw std::system_error{errno, std::system_category(), path.string()};
+        os.write(e.out.data(), static_cast<std::streamsize>(e.out.size()));
+        if (!os) throw std::system_error{errno, std::system_category(), path.string()};
+    }
 }
 
 DualSenseConfig dualsense_service_config(DualSenseConfig cfg) {

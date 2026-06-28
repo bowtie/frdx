@@ -17,7 +17,6 @@
 #include <windows.h>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -25,7 +24,7 @@
 namespace frdx {
 namespace {
 
-std::wstring quote_task_arg(std::wstring_view arg) {
+std::wstring quote_arg(std::wstring_view arg) {
     std::wstring out{L'"'};
     for (wchar_t ch : arg) {
         if (ch == L'"') out += L'\\';
@@ -35,7 +34,7 @@ std::wstring quote_task_arg(std::wstring_view arg) {
     return out;
 }
 
-bool run_hidden_process(std::wstring command_line, DWORD timeout_ms = 5000) {
+bool run_hidden_process(std::wstring command_line, DWORD timeout_ms = 8000) {
     STARTUPINFOW si{};
     si.cb          = sizeof(si);
     si.dwFlags     = STARTF_USESHOWWINDOW;
@@ -47,7 +46,6 @@ bool run_hidden_process(std::wstring command_line, DWORD timeout_ms = 5000) {
                   GetLastError());
         return false;
     }
-
     CloseHandle(pi.hThread);
     const DWORD wait = WaitForSingleObject(pi.hProcess, timeout_ms);
     DWORD exit_code  = STILL_ACTIVE;
@@ -64,38 +62,20 @@ bool run_hidden_process(std::wstring command_line, DWORD timeout_ms = 5000) {
     return true;
 }
 
-bool launch_external_helper_task(const std::filesystem::path& module_dir, int udp_port) {
-    const auto exe = module_dir / L"frdx_dualsense_broker.exe";
+bool launch_external_helper(const std::filesystem::path& module_dir, int udp_port) {
+    const auto exe = module_dir / L"frdx_dualsense_helper.exe";
     if (!std::filesystem::exists(exe)) {
         log::warn("[dualsense] external helper executable missing: {}", exe.string());
         return false;
     }
 
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    st.wMinute = static_cast<WORD>((st.wMinute + 1) % 60);
-    if (st.wMinute == 0) st.wHour = static_cast<WORD>((st.wHour + 1) % 24);
+    // Build the task action: run the helper exe directly (no VBScript).
+    const std::wstring task_action =
+        quote_arg(exe.wstring()) + L" --external --port " +
+        std::to_wstring(std::clamp(udp_port, 1, 65535)) +
+        L" --watch-process ForzaHorizon6.exe";
 
-    wchar_t time_buf[16] = {};
-    std::swprintf(time_buf, std::size(time_buf), L"%02u:%02u", st.wHour, st.wMinute);
-
-    const auto data_dir = module_dir / L"mods" / L"frdx";
-    std::error_code ec;
-    std::filesystem::create_directories(data_dir, ec);
-    const auto launcher = data_dir / L"launch_dualsense_helper.vbs";
-    {
-        std::ofstream out{launcher, std::ios::binary | std::ios::trunc};
-        if (!out) {
-            log::warn("[dualsense] failed to write helper launcher script: {}", launcher.string());
-            return false;
-        }
-        out << "Set sh = CreateObject(\"WScript.Shell\")\r\n";
-        out << "sh.CurrentDirectory = \"" << module_dir.string() << "\"\r\n";
-        out << "sh.Run \"\"\"" << exe.string() << "\"\" --external --port "
-            << std::clamp(udp_port, 1, 65535)
-            << " --watch-process ForzaHorizon6.exe\", 0, False\r\n";
-    }
-
+    // Resolve schtasks.exe from System32.
     std::wstring system_dir(MAX_PATH, L'\0');
     const UINT system_len =
         GetSystemDirectoryW(system_dir.data(), static_cast<UINT>(system_dir.size()));
@@ -104,32 +84,63 @@ bool launch_external_helper_task(const std::filesystem::path& module_dir, int ud
         return false;
     }
     system_dir.resize(system_len);
-    auto system_path             = std::filesystem::path(system_dir);
-    const std::wstring schtasks  = quote_task_arg((system_path / L"schtasks.exe").wstring());
-    const std::wstring wscript   = quote_task_arg((system_path / L"wscript.exe").wstring());
+    const std::wstring schtasks =
+        quote_arg((std::filesystem::path(system_dir) / L"schtasks.exe").wstring());
+
+    // Create a one-time task, then run it immediately.  Task Scheduler
+    // launches the helper in an independent session with its own device
+    // access — this is the only reliable way to avoid HID conflicts with
+    // the game process (which holds the controller handle).
     const std::wstring task_name = L"FRDX_DualSenseHelper";
-    const std::wstring task_cmd  = wscript + L" //B //NoLogo " + quote_task_arg(launcher.wstring());
-    const std::wstring create_cmd = schtasks + L" /Create /TN " + quote_task_arg(task_name) +
-                                    L" /SC ONCE /ST " + time_buf + L" /TR " +
-                                    quote_task_arg(task_cmd) + L" /F";
-    if (!run_hidden_process(create_cmd, 8000)) return false;
+    const std::wstring create_cmd =
+        schtasks + L" /Create /TN " + quote_arg(task_name) +
+        L" /SC ONCE /ST 23:59 /TR " + quote_arg(task_action) + L" /F";
+    if (!run_hidden_process(create_cmd)) return false;
 
-    const std::wstring run_cmd = schtasks + L" /Run /TN " + quote_task_arg(task_name);
-    if (!run_hidden_process(run_cmd, 8000)) return false;
+    const std::wstring run_cmd = schtasks + L" /Run /TN " + quote_arg(task_name);
+    if (!run_hidden_process(run_cmd)) return false;
 
-    log::info("[dualsense] requested external helper launch through Task Scheduler: {}",
-              exe.string());
+    log::info("[dualsense] launched external helper via Task Scheduler: {}", exe.string());
     return true;
+}
+
+bool helper_already_running() {
+    // Check the helper's singleton mutex.  If it exists, the helper is
+    // already running — don't relaunch.  Both the game and Task Scheduler
+    // run in the same user session, so Local\ is sufficient.
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\FRDX_DualSenseExternalHelper");
+    if (!mutex) return false;
+    const bool already_exists = GetLastError() == ERROR_ALREADY_EXISTS;
+    CloseHandle(mutex);
+    return already_exists;
 }
 
 void maybe_launch_external_helper(const std::filesystem::path& module_dir,
                                   const DualSenseConfig& cfg) {
     static auto s_last_attempt = std::chrono::steady_clock::time_point{};
     if (!dualsense_external_helper_should_launch(cfg)) return;
+    if (helper_already_running()) return;
     const auto now = std::chrono::steady_clock::now();
     if (now - s_last_attempt < std::chrono::seconds(10)) return;
     s_last_attempt = now;
-    (void)launch_external_helper_task(module_dir, cfg.udp_port);
+    (void)launch_external_helper(module_dir, cfg.udp_port);
+}
+
+void stop_external_helper() {
+    // Signal the named event so the helper's main loop exits cleanly.
+    // Try Global\ first (works across sessions), fall back to Local\.
+    HANDLE stop_event = CreateEventW(nullptr, TRUE, FALSE, L"Global\\FRDX_DualSenseHelperStop");
+    if (!stop_event) {
+        stop_event = CreateEventW(nullptr, TRUE, FALSE, L"Local\\FRDX_DualSenseHelperStop");
+    }
+    if (stop_event) {
+        SetEvent(stop_event);
+        CloseHandle(stop_event);
+        log::info("[dualsense] signaled external helper to stop");
+    } else {
+        log::warn("[dualsense] failed to create stop event for helper (ec={})",
+                  GetLastError());
+    }
 }
 
 } // namespace
@@ -218,12 +229,20 @@ void run_bridge(HMODULE self) noexcept {
         ctrl = std::make_unique<fmod_bridge::ControlLoop>(bridge, img, cfg.audio.output_gain);
 
     store.on_change(
-        [dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get()](const Config& c) {
+        [dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get(),
+         prev_enabled = cfg.dualsense.enabled](const Config& c) mutable {
             if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
 
             bridge.set_gain(c.audio.output_gain);
             bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
             dualsense.update_config(dualsense_service_config(c.dualsense));
+
+            // If triggers were on and are now off, stop the external helper.
+            if (prev_enabled && !c.dualsense.enabled) {
+                stop_external_helper();
+            }
+            prev_enabled = c.dualsense.enabled;
+
             maybe_launch_external_helper(dir, c.dualsense);
             if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
         });

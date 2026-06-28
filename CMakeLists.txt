@@ -194,7 +194,7 @@ target_link_libraries(dualsense_self_test PRIVATE ws2_32 hid setupapi cfgmgr32 u
 
 add_test(NAME dualsense_self_test COMMAND dualsense_self_test)
 
-add_executable(frdx_dualsense_broker
+add_executable(frdx_dualsense_helper
     src/dualsense_broker_main.cpp
     src/dualsense.cpp
     src/config.cpp
@@ -202,7 +202,7 @@ add_executable(frdx_dualsense_broker
     third_party/hidapi/windows/hid.c
 )
 
-target_include_directories(frdx_dualsense_broker PRIVATE
+target_include_directories(frdx_dualsense_helper PRIVATE
     include
     third_party/toml11
     third_party/wil/include
@@ -210,12 +210,15 @@ target_include_directories(frdx_dualsense_broker PRIVATE
     third_party/hidapi/hidapi
 )
 
-target_link_libraries(frdx_dualsense_broker PRIVATE ws2_32 hid setupapi cfgmgr32 user32 shell32)
+target_link_libraries(frdx_dualsense_helper PRIVATE ws2_32 hid setupapi cfgmgr32 user32 shell32)
 
-set_target_properties(frdx_dualsense_broker PROPERTIES
-    OUTPUT_NAME frdx_dualsense_broker
-    WIN32_EXECUTABLE FALSE
+set_target_properties(frdx_dualsense_helper PROPERTIES
+    OUTPUT_NAME frdx_dualsense_helper
+    WIN32_EXECUTABLE TRUE
 )
+# Use the Windows subsystem (no console window) but keep wmain as the
+# entry point instead of WinMain.
+target_link_options(frdx_dualsense_helper PRIVATE /ENTRY:wmainCRTStartup)
 
 add_executable(dualsense_config_self_test
     tests/dualsense_config_self_test.cpp

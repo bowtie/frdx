@@ -70,6 +70,17 @@ void draw_general_settings_tab() {
         g_ctx.store->patch([&](Config& c) { c.overlay.console_visible = show_log; });
     }
 
+    label_row("Always Show Player Bar");
+    bool always_visible = cfg.overlay.player_bar_always_visible;
+    if (ImGui::Checkbox("##always_visible", &always_visible)) {
+        g_ctx.store->patch(
+            [&](Config& c) { c.overlay.player_bar_always_visible = always_visible; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON = player bar stays visible (no fade-out)\n"
+                          "OFF = player bar fades when the cursor hides");
+    }
+
     label_row("Backdrop Blur");
     bool blur = cfg.overlay.blur_enabled;
     if (ImGui::Checkbox("##backdrop_blur", &blur)) {

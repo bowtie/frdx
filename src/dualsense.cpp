@@ -1065,10 +1065,10 @@ public:
             return true;
         }
 
-        const auto exe = current_module_directory() / L"frdx_dualsense_broker.exe";
-        log::info("[dualsense] trying external HID broker at {}", exe.string());
+        const auto exe = current_module_directory() / L"frdx_dualsense_helper.exe";
+        log::info("[dualsense] trying external HID helper at {}", exe.string());
         if (!std::filesystem::exists(exe)) {
-            last_error_ = "DualSense broker executable missing";
+            last_error_ = "DualSense helper executable missing";
             log::warn("[dualsense] {}", last_error_);
             return false;
         }

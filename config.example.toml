@@ -21,6 +21,7 @@ force_stereo_audio = true   # off => mono + FMOD_2D (clean 3D spatialisation)
 theme = "bess_dark"              # bess_dark, tokyo_night
 music_notifications_enabled = true
 notification_position = "top_left" # top_left, top_center, top_right, bottom_left, bottom_center, bottom_right
+player_bar_always_visible = false  # true = player bar never fades out (no cinematic hide)
 blur_enabled = false             # Dual-Kawase backdrop blur behind overlay panels
 blur_strength = 5                # 1..15 (downsample iterations + sample offset)
 blur_tint_r = 0.08               # frosted-glass tint colour over the blur (0..1)

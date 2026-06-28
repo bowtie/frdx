@@ -347,6 +347,10 @@ void mark_overlay_mouse_region();
 void draw_toasts();
 ImVec4 toast_color(ToastKind kind);
 bool has_visible_toasts();
+
+// Returns true if any window that uses backdrop blur is currently visible
+// (player bar, settings, stations, toasts).  The console does NOT use blur.
+bool any_blur_window_visible();
 void push_toast(ToastKind kind, std::string title, std::string detail, float lifetime);
 bool is_status_artist(std::string_view artist) noexcept;
 bool is_station_display_track(IAudioSource* active, std::string_view title,
@@ -407,8 +411,10 @@ int push_blur_widget_styles(float alpha_scalar);
 void pop_blur_widget_styles(int pushed_count);
 
 // CPU-waits for every tracked direct command queue (other than `self`,
-// which the caller is about to submit into) to flush.
-void wait_for_other_queues_sync(ID3D12CommandQueue* self);
+// which the caller is about to submit into) to flush.  Returns false if
+// any queue didn't drain within the timeout (e.g. a frame-generation
+// deadlock), so the caller can skip the frame instead of hanging the GPU.
+bool wait_for_other_queues_sync(ID3D12CommandQueue* self);
 
 void enqueue_action(std::function<void()> action);
 void save_active_shoutcast_station(IAudioSource* active);

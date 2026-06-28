@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <chrono>
 #include <filesystem>
 #include <vector>
 
@@ -595,60 +596,82 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
     if (g_ctx.store) cfg = g_ctx.store->snapshot().overlay;
     if (!cfg.blur_enabled) return true; // backbuffer is left in RENDER_TARGET
 
-    const auto& strengths = blur_strength_table();
-    const int s           = std::clamp(cfg.blur_strength, 1, 15) - 1;
-    const int iterations =
-        std::min<int>(strengths[s].iteration, static_cast<int>(DxResources::kBlurMaxLevels) - 1);
-    const float offset = strengths[s].offset;
+    // Skip the capture+blur pipeline entirely when no window that uses
+    // blur is visible (e.g. only the console is open).  Saves the full
+    // backbuffer copy + multi-pass blur for every such frame.
+    if (!any_blur_window_visible()) return true;
 
-    // 1) Copy the (RENDER_TARGET) backbuffer into blur_tex[0], then restore it.
-    auto bb_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    transition_to(cmd, backbuffer, bb_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    transition_to(cmd, g_dx.blur_tex[0].get(), g_dx.blur_state[0], D3D12_RESOURCE_STATE_COPY_DEST);
-    cmd->CopyResource(g_dx.blur_tex[0].get(), backbuffer);
-    transition_to(cmd, backbuffer, bb_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    // Throttle the capture+blur to ~30fps.  The blur is a low-frequency
+    // effect — a 1-2 frame stale blurred scene is visually indistinguishable
+    // from a fresh one.  Under frame generation Present fires at 2x the
+    // real frame rate, so this halves the GPU work with no visible quality
+    // loss.  We still transition blur_tex[0] to SRV state so ImGui can
+    // composite the stale result.
+    static std::chrono::steady_clock::time_point last_capture{};
+    const auto now = std::chrono::steady_clock::now();
+    const bool skip_capture =
+        last_capture != std::chrono::steady_clock::time_point{} &&
+        (now - last_capture) < std::chrono::milliseconds(33);
 
-    // Shared pipeline state for every pass.
-    cmd->SetGraphicsRootSignature(g_dx.blur_root_sig.get());
-    ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
-    cmd->SetDescriptorHeaps(1, heaps);
-    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    if (!skip_capture) {
+        last_capture = now;
 
-    auto run_pass = [&](UINT read, UINT draw, ID3D12PipelineState* pso) {
-        transition_to(cmd, g_dx.blur_tex[read].get(), g_dx.blur_state[read],
-                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        transition_to(cmd, g_dx.blur_tex[draw].get(), g_dx.blur_state[draw],
-                      D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const auto& strengths = blur_strength_table();
+        const int s           = std::clamp(cfg.blur_strength, 1, 15) - 1;
+        const int iterations =
+            std::min<int>(strengths[s].iteration, static_cast<int>(DxResources::kBlurMaxLevels) - 1);
+        const float offset = strengths[s].offset;
 
-        D3D12_VIEWPORT vp = {0.0f,
-                             0.0f,
-                             static_cast<float>(g_dx.blur_level_w[draw]),
-                             static_cast<float>(g_dx.blur_level_h[draw]),
-                             0.0f,
-                             1.0f};
-        D3D12_RECT scissor = {0, 0, static_cast<LONG>(g_dx.blur_level_w[draw]),
-                              static_cast<LONG>(g_dx.blur_level_h[draw])};
-        cmd->RSSetViewports(1, &vp);
-        cmd->RSSetScissorRects(1, &scissor);
+        // 1) Copy the (RENDER_TARGET) backbuffer into blur_tex[0], then restore it.
+        auto bb_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        transition_to(cmd, backbuffer, bb_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        transition_to(cmd, g_dx.blur_tex[0].get(), g_dx.blur_state[0], D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->CopyResource(g_dx.blur_tex[0].get(), backbuffer);
+        transition_to(cmd, backbuffer, bb_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        BlurRootCB cb  = {};
-        cb.offset      = offset;
-        cb.halfpixel[0] = 0.5f / static_cast<float>(g_dx.blur_level_w[read]);
-        cb.halfpixel[1] = 0.5f / static_cast<float>(g_dx.blur_level_h[read]);
+        // Shared pipeline state for every pass.
+        cmd->SetGraphicsRootSignature(g_dx.blur_root_sig.get());
+        ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
+        cmd->SetDescriptorHeaps(1, heaps);
+        cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        cmd->SetPipelineState(pso);
-        cmd->SetGraphicsRootDescriptorTable(0, g_dx.blur_srv_gpu[read]);
-        cmd->SetGraphicsRoot32BitConstants(1, 4, &cb, 0);
-        cmd->OMSetRenderTargets(1, &g_dx.blur_rtv_cpu[draw], FALSE, nullptr);
-        cmd->DrawInstanced(3, 1, 0, 0);
-    };
+        auto run_pass = [&](UINT read, UINT draw, ID3D12PipelineState* pso) {
+            transition_to(cmd, g_dx.blur_tex[read].get(), g_dx.blur_state[read],
+                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            transition_to(cmd, g_dx.blur_tex[draw].get(), g_dx.blur_state[draw],
+                          D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-    // 2) Downsample chain: blur_tex[i-1] -> blur_tex[i].
-    for (int i = 1; i <= iterations; ++i) run_pass(i - 1, i, g_dx.blur_down_pso.get());
-    // 3) Upsample chain back into blur_tex[0]: blur_tex[i] -> blur_tex[i-1].
-    for (int i = iterations; i >= 1; --i) run_pass(i, i - 1, g_dx.blur_up_pso.get());
+            D3D12_VIEWPORT vp = {0.0f,
+                                 0.0f,
+                                 static_cast<float>(g_dx.blur_level_w[draw]),
+                                 static_cast<float>(g_dx.blur_level_h[draw]),
+                                 0.0f,
+                                 1.0f};
+            D3D12_RECT scissor = {0, 0, static_cast<LONG>(g_dx.blur_level_w[draw]),
+                                  static_cast<LONG>(g_dx.blur_level_h[draw])};
+            cmd->RSSetViewports(1, &vp);
+            cmd->RSSetScissorRects(1, &scissor);
 
-    // 4) blur_tex[0] now holds the blurred scene; hand it to ImGui.
+            BlurRootCB cb  = {};
+            cb.offset      = offset;
+            cb.halfpixel[0] = 0.5f / static_cast<float>(g_dx.blur_level_w[read]);
+            cb.halfpixel[1] = 0.5f / static_cast<float>(g_dx.blur_level_h[read]);
+
+            cmd->SetPipelineState(pso);
+            cmd->SetGraphicsRootDescriptorTable(0, g_dx.blur_srv_gpu[read]);
+            cmd->SetGraphicsRoot32BitConstants(1, 4, &cb, 0);
+            cmd->OMSetRenderTargets(1, &g_dx.blur_rtv_cpu[draw], FALSE, nullptr);
+            cmd->DrawInstanced(3, 1, 0, 0);
+        };
+
+        // 2) Downsample chain: blur_tex[i-1] -> blur_tex[i].
+        for (int i = 1; i <= iterations; ++i) run_pass(i - 1, i, g_dx.blur_down_pso.get());
+        // 3) Upsample chain back into blur_tex[0]: blur_tex[i] -> blur_tex[i-1].
+        for (int i = iterations; i >= 1; --i) run_pass(i, i - 1, g_dx.blur_up_pso.get());
+    }
+
+    // 4) blur_tex[0] now holds the blurred scene (fresh or stale); hand it
+    //    to ImGui.  Ensure it's in SRV state.
     transition_to(cmd, g_dx.blur_tex[0].get(), g_dx.blur_state[0],
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return true;

@@ -114,6 +114,8 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     const auto status_path = data_dir / L"dualsense_helper_status.tsv";
     frdx::log::init(log_path);
 
+    // Singleton mutex to prevent duplicate helpers.  Local\ is sufficient
+    // since both the game and Task Scheduler run in the same user session.
     HANDLE singleton = CreateMutexW(nullptr, TRUE, L"Local\\FRDX_DualSenseExternalHelper");
     if (!singleton) {
         frdx::log::warn("[dualsense-external] singleton mutex failed ({})", GetLastError());
@@ -127,6 +129,17 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
         std::fflush(stdout);
         CloseHandle(singleton);
         return 0;
+    }
+
+    // Named event the bridge signals to request shutdown when the user
+    // disables triggers.  Try Global\ first (works across sessions), fall
+    // back to Local\ (same session only).
+    HANDLE stop_event = CreateEventW(nullptr, TRUE, FALSE, L"Global\\FRDX_DualSenseHelperStop");
+    if (!stop_event) {
+        stop_event = CreateEventW(nullptr, TRUE, FALSE, L"Local\\FRDX_DualSenseHelperStop");
+    }
+    if (!stop_event) {
+        frdx::log::warn("[dualsense-external] failed to create stop event ({})", GetLastError());
     }
 
     frdx::Config cfg = frdx::load_config(config_path);
@@ -168,6 +181,18 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     bool saw_game_process = watch_process.empty() || process_name_exists(watch_process);
     while (true) {
         const auto now = std::chrono::steady_clock::now();
+
+        // Check if the bridge requested shutdown (user disabled triggers).
+        if (stop_event && WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0) {
+            frdx::log::info("[dualsense-external] stop event signaled; shutting down");
+            std::printf("[frdx-dualsense] stop requested; shutting down\n");
+            std::fflush(stdout);
+            service.stop();
+            CloseHandle(singleton);
+            if (stop_event) CloseHandle(stop_event);
+            return 0;
+        }
+
         if (now - last_config_check >= std::chrono::seconds(1)) {
             last_config_check = now;
             if (!watch_process.empty()) {
@@ -182,6 +207,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                     std::fflush(stdout);
                     service.stop();
                     CloseHandle(singleton);
+                    if (stop_event) CloseHandle(stop_event);
                     return 0;
                 }
             }

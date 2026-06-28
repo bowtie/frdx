@@ -15,6 +15,13 @@ bool has_visible_toasts() {
     });
 }
 
+bool any_blur_window_visible() {
+    return g_ui.player_visible.load(std::memory_order_acquire) ||
+           g_ui.settings_visible.load(std::memory_order_acquire) ||
+           g_ui.stations_visible.load(std::memory_order_acquire) ||
+           has_visible_toasts();
+}
+
 void push_toast(ToastKind kind, std::string title, std::string detail, float lifetime) {
     Toast toast;
     toast.kind     = kind;

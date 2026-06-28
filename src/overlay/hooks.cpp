@@ -78,7 +78,7 @@ CommandQueueMap g_cq;
 // hook trampolines defined later in the file.
 void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
                                          ID3D12CommandList* const* ppCommandLists);
-void wait_for_other_queues_sync(ID3D12CommandQueue* self);
+bool wait_for_other_queues_sync(ID3D12CommandQueue* self);
 
 WNDPROC original_wnd_proc = nullptr;
 bool g_runtime_started    = false;
@@ -451,13 +451,22 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
 
         // CPU-wait for every other direct queue the game uses to finish its
-        // most recent submission before we touch the backbuffer.
-        wait_for_other_queues_sync(active_queue);
+        // most recent submission before we touch the backbuffer.  If the
+        // wait times out (e.g. frame-generation backlog), skip this frame
+        // — the overlay renders at a lower rate with no game stall.
+        if (!wait_for_other_queues_sync(active_queue)) {
+            return false;
+        }
 
-        // Transition backbuffer from PRESENT to RENDER_TARGET for ImGui rendering.
+        // Transition backbuffer to RENDER_TARGET for ImGui rendering.
+        // Use COMMON as the source state — D3D12 swap-chain back buffers
+        // decay to COMMON after Present, and COMMON can be implicitly
+        // promoted to RENDER_TARGET.  This is safer than hardcoding PRESENT
+        // as the source, which may be wrong when frame-generation pipelines
+        // leave the backbuffer in a non-PRESENT state before calling Present.
         ID3D12Resource* bb = g_dx.fb_bufs[backBufferIdx].get();
         auto to_render_target =
-            transition_barrier(bb, D3D12_RESOURCE_STATE_PRESENT,
+            transition_barrier(bb, D3D12_RESOURCE_STATE_COMMON,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
         g_dx.cmd_list->ResourceBarrier(1, &to_render_target);
 
@@ -482,10 +491,13 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
 
-        // Transition backbuffer back to PRESENT state
+        // Transition backbuffer back to COMMON — the safe decay state.
+        // Present works from COMMON (the runtime handles the final
+        // transition), and this avoids assuming we know the exact state
+        // the FG pipeline expects.
         auto barrier =
             transition_barrier(g_dx.fb_bufs[backBufferIdx].get(),
-                               D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+                               D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         g_dx.cmd_list->ResourceBarrier(1, &barrier);
 
         g_dx.cmd_list->Close();
@@ -508,6 +520,12 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 }
 
 HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
+    // Skip test presents — the game calls Present with DXGI_PRESENT_TEST to
+    // probe capabilities without actually swapping.  No overlay work needed.
+    if (Flags & DXGI_PRESENT_TEST) {
+        return original_Present(pSwapChain, SyncInterval, Flags);
+    }
+
     ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
 
     // First frame: render_overlay_frame handles ImGui initialization.
@@ -797,14 +815,22 @@ void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumComm
     }
 }
 
-void wait_for_other_queues_sync(ID3D12CommandQueue* self) {
+bool wait_for_other_queues_sync(ID3D12CommandQueue* self) {
     // Snapshot each QueueSyncState* under the lock, then release the lock
-    // before doing the potentially-infinite WaitForSingleObject on each
-    // fence.  Holding the mutex across the wait would block any queue
-    // trampoline that tries to signal into g_cq while we're flushing a
-    // different queue.  The pointers stay valid because the only place
-    // entries are added/removed is the trampoline (under the lock) and
-    // shutdown (after MinHook has disabled the trampoline).
+    // before doing the potentially-blocking wait on each fence.  Holding
+    // the mutex across the wait would block any queue trampoline that tries
+    // to signal into g_cq while we're flushing a different queue.  The
+    // pointers stay valid because the only place entries are added/removed
+    // is the trampoline (under the lock) and shutdown (after MinHook has
+    // disabled the trampoline).
+    //
+    // A moderate timeout (50ms) is used so that frame-generation pipelines
+    // (DLSS-FG, FSR-FG) that create cross-queue dependencies can't deadlock
+    // the present queue — which would cause a GPU TDR.  50ms is long enough
+    // for normal GPU latency but short enough to prevent a hard hang.
+    // If any queue isn't drained we return false and the caller skips this
+    // frame's overlay work — the overlay simply renders at a lower rate
+    // until the GPU catches up.
     std::vector<QueueSyncState*> snapshot;
     {
         frdx::ScopedLock lk{g_cq.mutex};
@@ -818,8 +844,12 @@ void wait_for_other_queues_sync(ID3D12CommandQueue* self) {
         if (!s->fence || !s->event) continue;
         if (s->fence->GetCompletedValue() >= s->fence_value) continue;
         s->fence->SetEventOnCompletion(s->fence_value, s->event);
-        WaitForSingleObject(s->event, INFINITE);
+        DWORD result = WaitForSingleObject(s->event, 50);
+        if (result == WAIT_TIMEOUT) {
+            return false;
+        }
     }
+    return true;
 }
 
 
