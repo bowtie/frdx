@@ -57,6 +57,10 @@ struct OverlayConfig {
     // through the controls instead of being hidden behind fully-opaque widgets.
     // 1.0 = opaque widgets (blur only visible in padding), 0.0 = invisible.
     float blur_widget_opacity = 0.6f;
+    // When true, the game won't auto-pause when you alt-tab or lose window
+    // focus (alt-tab).  Works by swallowing WM_ACTIVATE / WM_ACTIVATEAPP /
+    // WM_SETFOCUS / WM_KILLFOCUS messages so the game never sees focus loss.
+    bool prevent_focus_loss_pause = false;
 };
 
 struct DualSenseConfig {

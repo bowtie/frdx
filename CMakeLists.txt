@@ -30,6 +30,7 @@ add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
 
 add_library(version SHARED
     src/proxy/dll_main.cpp
+    src/proxy/comctl32.def
     src/fastboot.cpp
     src/bridge.cpp
     src/log.cpp
@@ -105,6 +106,24 @@ set_target_properties(version PROPERTIES
     OUTPUT_NAME version
     PREFIX ""
 )
+
+# ── Auto-deploy: copy version.dll to the game folder after build ───────────
+# Enable with: cmake -DFRDX_AUTO_DEPLOY=ON -DFRDX_GAME_DIR="S:/SteamLibrary/steamapps/common/ForzaHorizon6"
+option(FRDX_AUTO_DEPLOY "Copy version.dll to the game folder after build" OFF)
+set(FRDX_GAME_DIR "" CACHE PATH "Path to the Forza Horizon game install directory")
+
+if(FRDX_AUTO_DEPLOY)
+    if(NOT FRDX_GAME_DIR)
+        message(FATAL_ERROR "FRDX_AUTO_DEPLOY=ON requires -DFRDX_GAME_DIR=<path to game folder>")
+    endif()
+    add_custom_command(TARGET version POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+                -DFROM="$<TARGET_FILE:version>"
+                -DTO="${FRDX_GAME_DIR}/version.dll"
+                -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
+        COMMENT "Deploying version.dll → ${FRDX_GAME_DIR}"
+    )
+endif()
 
 add_executable(dualsense_self_test
     tests/dualsense_self_test.cpp

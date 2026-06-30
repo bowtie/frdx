@@ -88,6 +88,23 @@ bool g_hooks_installed    = false;
 // ── Grouped overlay state ───────────────────────────────────────────────
 
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    // Suppress focus-loss messages so the game doesn't auto-pause on alt-tab.
+    // We rewrite WM_ACTIVATE(ACTIVATE_INACTIVE) → ACTIVATE_ACTIVE and swallow
+    // WM_ACTIVATEAPP / WM_KILLFOCUS / WM_SETFOCUS entirely.
+    if (g_ctx.store && g_ctx.store->snapshot().overlay.prevent_focus_loss_pause) {
+        if (uMsg == WM_ACTIVATE) {
+            // Force the activation state to "active" regardless of what happened.
+            wParam = MAKELONG(WA_ACTIVE, 0);
+            // Fall through — let the game process the (fake) activation.
+        } else if (uMsg == WM_ACTIVATEAPP || uMsg == WM_KILLFOCUS) {
+            // Swallow these entirely — the game never sees deactivation.
+            return 0;
+        } else if (uMsg == WM_SETFOCUS) {
+            // Swallow — we don't want the game to react to focus changes at all.
+            return 0;
+        }
+    }
+
     const bool route_to_imgui    = g_ui.player_visible || g_ui.settings_visible ||
                                    g_ui.stations_visible || g_ui.console_visible;
     const bool block_mouse_input = g_ui.cursor_visible && g_ui.interactive_alpha > 0.05f &&

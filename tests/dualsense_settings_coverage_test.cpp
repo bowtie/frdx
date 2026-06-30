@@ -18,9 +18,9 @@ bool contains(std::string_view haystack, std::string_view needle) {
 
 int run() {
     const auto config = read_text("include/frdx/config.hpp");
-    const auto overlay = read_text("src/fmod/dx12_overlay.cpp");
+    const auto overlay = read_text("src/overlay/dualsense.cpp");
     if (config.empty() || overlay.empty()) {
-        std::cerr << "FAIL: could not read config.hpp or dx12_overlay.cpp\n";
+        std::cerr << "FAIL: could not read config.hpp or dualsense.cpp\n";
         return EXIT_FAILURE;
     }
 

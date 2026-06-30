@@ -78,6 +78,17 @@ void draw_general_settings_tab() {
         ImGui::SetTooltip("Apply EBU R128 loudness normalization (ffmpeg loudnorm filter).\nTakes effect on the next stream reconnect.");
     }
 
+    label_row("Prevent Focus Pause");
+    bool prevent_pause = cfg.overlay.prevent_focus_loss_pause;
+    if (ImGui::Checkbox("##prevent_focus_pause", &prevent_pause)) {
+        g_ctx.store->patch(
+            [&](Config& c) { c.overlay.prevent_focus_loss_pause = prevent_pause; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON = game won't pause when you alt-tab\n"
+                          "OFF = game auto-pauses on focus loss (default)");
+    }
+
     label_row("Log Window");
     bool show_log = g_ui.console_visible;
     if (ImGui::Checkbox("##log_window", &show_log)) {

@@ -118,6 +118,8 @@ Config load_config(const std::filesystem::path& path) {
     cfg.overlay.blur_widget_opacity = std::clamp(
         static_cast<float>(pick<double>(ov, "blur_widget_opacity", cfg.overlay.blur_widget_opacity)),
         0.0f, 1.0f);
+    cfg.overlay.prevent_focus_loss_pause =
+        pick<bool>(ov, "prevent_focus_loss_pause", cfg.overlay.prevent_focus_loss_pause);
 
     const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -379,6 +381,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("blur_tint_b", static_cast<double>(cfg.overlay.blur_tint_b));
     e.kv("blur_tint_opacity", static_cast<double>(cfg.overlay.blur_tint_opacity));
     e.kv("blur_widget_opacity", static_cast<double>(cfg.overlay.blur_widget_opacity));
+    e.kv("prevent_focus_loss_pause", cfg.overlay.prevent_focus_loss_pause);
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);
