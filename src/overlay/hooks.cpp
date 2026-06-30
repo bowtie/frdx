@@ -19,6 +19,7 @@
 #include <algorithm>
 
 #include <MinHook.h>
+#include <kiero.h>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx12.h>
@@ -606,136 +607,70 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     if (!configure_overlay_runtime(mgr, bridge, store, dualsense)) return false;
     if (g_hooks_installed) return true;
 
-    re_log::info("starting dummy Direct3D 12 device context resolver...");
+    re_log::info("initializing kiero for D3D12 hook discovery...");
 
-    // 1. Create dummy window
-    WNDCLASSEXW windowClass = {sizeof(WNDCLASSEXW),
-                               CS_CLASSDC,
-                               DefWindowProcW,
-                               0L,
-                               0L,
-                               GetModuleHandleW(nullptr),
-                               nullptr,
-                               nullptr,
-                               nullptr,
-                               nullptr,
-                               L"DX12Dummy",
-                               nullptr};
-    RegisterClassExW(&windowClass);
-    HWND hwnd = CreateWindowW(windowClass.lpszClassName, L"DX12Dummy", WS_OVERLAPPEDWINDOW, 0, 0,
-                              100, 100, nullptr, nullptr, windowClass.hInstance, nullptr);
-
-    // 2. Create D3D12 Device
-    wil::com_ptr<ID3D12Device> device;
-    if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
-                                 reinterpret_cast<void**>(device.put())))) {
-        re_log::error("failed to create dummy D3D12 Device context");
-        DestroyWindow(hwnd);
-        UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
+    // kiero creates the dummy device/swapchain internally and populates
+    // its methods table. This replaces our manual dummy window + vtable
+    // extraction code.
+    kiero::Status::Enum kstatus = kiero::init(kiero::RenderType::D3D12);
+    if (kstatus != kiero::Status::Success) {
+        re_log::error("kiero::init failed: {}", static_cast<int>(kstatus));
         return false;
     }
 
-    // 3. Create Direct Command Queue
-    D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-    queueDesc.Type                     = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    wil::com_ptr<ID3D12CommandQueue> commandQueue;
-    if (FAILED(device->CreateCommandQueue(&queueDesc, __uuidof(ID3D12CommandQueue),
-                                          reinterpret_cast<void**>(commandQueue.put())))) {
-        re_log::error("failed to create dummy Direct Command Queue");
-        DestroyWindow(hwnd);
-        UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
+    // kiero vtable layout (D3D12):
+    //   0-43:    ID3D12Device (44 methods)
+    //   44-62:   ID3D12CommandQueue (19 methods)
+    //   63-71:   ID3D12CommandAllocator (9 methods)
+    //   72-131:  ID3D12CommandList (60 methods)
+    //   132-149: IDXGISwapChain (18 methods)
+    //
+    // Present = swapChain[8] = kiero index 140
+    // ResizeBuffers = swapChain[13] = kiero index 145
+    // ExecuteCommandLists = commandQueue[10] = kiero index 54
+    // CreateSwapChainForHwnd = factory[15] — NOT in kiero's table; we
+    //   hook it manually via the factory vtable when we first see it.
+
+    if (kiero::bind(140, reinterpret_cast<void**>(&original_Present),
+                    reinterpret_cast<void*>(&hook_Present)) != kiero::Status::Success) {
+        re_log::error("kiero::bind failed for Present");
+        return false;
+    }
+    if (kiero::bind(145, reinterpret_cast<void**>(&original_ResizeBuffers),
+                    reinterpret_cast<void*>(&hook_ResizeBuffers)) != kiero::Status::Success) {
+        re_log::error("kiero::bind failed for ResizeBuffers");
+        return false;
+    }
+    if (kiero::bind(54, reinterpret_cast<void**>(&original_ExecuteCommandLists),
+                    reinterpret_cast<void*>(&hook_ExecuteCommandLists)) != kiero::Status::Success) {
+        re_log::error("kiero::bind failed for ExecuteCommandLists");
         return false;
     }
 
-    // 4. Create DXGI Factory
-    wil::com_ptr<IDXGIFactory4> factory;
-    if (FAILED(
-            CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(factory.put())))) {
-        re_log::error("failed to create dummy DXGI Factory context");
-        DestroyWindow(hwnd);
-        UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
-        return false;
-    }
-
-    // 5. Create Swap Chain
-    DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-    swapChainDesc.BufferCount           = 2;
-    swapChainDesc.Width                 = 100;
-    swapChainDesc.Height                = 100;
-    swapChainDesc.Format                = DXGI_FORMAT_R8G8B8A8_UNORM;
-    swapChainDesc.BufferUsage           = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapChainDesc.SwapEffect            = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    swapChainDesc.SampleDesc.Count      = 1;
-
-    wil::com_ptr<IDXGISwapChain1> swapChain;
-    if (FAILED(factory->CreateSwapChainForHwnd(
-            commandQueue.get(), hwnd, &swapChainDesc, nullptr, nullptr,
-            reinterpret_cast<IDXGISwapChain1**>(swapChain.put())))) {
-        re_log::error("failed to create dummy DXGI Swap Chain context");
-        DestroyWindow(hwnd);
-        UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
-        return false;
-    }
-
-    // Retrieve function vtable pointers from the active dummy swapchain and factory
-    // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
-    void** swapChainVtable = *reinterpret_cast<void***>(swapChain.get());
-    // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
-    void** factoryVtable = *reinterpret_cast<void***>(factory.get());
-    // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
-    void** commandQueueVtable = *reinterpret_cast<void***>(commandQueue.get());
-
-    void* target_Present                = swapChainVtable[8];
-    void* target_ResizeBuffers          = swapChainVtable[13];
-    void* target_CreateSwapChainForHwnd = factoryVtable[15];
-    // See kExecuteCommandListsSlot at top of namespace for the ID3D12CommandQueue
-    // vtable layout and the rationale pinning the hook to slot 10 (hooked slot
-    // 8 in an earlier draft hijacked UpdateTileMappings and TDR'd the GPU).
-    void* target_ExecuteCommandLists    = commandQueueVtable[kExecuteCommandListsSlot];
-
-    // Clean up temporary dummy resolution targets (ComPtr destructors handle Release)
-    DestroyWindow(hwnd);
-    UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
-
-    re_log::info("target resolved: Present=0x{:X} ResizeBuffers=0x{:X} "
-                 "CreateSwapChainForHwnd=0x{:X} ExecuteCommandLists=0x{:X}",
-                 reinterpret_cast<uintptr_t>(target_Present),
-                 reinterpret_cast<uintptr_t>(target_ResizeBuffers),
-                 reinterpret_cast<uintptr_t>(target_CreateSwapChainForHwnd),
-                 reinterpret_cast<uintptr_t>(target_ExecuteCommandLists));
-
-    // 6. Hook via MinHook
-    // MH_Initialize may have already been called by fastboot — that's fine.
-    const MH_STATUS init = MH_Initialize();
-    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
-        re_log::error("failed to initialize MinHook context");
-        return false;
-    }
-
-    if (MH_CreateHook(target_Present, reinterpret_cast<void*>(&hook_Present),
-                      reinterpret_cast<LPVOID*>(&original_Present)) != MH_OK ||
-        MH_CreateHook(target_ResizeBuffers, reinterpret_cast<void*>(&hook_ResizeBuffers),
-                      reinterpret_cast<LPVOID*>(&original_ResizeBuffers)) != MH_OK ||
-        MH_CreateHook(target_CreateSwapChainForHwnd,
-                      reinterpret_cast<void*>(&hook_CreateSwapChainForHwnd),
-                      reinterpret_cast<LPVOID*>(&original_CreateSwapChainForHwnd)) != MH_OK ||
-        MH_CreateHook(target_ExecuteCommandLists,
-                      reinterpret_cast<void*>(&hook_ExecuteCommandLists),
-                      reinterpret_cast<LPVOID*>(&original_ExecuteCommandLists)) != MH_OK) {
-        re_log::error("failed to create MinHook Present / Resize / CreateSwapChain / "
-                      "ExecuteCommandLists detours");
-        return false;
-    }
-
-    if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) {
-        re_log::error("failed to enable MinHook overlay detours");
-        return false;
+    // CreateSwapChainForHwnd is on IDXGIFactory2, not in kiero's table.
+    // We hook it manually by creating a temporary factory.
+    {
+        wil::com_ptr<IDXGIFactory4> factory;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4),
+                                         reinterpret_cast<void**>(factory.put())))) {
+            void** factoryVtable = *reinterpret_cast<void***>(factory.get());
+            void* target_CreateSwapChainForHwnd = factoryVtable[15];
+            const MH_STATUS init = MH_Initialize();
+            if (init == MH_OK || init == MH_ERROR_ALREADY_INITIALIZED) {
+                if (MH_CreateHook(target_CreateSwapChainForHwnd,
+                                  reinterpret_cast<void*>(&hook_CreateSwapChainForHwnd),
+                                  reinterpret_cast<LPVOID*>(&original_CreateSwapChainForHwnd)) == MH_OK) {
+                    MH_EnableHook(target_CreateSwapChainForHwnd);
+                }
+            }
+        }
     }
 
     g_hooks_installed = true;
-    re_log::info("D3D12/DXGI Present and Resize hooks established successfully!");
+    re_log::info("D3D12/DXGI hooks established via kiero successfully!");
     return true;
 }
+
 
 void shutdown() noexcept {
     if (g_runtime_started) {
@@ -743,6 +678,7 @@ void shutdown() noexcept {
         g_runtime_started = false;
     }
     if (g_hooks_installed) {            re_log::info("disabling MinHook overlay detours...");
+        kiero::shutdown();
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
         g_hooks_installed               = false;
