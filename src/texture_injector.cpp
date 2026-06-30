@@ -275,6 +275,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id) {
         pending_width_ = target_w;
         pending_height_ = target_h;
         has_new_image_ = true;
+        has_pending_pixels_.store(true, std::memory_order_release);
     }
 
     // Cleanup temp files
@@ -293,6 +294,7 @@ bool TextureInjector::pop_pending_pixels(std::vector<uint8_t>& out_pixels,
     out_width = pending_width_;
     out_height = pending_height_;
     has_new_image_ = false;
+    has_pending_pixels_.store(false, std::memory_order_release);
     return true;
 }
 

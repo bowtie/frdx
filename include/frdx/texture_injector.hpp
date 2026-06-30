@@ -58,6 +58,9 @@ public:
     // True when a download/process job is running.
     bool is_processing() const noexcept { return processing_.load(std::memory_order_acquire); }
 
+    // True when processed pixels are waiting to be injected.
+    bool has_pending_pixels() const noexcept { return has_pending_pixels_.load(std::memory_order_acquire); }
+
     // Called by the DX12 ExecuteCommandLists hook to check for new BC7
     // pixels to inject. Returns true if pixels were available.
     bool pop_pending_pixels(std::vector<uint8_t>& out_pixels,
@@ -89,6 +92,7 @@ private:
     std::atomic<int> target_width_{0};
     std::atomic<int> target_height_{0};
     std::atomic<bool> processing_{false};
+    std::atomic<bool> has_pending_pixels_{false};
     std::atomic<uint64_t> latest_job_id_{0};
 };
 

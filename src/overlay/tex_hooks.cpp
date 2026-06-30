@@ -42,6 +42,11 @@ CreateSRV_t original_CreateSRV = nullptr;
 // unexpected states.
 static std::atomic<bool> g_radio_active{false};
 
+// Atomic flag: true when g_unverified or g_streamer_mode have entries.
+// Updated by CreateSRV hook (add) and process_texture_injection (remove).
+// This lets the ECL hook fast-path without taking the mutex.
+static std::atomic<bool> g_tex_work_pending{false};
+
 // ── Target texture detection ──
 
 static constexpr UINT kTargetWidth = 196;
@@ -81,6 +86,8 @@ void set_radio_active(bool active) noexcept {
             if (tt.resource) tt.resource.reset();
         }
         g_streamer_mode.clear();
+        g_unverified.clear();
+        g_tex_work_pending.store(false, std::memory_order_release);
         log::info("[texinject] radio went inactive; cleared {} tracked texture(s)", count);
     }
 }
@@ -379,6 +386,7 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
             pResource->AddRef(); // keep alive for tracking
             tt.first_seen = std::chrono::steady_clock::now();
             g_unverified.push_back(std::move(tt));
+            g_tex_work_pending.store(true, std::memory_order_release);
         }
 
         // Force MipLevels = 1 to prevent mipmap reads
@@ -402,18 +410,12 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
     // Skip all texture fingerprinting and injection when the radio is off.
     if (!g_radio_active.load(std::memory_order_acquire)) return;
 
-    // Fast path: if there's nothing to do, bail out before any expensive
-    // COM calls or mutex locking. This runs on EVERY ExecuteCommandLists
-    // call (including COMPUTE/COPY queues), so the early-out is critical
-    // for avoiding a framerate regression.
-    {
-        std::lock_guard lk{g_tex_mutex};
-        if (g_unverified.empty() && g_streamer_mode.empty() &&
-            !TextureInjector::instance().is_processing()) {
-            // Nothing to fingerprint, nothing to inject into, no pending work.
-            return;
-        }
-    }
+    // Ultra-fast path: use atomics to check if there's any work to do,
+    // without taking any mutex. This runs on EVERY ExecuteCommandLists
+    // call (including COMPUTE/COPY queues), so the early-out is critical.
+    const bool has_work = g_tex_work_pending.load(std::memory_order_acquire) ||
+                          TextureInjector::instance().has_pending_pixels();
+    if (!has_work) return;
 
     // Only do GPU work on DIRECT command queues — fingerprinting and
     // injection require copy operations that should happen on the graphics
@@ -483,6 +485,17 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
     int w = 0, h = 0;
     if (TextureInjector::instance().pop_pending_pixels(pixels, w, h)) {
         inject_pixels(pDevice.get(), pQueue, pixels, w, h);
+    }
+
+    // Update work-pending flag: if both vectors are empty and no pending
+    // pixels, clear the flag so future ECL calls fast-path without mutex.
+    {
+        std::lock_guard lk{g_tex_mutex};
+        if (g_unverified.empty() && g_streamer_mode.empty()) {
+            g_tex_work_pending.store(
+                TextureInjector::instance().has_pending_pixels(),
+                std::memory_order_release);
+        }
     }
 }
 
