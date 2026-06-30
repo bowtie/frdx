@@ -149,6 +149,8 @@ public:
     void previous() override FRDX_EXCLUDES(mu_);
     void pump(RingBuffer& ring) override FRDX_EXCLUDES(mu_);
 
+    void set_volume_normalization(bool on) noexcept { volume_norm_.store(on, std::memory_order_release); }
+
     // Set the stream URL and restart playback.
     // Station preset management.
     void load_stations(const std::filesystem::path& path) FRDX_EXCLUDES(mu_);
@@ -192,9 +194,11 @@ private:
     // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
     static std::expected<std::unique_ptr<Pipe>, ShoutcastError>
     launch_ffmpeg_pipe(const std::string& url,
-                       const std::filesystem::path& ffmpeg_path);
+                       const std::filesystem::path& ffmpeg_path,
+                       bool volume_normalization);
 
     ShoutcastConfig cfg_;
+    std::atomic<bool> volume_norm_{false};
     // Lock-free audio path: pump() loads via acquire, start_pipe_locked() stores
     // via release.  Shared ownership ensures the Pipe stays alive until pump()
     // releases its local reference, even if stop_pipe_locked() replaces pipe_.

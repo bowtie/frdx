@@ -189,6 +189,7 @@ void run_bridge(HMODULE self) noexcept {
 
     // Own the sole audio source and hand a raw pointer to the manager.
     auto shoutcast = std::make_unique<sources::ShoutcastSource>(cfg.shoutcast);
+    shoutcast->set_volume_normalization(cfg.audio.volume_normalization);
     if (shoutcast->initialize()) {
         mgr.set_source(shoutcast.get());
     } else {

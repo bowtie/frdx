@@ -89,6 +89,8 @@ Config load_config(const std::filesystem::path& path) {
         static_cast<float>(pick<double>(au, "output_gain", cfg.audio.output_gain));
     cfg.audio.force_stereo_audio =
         pick<bool>(au, "force_stereo_audio", cfg.audio.force_stereo_audio);
+    cfg.audio.volume_normalization =
+        pick<bool>(au, "volume_normalization", cfg.audio.volume_normalization);
 
     const auto& ov    = section(root, "overlay");
     cfg.overlay.theme = normalize_overlay_theme(pick<std::string>(ov, "theme", cfg.overlay.theme));
@@ -362,6 +364,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.header("audio");
     e.kv("output_gain", static_cast<double>(cfg.audio.output_gain));
     e.kv("force_stereo_audio", cfg.audio.force_stereo_audio);
+    e.kv("volume_normalization", cfg.audio.volume_normalization);
 
     e.header("overlay");
     e.kv("theme", normalize_overlay_theme(cfg.overlay.theme));

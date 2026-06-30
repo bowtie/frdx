@@ -21,6 +21,7 @@ struct ShoutcastConfig {
 struct AudioConfig {
     float output_gain       = 1.0f;
     bool force_stereo_audio = true; // off => mono + FMOD_2D (clean 3D spatialisation)
+    bool volume_normalization = false; // apply EBU R128 loudnorm filter in ffmpeg
 };
 
 struct OverlayConfig {

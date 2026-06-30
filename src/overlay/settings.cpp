@@ -1,7 +1,9 @@
 #include "frdx/overlay/overlay.hpp"
 #include "frdx/overlay/overlay_priv.hpp"
 #include "frdx/config_store.hpp"
+#include "frdx/audio_source_manager.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
+#include "frdx/sources/shoutcast_source.hpp"
 
 #include <algorithm>
 #include <imgui.h>
@@ -61,6 +63,19 @@ void draw_general_settings_tab() {
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
+    }
+
+    label_row("Volume Normalization");
+    bool vol_norm = g_ctx.store->snapshot().audio.volume_normalization;
+    if (ImGui::Checkbox("##vol_norm", &vol_norm)) {
+        g_ctx.store->patch([&](Config& c) { c.audio.volume_normalization = vol_norm; });
+        if (g_ctx.mgr) {
+            auto* sc = dynamic_cast<frdx::sources::ShoutcastSource*>(g_ctx.mgr->active());
+            if (sc) sc->set_volume_normalization(vol_norm);
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Apply EBU R128 loudness normalization (ffmpeg loudnorm filter).\nTakes effect on the next stream reconnect.");
     }
 
     label_row("Log Window");

@@ -250,7 +250,8 @@ void ShoutcastSource::load_stations(const std::filesystem::path& path) {
 
 std::expected<std::unique_ptr<ShoutcastSource::Pipe>, ShoutcastError>
 ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
-                                    const std::filesystem::path& ffmpeg_path) {
+                                    const std::filesystem::path& ffmpeg_path,
+                                    bool volume_normalization) {
     auto pipe = std::make_unique<Pipe>();
     pipe->job = frdx::subprocess::create_kill_on_close_job();
     if (!pipe->job) {
@@ -294,8 +295,11 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
                           L" -reconnect_streamed 1"
                           L" -reconnect_delay_max 5"
                           L" -i " +
-                          frdx::subprocess::quote(frdx::subprocess::widen(url)) +
-                          L" -f s16le -acodec pcm_s16le -ar 48000 -ac 2 pipe:1";
+                          frdx::subprocess::quote(frdx::subprocess::widen(url));
+    if (volume_normalization) {
+        ff_cmd += L" -af loudnorm=I=-14:TP=-2:LRA=11";
+    }
+    ff_cmd += L" -f s16le -acodec pcm_s16le -ar 48000 -ac 2 pipe:1";
 
     pipe->proc_ff     = frdx::subprocess::spawn_in_job(pipe->job, ff_cmd, nul_in, ff_out_w, err_w);
     const DWORD ec_ff = pipe->proc_ff ? 0u : GetLastError();
@@ -398,7 +402,8 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     // Phase 2: launch ffmpeg OUTSIDE the lock (expensive subprocess creation).
     auto new_pipe_result = launch_url.empty()
                                ? std::expected<std::unique_ptr<Pipe>, ShoutcastError>{nullptr}
-                               : launch_ffmpeg_pipe(launch_url, cfg_.ffmpeg_path);
+                               : launch_ffmpeg_pipe(launch_url, cfg_.ffmpeg_path,
+                                                     volume_norm_.load(std::memory_order_acquire));
     auto new_pipe = new_pipe_result ? std::move(*new_pipe_result) : nullptr;
 
     // Phase 3: install pipe and set metadata under lock.
@@ -499,7 +504,8 @@ void ShoutcastSource::start_pipe_locked() {
     if (target_url_.empty()) return;
 
     // Delegate the heavy pipe creation to the shared static helper.
-    auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path);
+    auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path,
+                                           volume_norm_.load(std::memory_order_acquire));
     if (!pipe_result) return;
 
     (*pipe_result)->metadata_epoch = metadata_epoch;
