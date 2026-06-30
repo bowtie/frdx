@@ -71,6 +71,7 @@ private:
     std::uint64_t metadata_generation_ = 0;
     TrackInfo metadata_track_;
     std::string metadata_display_name_;
+    std::string current_artwork_url_;
     std::byte* radio_stream_      = nullptr;  // current RadioStreamFmod
     std::byte* sample_props_body_ = nullptr;  // current SampleProperties body
     std::uint64_t prev_calls_     = 0;

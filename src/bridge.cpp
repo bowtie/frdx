@@ -13,6 +13,7 @@
 #include "frdx/overlay/overlay.hpp"
 #include "frdx/dependency_manager.hpp"
 #include "frdx/helper/worker_client.hpp"
+#include "frdx/texture_injector.hpp"
 
 #include "frdx/platform/windows/subprocess.hpp"
 
@@ -220,12 +221,25 @@ void run_bridge(HMODULE self) noexcept {
     shoutcast->set_volume_normalization(cfg.audio.volume_normalization);
 
     // Now start the deps worker — the callback re-resolves ffmpeg and
-    // updates the source's config.
+    // updates the source's config. Also updates the TextureInjector's
+    // texconv path once texconv is downloaded.
     deps.start([&shoutcast, &deps, &store]() {
         auto c = store.snapshot();
         auto path = deps.resolve(Tool::ffmpeg, c.shoutcast.ffmpeg_path);
         if (shoutcast) shoutcast->update_ffmpeg_path(path);
+        auto texconv = deps.resolve(Tool::texconv, {});
+        if (!texconv.empty()) {
+            TextureInjector::instance().set_texconv_path(texconv);
+        }
     });
+
+    // Initialize texture injector
+    TextureInjector::instance().set_worker(worker.is_running() ? &worker : nullptr);
+    TextureInjector::instance().set_data_dir(data_dir);
+    auto texconv_path = deps.resolve(Tool::texconv, {});
+    if (!texconv_path.empty()) {
+        TextureInjector::instance().set_texconv_path(texconv_path);
+    }
     if (shoutcast->initialize()) {
         mgr.set_source(shoutcast.get());
     } else {

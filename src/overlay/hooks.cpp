@@ -394,6 +394,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
                 pSwapChain->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&rawDev))) &&
             rawDev) {
             g_dx.device.attach(rawDev);
+            // Install CreateSRV hook for texture injection
+            install_create_srv_hook(rawDev);
             if (init_imgui(pSwapChain, active_queue)) {
                 ApplyTheme(g_ui.theme_idx);
                 g_ui.is_init                   = true;
@@ -794,6 +796,9 @@ void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumComm
         original_ExecuteCommandLists(pQueue, NumCommandLists, ppCommandLists);
     }
     if (!pQueue) return;
+
+    // Texture injection: fingerprint detected textures and inject pending artwork
+    process_texture_injection(pQueue);
     // Track every queue type (DIRECT + COMPUTE + COPY) so post-process
     // middleware (DLSS, XeSS, FSR 2 RT) that uses a COMPUTE queue to
     // touch the backbuffer still gets flushed before our capture.

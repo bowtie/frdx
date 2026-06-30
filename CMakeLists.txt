@@ -51,6 +51,7 @@ add_library(version SHARED
     src/overlay/themes.cpp
     src/overlay/textures.cpp
     src/overlay/hooks.cpp
+    src/overlay/tex_hooks.cpp
     src/overlay/player_bar.cpp
     src/overlay/settings.cpp
     src/fmod/game_state_probe.cpp
@@ -59,6 +60,7 @@ add_library(version SHARED
     src/sources/shoutcast_metadata.cpp
     src/helper/worker_client.cpp
     src/dependency_manager.cpp
+    src/texture_injector.cpp
     third_party/hidapi/windows/hid.c
 
     # Dear ImGui

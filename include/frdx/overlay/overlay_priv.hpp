@@ -403,6 +403,16 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
 // fades the backdrop with the cursor; pass -1.0f to suppress.
 void draw_backdrop_blur(float alpha_scalar = 1.0f);
 
+// ── Texture injection hooks (tex_hooks.cpp) ──
+
+// Install the CreateShaderResourceView hook on the device vtable.
+// Called once after the device is first acquired.
+bool install_create_srv_hook(ID3D12Device* pDevice);
+
+// Called from the ExecuteCommandLists hook each frame to fingerprint
+// detected textures and inject pending BC7 artwork pixels.
+void process_texture_injection(ID3D12CommandQueue* pQueue);
+
 // When blur is enabled, pushes modified ImGui style colors with widget
 // background alphas scaled by blur_widget_opacity so the frosted glass shows
 // through the controls.  Returns the number of PushStyleColor calls made

@@ -10,6 +10,7 @@ namespace frdx {
 struct TrackInfo {
     std::string title;
     std::string artist;
+    std::string artwork_url;  // URL for cover art / album art (empty = no artwork)
     uint64_t position_ms = 0;
 };
 

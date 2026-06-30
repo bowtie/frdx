@@ -1,6 +1,7 @@
 #include "frdx/fmod/dsp_control_loop.hpp"
 #include "frdx/fmod/radio_discovery.hpp"
 #include "frdx/audio_source_manager.hpp"
+#include "frdx/texture_injector.hpp"
 #include "frdx/log.hpp"
 
 #include <chrono>
@@ -289,6 +290,14 @@ void ControlLoop::push_metadata() noexcept {
             metadata_display_name_ = mp->display_name();
             metadata_source_       = a;
             metadata_generation_   = generation;
+
+            // Update texture injector when artwork URL changes
+            if (metadata_track_.artwork_url != current_artwork_url_) {
+                current_artwork_url_ = metadata_track_.artwork_url;
+                if (!current_artwork_url_.empty()) {
+                    TextureInjector::instance().update_artwork_url(current_artwork_url_);
+                }
+            }
         } catch (...) {
             metadata_source_     = nullptr;
             metadata_generation_ = 0;
