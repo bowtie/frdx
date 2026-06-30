@@ -48,6 +48,12 @@ public:
     // Discard everything currently in flight (advance read to write).
     void drain() noexcept;
 
+    // Hold mode: when engaged, reads return 0 (as if empty). The producer
+    // can continue writing to fill the buffer; when hold is released, the
+    // accumulated data becomes readable all at once. Useful for prebuffering.
+    void set_hold(bool on) noexcept { hold_.store(on, std::memory_order_release); }
+    bool held() const noexcept { return hold_.load(std::memory_order_acquire); }
+
 private:
     static std::size_t round_pow2(std::size_t n) noexcept;
 
@@ -56,6 +62,7 @@ private:
     std::unique_ptr<std::byte[]> data_;
     alignas(64) std::atomic<std::size_t> write_pos_{0};
     alignas(64) std::atomic<std::size_t> read_pos_{0};
+    alignas(64) std::atomic<bool> hold_{false};
 };
 
 } // namespace frdx
