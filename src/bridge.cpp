@@ -312,7 +312,14 @@ void run_bridge(HMODULE self) noexcept {
     // Start the Direct3D 12 ImGui overlay detours
     overlay::initialize(mgr, bridge, store, &dualsense);
 
-    for (;;) Sleep(60'000);
+    // Keep the bridge alive until the host process exits. Use a short sleep
+    // so the process can exit promptly when the game closes — a 60s sleep
+    // would delay exit by up to a minute, leaving Steam showing "running".
+    HANDLE hHost = GetCurrentProcess();
+    for (;;) {
+        // If the host is being terminated, exit immediately.
+        if (WaitForSingleObject(hHost, 2000) != WAIT_TIMEOUT) break;
+    }
 }
 
 } // namespace frdx
