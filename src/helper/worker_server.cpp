@@ -134,6 +134,10 @@ bool http_download(std::string_view url, std::string_view dest_path) {
     HINTERNET session = WinHttpOpen(L"FRDX/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) return false;
+    // Follow redirects (GitHub release URLs 302 to release-assets.githubusercontent.com)
+    DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(session, WINHTTP_OPTION_REDIRECT_POLICY,
+                     &redirect_policy, sizeof(redirect_policy));
     HINTERNET connect = WinHttpConnect(session, whost.c_str(),
                                        https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT, 0);
     if (!connect) { WinHttpCloseHandle(session); return false; }
@@ -145,6 +149,20 @@ bool http_download(std::string_view url, std::string_view dest_path) {
     bool ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                  WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     if (ok) ok = WinHttpReceiveResponse(request, nullptr);
+
+    // Verify we got a 200 OK (not a 302 redirect that wasn't followed, etc.)
+    if (ok) {
+        DWORD status_code = 0;
+        DWORD status_size = sizeof(status_code);
+        if (WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size,
+                                WINHTTP_HEADER_NAME_BY_INDEX)) {
+            if (status_code != 200) {
+                log::warn("[worker] download returned HTTP {}", status_code);
+                ok = false;
+            }
+        }
+    }
 
     if (ok) {
         HANDLE file = CreateFileW(wdest.c_str(), GENERIC_WRITE, 0, nullptr,
