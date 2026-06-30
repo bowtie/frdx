@@ -407,14 +407,13 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
 
 void process_texture_injection(ID3D12CommandQueue* pQueue) {
     if (!pQueue) return;
-    // Skip all texture fingerprinting and injection when the radio is off.
-    if (!g_radio_active.load(std::memory_order_acquire)) return;
 
     // Ultra-fast path: use atomics to check if there's any work to do,
     // without taking any mutex. This runs on EVERY ExecuteCommandLists
     // call (including COMPUTE/COPY queues), so the early-out is critical.
+    const bool radio_active = g_radio_active.load(std::memory_order_acquire);
     const bool has_work = g_tex_work_pending.load(std::memory_order_acquire) ||
-                          TextureInjector::instance().has_pending_pixels();
+                          (radio_active && TextureInjector::instance().has_pending_pixels());
     if (!has_work) return;
 
     // Only do GPU work on DIRECT command queues — fingerprinting and
@@ -480,11 +479,17 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
         }
     }
 
-    // Check for pending pixels to inject
-    std::vector<uint8_t> pixels;
-    int w = 0, h = 0;
-    if (TextureInjector::instance().pop_pending_pixels(pixels, w, h)) {
-        inject_pixels(pDevice.get(), pQueue, pixels, w, h);
+    // Check for pending pixels to inject.
+    // Only inject when the radio is active — when the radio is off, the
+    // game may have destroyed the target textures, and writing to stale
+    // resources causes GPU crashes (TDR). Fingerprinting above is safe
+    // because it's SEH-protected read-only GPU readback.
+    if (g_radio_active.load(std::memory_order_acquire)) {
+        std::vector<uint8_t> pixels;
+        int w = 0, h = 0;
+        if (TextureInjector::instance().pop_pending_pixels(pixels, w, h)) {
+            inject_pixels(pDevice.get(), pQueue, pixels, w, h);
+        }
     }
 
     // Update work-pending flag: if both vectors are empty and no pending
