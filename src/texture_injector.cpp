@@ -98,13 +98,15 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id) {
         return;
     }
 
-    // ── Step 3: Wait for target height discovery ──
+    // ── Step 3: Wait for target dimensions discovery ──
     int target_h = target_height_.load(std::memory_order_acquire);
-    if (target_h == 0) {
+    int target_w = target_width_.load(std::memory_order_acquire);
+    if (target_h == 0 || target_w == 0) {
         // Poll for up to 5 seconds
         for (int i = 0; i < 100 && target_h == 0; ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             target_h = target_height_.load(std::memory_order_acquire);
+            target_w = target_width_.load(std::memory_order_acquire);
             if (job_id != latest_job_id_.load(std::memory_order_acquire)) {
                 stbi_image_free(img_data);
                 cleanup();
@@ -112,13 +114,13 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id) {
             }
         }
         if (target_h == 0) target_h = 104; // default
+        if (target_w == 0) target_w = 196; // default
     }
 
-    const int target_w = 196;
-    const int square_size = 104;
-    const int border_thickness = 4;
+    const bool is_square = (target_w == target_h);
+    const int square_size = is_square ? target_w : 104;
 
-    // ── Step 4: Resize to cover-fit 104x104 ──
+    // ── Step 4: Resize to cover-fit the artwork square ──
     float scale = std::max(static_cast<float>(square_size) / width,
                            static_cast<float>(square_size) / height);
     int new_w = std::max(1, static_cast<int>(width * scale));
@@ -131,7 +133,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id) {
 
     if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
-    // ── Step 5: Crop center to 104x104 ──
+    // ── Step 5: Crop center to square_size x square_size ──
     int crop_x = (new_w - square_size) / 2;
     int crop_y = (new_h - square_size) / 2;
     if (crop_x < 0) crop_x = 0;
@@ -150,43 +152,49 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id) {
         }
     }
 
-    // ── Step 6: Calculate average color for border ──
-    uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
-    for (int i = 0; i < square_size * square_size; ++i) {
-        r_sum += square_data[i * 4];
-        g_sum += square_data[i * 4 + 1];
-        b_sum += square_data[i * 4 + 2];
-    }
-    int count = square_size * square_size;
-    unsigned char avg_r = static_cast<unsigned char>(r_sum / count);
-    unsigned char avg_g = static_cast<unsigned char>(g_sum / count);
-    unsigned char avg_b = static_cast<unsigned char>(b_sum / count);
-    // Darken to 60% for border
-    avg_r = static_cast<unsigned char>(avg_r * 0.6f);
-    avg_g = static_cast<unsigned char>(avg_g * 0.6f);
-    avg_b = static_cast<unsigned char>(avg_b * 0.6f);
+    // ── Step 6: Calculate average color for border (wide mode only) ──
+    std::vector<unsigned char> padded_data;
+    if (is_square) {
+        // Square target: artwork fills the entire texture, no border needed
+        padded_data = std::move(square_data);
+    } else {
+        // Wide target (196x104): center the square artwork with colored border
+        uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
+        for (int i = 0; i < square_size * square_size; ++i) {
+            r_sum += square_data[i * 4];
+            g_sum += square_data[i * 4 + 1];
+            b_sum += square_data[i * 4 + 2];
+        }
+        int count = square_size * square_size;
+        unsigned char avg_r = static_cast<unsigned char>(r_sum / count);
+        unsigned char avg_g = static_cast<unsigned char>(g_sum / count);
+        unsigned char avg_b = static_cast<unsigned char>(b_sum / count);
+        // Darken to 60% for border
+        avg_r = static_cast<unsigned char>(avg_r * 0.6f);
+        avg_g = static_cast<unsigned char>(avg_g * 0.6f);
+        avg_b = static_cast<unsigned char>(avg_b * 0.6f);
 
-    // ── Step 7: Compose final image with border ──
-    std::vector<unsigned char> padded_data(target_w * target_h * 4, 0);
-    // Fill border with average color
-    for (int i = 0; i < target_w * target_h; ++i) {
-        padded_data[i * 4]     = avg_r;
-        padded_data[i * 4 + 1] = avg_g;
-        padded_data[i * 4 + 2] = avg_b;
-        padded_data[i * 4 + 3] = 255;
-    }
+        padded_data.resize(target_w * target_h * 4);
+        // Fill border with average color
+        for (int i = 0; i < target_w * target_h; ++i) {
+            padded_data[i * 4]     = avg_r;
+            padded_data[i * 4 + 1] = avg_g;
+            padded_data[i * 4 + 2] = avg_b;
+            padded_data[i * 4 + 3] = 255;
+        }
 
-    // Place the 104x104 artwork centered in the target
-    int place_x = (target_w - square_size) / 2;
-    int place_y = (target_h - square_size) / 2;
-    for (int y = 0; y < square_size; ++y) {
-        for (int x = 0; x < square_size; ++x) {
-            int dx = place_x + x;
-            int dy = place_y + y;
-            if (dx < 0 || dx >= target_w || dy < 0 || dy >= target_h) continue;
-            const unsigned char* src = &square_data[(y * square_size + x) * 4];
-            unsigned char* dst = &padded_data[(dy * target_w + dx) * 4];
-            dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+        // Place the square artwork centered in the wide target
+        int place_x = (target_w - square_size) / 2;
+        int place_y = (target_h - square_size) / 2;
+        for (int y = 0; y < square_size; ++y) {
+            for (int x = 0; x < square_size; ++x) {
+                int dx = place_x + x;
+                int dy = place_y + y;
+                if (dx < 0 || dx >= target_w || dy < 0 || dy >= target_h) continue;
+                const unsigned char* src = &square_data[(y * square_size + x) * 4];
+                unsigned char* dst = &padded_data[(dy * target_w + dx) * 4];
+                dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+            }
         }
     }
 

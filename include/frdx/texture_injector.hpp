@@ -46,9 +46,13 @@ public:
     // Spawns a background thread to download + process the image.
     void update_artwork_url(const std::string& url);
 
-    // Called by the DX12 hook to report the target texture height
-    // (104 or 196 pixels) once discovered.
-    void set_target_height(int h) noexcept { target_height_.store(h, std::memory_order_release); }
+    // Called by the DX12 hook to report the target texture dimensions
+    // (196x104 or 196x196) once discovered.
+    void set_target_dimensions(int w, int h) noexcept {
+        target_width_.store(w, std::memory_order_release);
+        target_height_.store(h, std::memory_order_release);
+    }
+    int target_width() const noexcept { return target_width_.load(std::memory_order_acquire); }
     int target_height() const noexcept { return target_height_.load(std::memory_order_acquire); }
 
     // True when a download/process job is running.
@@ -82,6 +86,7 @@ private:
     int pending_height_ = 0;
     bool has_new_image_ = false;
 
+    std::atomic<int> target_width_{0};
     std::atomic<int> target_height_{0};
     std::atomic<bool> processing_{false};
     std::atomic<uint64_t> latest_job_id_{0};

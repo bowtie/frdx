@@ -191,8 +191,9 @@ bool fingerprint_texture(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
                                hash == TextureInjector::kPlaceholderHash196x196);
 
         if (is_placeholder) {
-            // Report target height to TextureInjector
-            TextureInjector::instance().set_target_height(static_cast<int>(height));
+            // Report target dimensions to TextureInjector
+            TextureInjector::instance().set_target_dimensions(
+                static_cast<int>(width), static_cast<int>(height));
             log::info("[texinject] fingerprinted placeholder texture: {}x{} hash=0x{:X}",
                       width, height, hash);
         }
