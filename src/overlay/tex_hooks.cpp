@@ -408,59 +408,79 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
 void process_texture_injection(ID3D12CommandQueue* pQueue) {
     if (!pQueue) return;
 
-    // Ultra-fast path: use atomics to check if there's any work to do,
-    // without taking any mutex. This runs on EVERY ExecuteCommandLists
-    // call (including COMPUTE/COPY queues), so the early-out is critical.
+    // ── Fast path: two tiers of checks ──
+    //
+    // Tier 1 (every ECL call, all queue types — zero overhead):
+    //   Check if there are pending pixels to inject. This is the only
+    //   check that needs to happen every frame for timely artwork injection.
+    //
+    // Tier 2 (throttled to ~5x/sec, DIRECT queues only):
+    //   Check if there are unverified textures to fingerprint. This can
+    //   be throttled because fingerprinting has a 2-second delay anyway.
+    //   Throttling avoids mutex contention with CreateSRV on the render
+    //   thread, which was causing a ~50% framerate regression.
     const bool radio_active = g_radio_active.load(std::memory_order_acquire);
-    const bool has_work = g_tex_work_pending.load(std::memory_order_acquire) ||
-                          (radio_active && TextureInjector::instance().has_pending_pixels());
-    if (!has_work) return;
+    const bool has_pixels = radio_active && TextureInjector::instance().has_pending_pixels();
 
-    // Only do GPU work on DIRECT command queues — fingerprinting and
-    // injection require copy operations that should happen on the graphics
-    // queue, not COMPUTE or COPY queues.
+    static std::atomic<int64_t> last_fingerprint_check_ns{0};
+    const auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto last_check = last_fingerprint_check_ns.load(std::memory_order_relaxed);
+    const bool fingerprint_due = g_tex_work_pending.load(std::memory_order_acquire) &&
+                                 (now_ns - last_check) > 200'000'000; // 200ms
+
+    if (!has_pixels && !fingerprint_due) return;
+
+    // Only do GPU work on DIRECT command queues.
     D3D12_COMMAND_QUEUE_DESC qdesc = pQueue->GetDesc();
     if (qdesc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
 
+    // Update the fingerprint check timestamp. A simple store is fine —
+    // if multiple DIRECT queues pass the throttle simultaneously, the
+    // extra fingerprint check is harmless (mutex protects the work).
+    if (fingerprint_due) {
+        last_fingerprint_check_ns.store(now_ns, std::memory_order_relaxed);
+    }
+
+    // If we only have pending pixels (no fingerprint work), skip the
+    // fingerprinting section entirely — just get the device and inject.
     wil::com_ptr<ID3D12Device> pDevice;
     if (FAILED(pQueue->GetDevice(IID_PPV_ARGS(pDevice.put())))) return;
 
     auto now = std::chrono::steady_clock::now();
 
-    // Cleanup old unverified entries every 1 second (UI reload detection)
-    {
-        std::lock_guard lk{g_tex_mutex};
-        if (now - g_last_cleanup > std::chrono::seconds(1)) {
-            g_last_cleanup = now;
-            // Remove unverified entries older than 5 seconds
-            g_unverified.erase(
-                std::remove_if(g_unverified.begin(), g_unverified.end(),
-                    [&](const TrackedTexture& tt) {
-                        return now - tt.first_seen > std::chrono::seconds(5);
-                    }),
-                g_unverified.end());
-            // Remove streamer mode entries whose resource has been freed
-            // (we can't easily detect this, so we keep them until UI reload)
-        }
-    }
-
-    // Fingerprint unverified textures after 2 seconds.
-    // Collect candidates under the lock, then fingerprint outside the lock
-    // to avoid stalling other threads (especially CreateSRV) during the
-    // GPU readback operation.
-    std::vector<ID3D12Resource*> to_fingerprint;
-    {
-        std::lock_guard lk{g_tex_mutex};
-        for (auto it = g_unverified.begin(); it != g_unverified.end(); ) {
-            if (now - it->first_seen >= std::chrono::seconds(2)) {
-                to_fingerprint.push_back(it->resource.get());
-                it->resource.get()->AddRef(); // keep alive for fingerprint
-                it = g_unverified.erase(it);
-            } else {
-                ++it;
+    // ── Fingerprinting section (throttled) ──
+    // Only run this when fingerprint_due is true (~5x/sec). This avoids
+    // taking g_tex_mutex on every ECL call, which was causing mutex
+    // contention with the CreateSRV hook on the render thread.
+    if (fingerprint_due) {
+        // Cleanup old unverified entries every 1 second (UI reload detection)
+        {
+            std::lock_guard lk{g_tex_mutex};
+            if (now - g_last_cleanup > std::chrono::seconds(1)) {
+                g_last_cleanup = now;
+                g_unverified.erase(
+                    std::remove_if(g_unverified.begin(), g_unverified.end(),
+                        [&](const TrackedTexture& tt) {
+                            return now - tt.first_seen > std::chrono::seconds(5);
+                        }),
+                    g_unverified.end());
             }
         }
-    }
+
+        // Fingerprint unverified textures after 2 seconds.
+        std::vector<ID3D12Resource*> to_fingerprint;
+        {
+            std::lock_guard lk{g_tex_mutex};
+            for (auto it = g_unverified.begin(); it != g_unverified.end(); ) {
+                if (now - it->first_seen >= std::chrono::seconds(2)) {
+                    to_fingerprint.push_back(it->resource.get());
+                    it->resource.get()->AddRef();
+                    it = g_unverified.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
 
     // Fingerprint outside the lock (GPU readback is expensive)
     for (auto* res : to_fingerprint) {
@@ -479,28 +499,24 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
         }
     }
 
-    // Check for pending pixels to inject.
+    // Update work-pending flag.
+    {
+        std::lock_guard lk{g_tex_mutex};
+        g_tex_work_pending.store(!g_unverified.empty(),
+                                  std::memory_order_release);
+    }
+    } // end if (fingerprint_due)
+
+    // ── Injection section (every frame when pixels are pending) ──
     // Only inject when the radio is active — when the radio is off, the
     // game may have destroyed the target textures, and writing to stale
-    // resources causes GPU crashes (TDR). Fingerprinting above is safe
-    // because it's SEH-protected read-only GPU readback.
+    // resources causes GPU crashes (TDR).
     if (g_radio_active.load(std::memory_order_acquire)) {
         std::vector<uint8_t> pixels;
         int w = 0, h = 0;
         if (TextureInjector::instance().pop_pending_pixels(pixels, w, h)) {
             inject_pixels(pDevice.get(), pQueue, pixels, w, h);
         }
-    }
-
-    // Update work-pending flag. Only keep it true if there are still
-    // unverified textures to fingerprint. Having entries in g_streamer_mode
-    // (already fingerprinted) does NOT mean there's work to do — we only
-    // need to act when new pixels arrive, which is covered by the separate
-    // has_pending_pixels() atomic check in the fast path.
-    {
-        std::lock_guard lk{g_tex_mutex};
-        g_tex_work_pending.store(!g_unverified.empty(),
-                                  std::memory_order_release);
     }
 }
 
