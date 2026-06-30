@@ -30,7 +30,6 @@ add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
 
 add_library(version SHARED
     src/proxy/dll_main.cpp
-    src/proxy/comctl32.def
     src/fastboot.cpp
     src/bridge.cpp
     src/log.cpp

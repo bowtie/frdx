@@ -1,3 +1,0 @@
-LIBRARY version
-; All 17 exports are forwarded via /EXPORT pragmas in dll_main.cpp.
-; This file is kept only to set the internal library name.
