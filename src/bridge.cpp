@@ -128,7 +128,9 @@ void maybe_launch_external_helper(const std::filesystem::path& module_dir,
     (void)launch_external_helper(module_dir, cfg.udp_port);
 }
 
-void stop_external_helper() {
+} // namespace (anonymous)
+
+void stop_external_helper() noexcept {
     // Signal the named event so the helper's main loop exits cleanly.
     // Try Global\ first (works across sessions), fall back to Local\.
     HANDLE stop_event = CreateEventW(nullptr, TRUE, FALSE, L"Global\\FRDX_DualSenseHelperStop");
@@ -143,9 +145,20 @@ void stop_external_helper() {
         log::warn("[dualsense] failed to create stop event for helper (ec={})",
                   GetLastError());
     }
-}
 
-} // namespace
+    // Delete the Task Scheduler task so it doesn't linger between sessions.
+    std::wstring system_dir(MAX_PATH, L'\0');
+    const UINT system_len =
+        GetSystemDirectoryW(system_dir.data(), static_cast<UINT>(system_dir.size()));
+    if (system_len > 0) {
+        system_dir.resize(system_len);
+        const std::wstring schtasks =
+            quote_arg((std::filesystem::path(system_dir) / L"schtasks.exe").wstring());
+        const std::wstring delete_cmd =
+            schtasks + L" /Delete /TN " + quote_arg(L"FRDX_DualSenseHelper") + L" /F";
+        (void)run_hidden_process(delete_cmd);
+    }
+}
 
 FRDX_NO_THREAD_SAFETY_ANALYSIS
 void run_bridge(HMODULE self) noexcept {

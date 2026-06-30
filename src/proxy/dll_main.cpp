@@ -32,6 +32,7 @@ FWD(VerQueryValueW)
 
 namespace frdx {
 void run_bridge(HMODULE self) noexcept;
+void stop_external_helper() noexcept;
 } // namespace frdx
 
 namespace {
@@ -51,6 +52,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
         // the timer hooks need to be in place before the intro video hold.
         frdx::fastboot::start();
         frdx::detail::unique_handle{CreateThread(nullptr, 0, bridge_thread, hModule, 0, nullptr)};
+    } else if (reason == DLL_PROCESS_DETACH) {
+        // Signal the external DualSense helper to stop so it doesn't
+        // linger after the game closes (which can keep Steam showing
+        // the game as "running").
+        frdx::stop_external_helper();
     }
     return TRUE;
 }
