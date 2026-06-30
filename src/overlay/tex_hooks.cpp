@@ -492,15 +492,15 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
         }
     }
 
-    // Update work-pending flag: if both vectors are empty and no pending
-    // pixels, clear the flag so future ECL calls fast-path without mutex.
+    // Update work-pending flag. Only keep it true if there are still
+    // unverified textures to fingerprint. Having entries in g_streamer_mode
+    // (already fingerprinted) does NOT mean there's work to do — we only
+    // need to act when new pixels arrive, which is covered by the separate
+    // has_pending_pixels() atomic check in the fast path.
     {
         std::lock_guard lk{g_tex_mutex};
-        if (g_unverified.empty() && g_streamer_mode.empty()) {
-            g_tex_work_pending.store(
-                TextureInjector::instance().has_pending_pixels(),
-                std::memory_order_release);
-        }
+        g_tex_work_pending.store(!g_unverified.empty(),
+                                  std::memory_order_release);
     }
 }
 
