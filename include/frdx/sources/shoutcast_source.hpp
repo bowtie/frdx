@@ -151,6 +151,13 @@ public:
 
     void set_volume_normalization(bool on) noexcept { volume_norm_.store(on, std::memory_order_release); }
 
+    // Update the ffmpeg binary path. Takes effect on the next stream
+    // (re)connect. Used by DependencyManager after auto-downloading ffmpeg.
+    void update_ffmpeg_path(const std::filesystem::path& path) noexcept {
+        std::lock_guard lk{mu_};
+        cfg_.ffmpeg_path = path;
+    }
+
     // Set the stream URL and restart playback.
     // Station preset management.
     void load_stations(const std::filesystem::path& path) FRDX_EXCLUDES(mu_);

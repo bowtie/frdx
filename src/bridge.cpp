@@ -11,6 +11,8 @@
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/overlay/overlay.hpp"
+#include "frdx/dependency_manager.hpp"
+#include "frdx/helper/worker_client.hpp"
 
 #include "frdx/platform/windows/subprocess.hpp"
 
@@ -182,14 +184,48 @@ void run_bridge(HMODULE self) noexcept {
         log::warn("[bridge] some FMOD signatures unresolved -- DSP injection disabled");
     }
 
+    // Start the worker process for out-of-process subprocess management
+    // (downloads, ffmpeg spawning). This keeps the game's address space
+    // clean and improves Wine/Proton compatibility.
+    helper::WorkerClient worker;
+    {
+        auto helper_exe = dir / L"frdx-helper.exe";
+        std::error_code ec;
+        if (std::filesystem::exists(helper_exe, ec)) {
+            worker.start(helper_exe.wstring());
+        } else {
+            log::warn("[bridge] frdx-helper.exe not found; worker mode disabled");
+        }
+    }
+
+    // Dependency manager: auto-downloads ffmpeg/texconv if missing.
+    // The callback fires after each download completes; we use it to
+    // re-resolve the ffmpeg path into the live shoutcast source.
+    DependencyManager deps{data_dir / "bin", worker.is_running() ? &worker : nullptr};
+
     const std::size_t ring_bytes = static_cast<std::size_t>(cfg.general.ring_buffer_mb) << 20;
     AudioSourceManager mgr{ring_bytes};
     dualsense::DualSenseService dualsense{dualsense_service_config(cfg.dualsense)};
     dualsense.start();
 
+    // Resolve ffmpeg path through the dependency manager before creating
+    // the source. If ffmpeg isn't present yet, the source will use the
+    // PATH fallback and the deps callback will update it after download.
+    auto resolved_cfg = cfg;
+    resolved_cfg.shoutcast.ffmpeg_path =
+        deps.resolve(Tool::ffmpeg, cfg.shoutcast.ffmpeg_path);
+
     // Own the sole audio source and hand a raw pointer to the manager.
-    auto shoutcast = std::make_unique<sources::ShoutcastSource>(cfg.shoutcast);
+    auto shoutcast = std::make_unique<sources::ShoutcastSource>(resolved_cfg.shoutcast);
     shoutcast->set_volume_normalization(cfg.audio.volume_normalization);
+
+    // Now start the deps worker — the callback re-resolves ffmpeg and
+    // updates the source's config.
+    deps.start([&shoutcast, &deps, &store]() {
+        auto c = store.snapshot();
+        auto path = deps.resolve(Tool::ffmpeg, c.shoutcast.ffmpeg_path);
+        if (shoutcast) shoutcast->update_ffmpeg_path(path);
+    });
     if (shoutcast->initialize()) {
         mgr.set_source(shoutcast.get());
     } else {
