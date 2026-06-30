@@ -197,6 +197,13 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id) {
     if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
     // ── Step 9: BC7 compress via texconv ──
+    if (!std::filesystem::exists(texconv_path, ec)) {
+        log::warn("[texinject] texconv.exe not found at {}; skipping BC7 compression",
+                  texconv_path.string());
+        cleanup();
+        return;
+    }
+
     std::string texconv_cmd = "\"" + texconv_path.string() +
         "\" -f BC7_UNORM -w " + std::to_string(target_w) +
         " -h " + std::to_string(target_h) +

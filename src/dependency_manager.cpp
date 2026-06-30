@@ -23,7 +23,7 @@ const ToolSpecData kSpecs[] = {
      ""},
     // texconv
     {"texconv.exe",
-     "https://github.com/microsoft/DirectXTex/releases/latest/download/texconv.exe",
+     "https://github.com/microsoft/DirectXTex/releases/download/may2026/texconv.exe",
      ""},
 };
 
