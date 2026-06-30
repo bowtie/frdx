@@ -90,6 +90,7 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
                 ss.id   = s.value("id", "");
                 ss.name = s.value("name", "");
                 ss.url  = s.value("url", "");
+                ss.artwork_url = s.value("artwork_url", "");
                 // Per-stream mapping override.
                 if (s.contains("mapping")) {
                     const auto& mp                         = s["mapping"];
@@ -337,6 +338,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     std::string station_name;
     std::string stream_name;
     std::string md_url;
+    std::string artwork_url;
     TrackInfo static_info;
     bool has_static = false;
     {
@@ -372,6 +374,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         launch_url         = target_url_;
         station_name       = station->name;
         stream_name        = stream->name;
+        artwork_url        = stream->artwork_url;
 
         // Resolve the metadata URL / type for this stream.
         metadata_url_.clear();
@@ -428,6 +431,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
                 info_.title  = station_name;
                 info_.artist = stream_name;
             }
+            info_.artwork_url = artwork_url;
             info_gen_.fetch_add(1, std::memory_order_release);
             display_name_ = station_name;
             display_name_gen_.fetch_add(1, std::memory_order_release);
@@ -534,9 +538,11 @@ void ShoutcastSource::restore_station_display_locked() {
         display_name_ = st.name;
         display_name_gen_.fetch_add(1, std::memory_order_release);
         info_.artist.clear();
+        info_.artwork_url.clear();
         for (const auto& str : st.streams) {
             if (str.id == active_stream_id_) {
                 info_.artist = str.name;
+                info_.artwork_url = str.artwork_url;
                 break;
             }
         }
@@ -587,9 +593,16 @@ void ShoutcastSource::cycle_and_restart(int direction) {
         frdx::ScopedLock lk{mu_};
         cycle_preset(direction);
         start_pipe_locked();
-        // Handle static metadata from new station.
+        // Handle static metadata from new station + artwork URL.
         for (const auto& st : stations_) {
             if (st.id == active_station_id_) {
+                info_.artwork_url.clear();
+                for (const auto& str : st.streams) {
+                    if (str.id == active_stream_id_) {
+                        info_.artwork_url = str.artwork_url;
+                        break;
+                    }
+                }
                 if (st.metadata.type == "static") {
                     info_.title =
                         st.metadata.static_title.empty() ? st.name : st.metadata.static_title;

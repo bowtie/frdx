@@ -41,6 +41,10 @@ struct StationStream {
     std::string id;
     std::string name;
     std::string url;
+    // Optional artwork/cover image URL for this stream. When non-empty,
+    // the texture injector downloads and displays it as the in-game
+    // radio HUD album art.
+    std::string artwork_url;
     // Per-stream mapping override — when non-empty, takes precedence over
     // the station-level mapping for metadata resolution. This allows fixing
     // individual streams whose API returns data in a different format (e.g.
