@@ -16,6 +16,7 @@
 #include <cstring>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 
@@ -33,6 +34,13 @@ using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT 
 extern ExecuteCommandLists_t original_ExecuteCommandLists;
 
 CreateSRV_t original_CreateSRV = nullptr;
+
+// ── Radio active flag ──
+// Set by the control loop when the FMOD radio channel is alive.
+// When false, texture fingerprinting and injection are skipped to avoid
+// touching textures that the game may have destroyed or transitioned to
+// unexpected states.
+static std::atomic<bool> g_radio_active{false};
 
 // ── Target texture detection ──
 
@@ -61,6 +69,21 @@ std::mutex g_tex_mutex;
 std::vector<TrackedTexture> g_unverified;      // detected but not fingerprinted
 std::vector<TrackedTexture> g_streamer_mode;   // fingerprinted as placeholder
 std::chrono::steady_clock::time_point g_last_cleanup;
+
+void set_radio_active(bool active) noexcept {
+    const bool prev = g_radio_active.exchange(active, std::memory_order_acq_rel);
+    if (prev && !active) {
+        // Radio just went inactive — clear tracked textures to avoid
+        // injecting into stale/destroyed textures on the next frame.
+        std::lock_guard lk{g_tex_mutex};
+        auto count = g_streamer_mode.size();
+        for (auto& tt : g_streamer_mode) {
+            if (tt.resource) tt.resource.reset();
+        }
+        g_streamer_mode.clear();
+        log::info("[texinject] radio went inactive; cleared {} tracked texture(s)", count);
+    }
+}
 
 // ── FNV-1a hash for BC7 pitched data ──
 
@@ -376,6 +399,10 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
 
 void process_texture_injection(ID3D12CommandQueue* pQueue) {
     if (!pQueue) return;
+    // Skip all texture fingerprinting and injection when the radio is off.
+    // The game may destroy or repurpose radio UI textures, and touching them
+    // with wrong barrier transitions causes GPU crashes (TDR).
+    if (!g_radio_active.load(std::memory_order_acquire)) return;
 
     wil::com_ptr<ID3D12Device> pDevice;
     if (FAILED(pQueue->GetDevice(IID_PPV_ARGS(pDevice.put())))) return;

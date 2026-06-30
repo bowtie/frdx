@@ -413,6 +413,11 @@ bool install_create_srv_hook(ID3D12Device* pDevice);
 // detected textures and inject pending BC7 artwork pixels.
 void process_texture_injection(ID3D12CommandQueue* pQueue);
 
+// Set by the control loop to indicate whether the FMOD radio channel
+// is alive. When false, texture fingerprinting and injection are
+// skipped to avoid touching stale/destroyed textures.
+void set_radio_active(bool active) noexcept;
+
 // When blur is enabled, pushes modified ImGui style colors with widget
 // background alphas scaled by blur_widget_opacity so the frosted glass shows
 // through the controls.  Returns the number of PushStyleColor calls made

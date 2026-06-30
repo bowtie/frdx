@@ -2,6 +2,7 @@
 #include "frdx/fmod/radio_discovery.hpp"
 #include "frdx/audio_source_manager.hpp"
 #include "frdx/texture_injector.hpp"
+#include "frdx/overlay/overlay_priv.hpp"
 #include "frdx/log.hpp"
 
 #include <chrono>
@@ -103,6 +104,7 @@ void ControlLoop::run(const std::stop_token& tok) {
         // so the radio channel stays hooked and is ready when playback starts.
         if (has_source && target_acquired) {
             bridge_.retarget_if_needed();
+            frdx::overlay::set_radio_active(true);
         } else if (!has_source) {
             bridge_.detach();
         }
@@ -124,6 +126,7 @@ void ControlLoop::run(const std::stop_token& tok) {
                 // Only retune when the channel is genuinely dead; if it's
                 // still alive the game is just paused, so leave it be.
                 if (channel_dead) {
+                    frdx::overlay::set_radio_active(false);
                     if (now - last_reacquire_ >= kRetuneCooldown &&
                         game_state_.resolved() &&
                         game_state_.read().on_target_station) {
