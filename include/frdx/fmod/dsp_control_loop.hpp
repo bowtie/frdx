@@ -2,6 +2,7 @@
 
 #include "frdx/audio_source.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
+#include "frdx/fmod/game_state_probe.hpp"
 #include "frdx/fmod/metadata_injector.hpp"
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/fmod/radio_discovery.hpp"  // IRadioTargetProvider, RadioInstance, DiscoveryResult
@@ -65,6 +66,7 @@ private:
     const PEImage& img_;
     std::atomic<float> configured_gain_;
     MetadataInjector meta_;
+    GameStateProbe game_state_;
     IAudioSource* metadata_source_     = nullptr;
     std::uint64_t metadata_generation_ = 0;
     TrackInfo metadata_track_;
@@ -73,7 +75,12 @@ private:
     std::byte* sample_props_body_ = nullptr;  // current SampleProperties body
     std::uint64_t prev_calls_     = 0;
     int stale_ticks_              = 0;
-    std::chrono::steady_clock::time_point last_reacquire_{}; // cooldown for rediscovery
+    std::chrono::steady_clock::time_point last_reacquire_{}; // cooldown for rediscovery/retune
+    // Audibility tracking
+    IAudioSource* audible_source_ = nullptr;
+    int idle_ticks_               = 0;
+    bool audible_primed_          = false;
+    bool radio_audible_           = true;
     std::jthread thread_;
 };
 

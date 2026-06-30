@@ -65,6 +65,11 @@ public:
 
     virtual PlaybackState playback_state() const noexcept = 0;
 
+    // Called when the game's radio channel becomes audible or inaudible
+    // (pause menu, radio off, etc.). Sources wrapping a live external player
+    // can use this to pause/resume it in sync with the game.
+    virtual void on_radio_audible(bool /*audible*/) {}
+
     // Optional metadata provider.  Returns nullptr for sources that don't
     // carry track info (silence generators, tone sources, etc.).
     virtual IAudioMetadataProvider* metadata_provider() noexcept { return nullptr; }

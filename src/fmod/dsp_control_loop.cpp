@@ -18,9 +18,17 @@ constexpr auto kIdleDiscoveryRetry = 30s;
 // before we conclude the game tore the radio channel down. 1s @ 20ms.
 constexpr int kStaleTickThreshold = 50;
 
-// Minimum gap between target rediscovery attempts while the game has not
-// exposed a live radio carrier yet.
-constexpr auto kReacquireCooldown = 6s;
+// Frozen-read ticks before we treat the station as genuinely silenced (pause
+// menu, radio off) and tell the active source to mirror it onto any live
+// player it wraps. Must clear the stall-retune rebuild window (~1s retune +
+// up to ~2s reacquire), so a rewind or race transition that briefly tears the
+// channel down and rebuilds it doesn't read as a pause. 3.5s @ 20ms.
+constexpr int kInaudibleTicks = 175;
+
+// Minimum gap between two off/on station toggles. The toggle blocks ~300ms
+// and the game needs a moment to reallocate the channel, so we leave it well
+// alone in between rather than thrashing the radio.
+constexpr auto kRetuneCooldown = 6s;
 
 // SoundName of the placeholder sample our DSP overwrites. Matches the current
 // in-game radio carrier; if absent, we fall back to the first chain-valid
@@ -30,6 +38,7 @@ constexpr const char* kTargetSoundName = "HZ6_R1_SHIMA_Rebirth";
 
 ControlLoop::ControlLoop(DSPBridge& bridge, const PEImage& img, float configured_gain)
     : bridge_{bridge}, img_{img}, configured_gain_{configured_gain},
+      game_state_{img},
       thread_{[this](const std::stop_token& tok) { run(tok); }} {}
 
 ControlLoop::~ControlLoop() {
@@ -41,9 +50,26 @@ FRDX_NO_THREAD_SAFETY_ANALYSIS
 void ControlLoop::run(const std::stop_token& tok) {
     log::info("[ctrl] control loop started");
 
-    bool target_acquired = acquire_target().has_value();
-    auto next_discovery  = std::chrono::steady_clock::now() + kDiscoveryRetry;
-    bool was_busy        = false;
+    int discovery_attempts = 0;
+    bool target_acquired   = false;
+    auto next_discovery    = std::chrono::steady_clock::now() + kDiscoveryRetry;
+    bool was_busy          = false;
+
+    // Initial discovery loop: try to find the FMOD radio channel, retrying
+    // every 5s. Every 6 misses (~30s), auto-cycle the station to force the
+    // game to instantiate the missing FMOD radio structures.
+    while (!target_acquired && !tok.stop_requested()) {
+        target_acquired = acquire_target().has_value();
+        if (target_acquired) break;
+        if (++discovery_attempts % 6 == 0 && game_state_.resolved()) {
+            log::info("[ctrl] initial discovery stalled; auto-cycling station to force initialization...");
+            [[maybe_unused]] auto _rt = game_state_.retune_streamer_station();
+        }
+        for (auto t = std::chrono::steady_clock::now() + kDiscoveryRetry;
+             std::chrono::steady_clock::now() < t && !tok.stop_requested();)
+            std::this_thread::sleep_for(kTick);
+    }
+    if (tok.stop_requested()) return;
 
     // The radio HUD reads from the SampleProperties slots at a much lower
     // rate than the audio mixer. 4 Hz is more than enough and keeps the
@@ -80,24 +106,38 @@ void ControlLoop::run(const std::stop_token& tok) {
             bridge_.detach();
         }
 
-        if (++meta_tick >= kMetaEveryNTicks) {
-            meta_tick = 0;
-            push_metadata();
-        }
-
-        // Staleness watchdog: while we have a source, FMOD's mixer should be
-        // invoking our read_callback (when playing) or at least keeping the
-        // channel handle alive.  If the handle dies — the game reallocated
-        // the radio wrapper or the player turned the in-game radio off and
-        // back on — re-discover so we reattach.  Runs for both playing and
-        // paused states so a handle death while paused is also caught.
+        // Staleness watchdog: while a source is actively producing audio,
+        // FMOD's mixer should be invoking our read_callback every tick. If
+        // call_count() freezes for ~1s, the game tore down the radio channel
+        // and won't rebuild it on its own. Toggling the in-game station off
+        // and back on is the only thing that makes it allocate a fresh
+        // channel; retarget_if_needed() then re-attaches the DSP next tick.
         const std::uint64_t c = bridge_.call_count();
-        if (has_source && target_acquired && c == prev_calls_) {
+        if (busy && c == prev_calls_) {
             if (++stale_ticks_ >= kStaleTickThreshold) {
                 stale_ticks_ = 0;
-                if (!bridge_.current_handle_alive()) {
-                    if (now - last_reacquire_ >= kReacquireCooldown) {
-                        log::info("[ctrl] radio channel inactive; rediscovering target");
+
+                // verify the channel is actually dead, not just paused
+                const bool channel_dead = !bridge_.current_handle_alive();
+
+                // Only retune when the channel is genuinely dead; if it's
+                // still alive the game is just paused, so leave it be.
+                if (channel_dead) {
+                    if (now - last_reacquire_ >= kRetuneCooldown &&
+                        game_state_.resolved() &&
+                        game_state_.read().on_target_station) {
+                        log::info("[ctrl] radio channel dead; retuning station to rebuild FMOD channel");
+                        if (game_state_.retune_streamer_station().has_value()) {
+                            last_reacquire_ = now;
+                            // The toggle may hand us a freshly-allocated RadioStreamFmod;
+                            // re-point at the live one so retarget_if_needed installs there.
+                            target_acquired = acquire_target().has_value();
+                            next_discovery  = now + kDiscoveryRetry;
+                        }
+                    } else if (now - last_reacquire_ >= kRetuneCooldown) {
+                        // GameStateProbe not resolved or not on target station;
+                        // fall back to plain rediscovery.
+                        log::info("[ctrl] radio channel dead; rediscovering target");
                         last_reacquire_ = now;
                         target_acquired = acquire_target().has_value();
                         next_discovery  = now + kDiscoveryRetry;
@@ -107,6 +147,58 @@ void ControlLoop::run(const std::stop_token& tok) {
         } else {
             stale_ticks_ = 0;
         }
+
+        // Audibility edge: while a source is producing, a frozen read_callback
+        // means the game silenced our station. Report the transition so a
+        // source wrapping a live player pauses/resumes it.
+        // Re-arm on every source change and only count once that source has
+        // actually been read, so stale loop state can't fire a phantom edge.
+        // The threshold sits above the stall-retune rebuild window, so the
+        // channel churn from a rewind or race transition never trips it;
+        // only sustained silence does.
+        if (active && busy) {
+            if (active != audible_source_) {
+                audible_source_ = active;
+                idle_ticks_     = 0;
+                audible_primed_ = false;
+                radio_audible_  = true;
+            }
+            if (c != prev_calls_) {
+                idle_ticks_     = 0;
+                audible_primed_ = true;
+            } else if (audible_primed_) {
+                ++idle_ticks_;
+            }
+            const bool audible = idle_ticks_ < kInaudibleTicks;
+            if (audible != radio_audible_) {
+                radio_audible_ = audible;
+                active->on_radio_audible(audible);
+            }
+        } else {
+            idle_ticks_     = 0;
+            audible_primed_ = false;
+            radio_audible_  = true;
+            audible_source_ = nullptr;
+        }
+
+        // Skip metadata refresh while inaudible (pause menu, rewind):
+        // the HUD isn't shown, and freezing the value lets the dedup in
+        // MetadataInjector swallow the resume so the game doesn't re-pop its
+        // now-playing banner on every pause/rewind.
+        if (++meta_tick >= kMetaEveryNTicks) {
+            meta_tick = 0;
+            if (radio_audible_) {
+                // Re-poll the discovery cache to grab the freshest
+                // SampleProperties body — the game often reallocates this
+                // object entirely when native stations change.
+                auto disc = discover_radio_instances(img_);
+                if (const RadioInstance* current = select_instance(disc)) {
+                    meta_.set_target(current->sample_props_body);
+                }
+                push_metadata();
+            }
+        }
+
         prev_calls_ = c;
         was_busy    = busy;
 
