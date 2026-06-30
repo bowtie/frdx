@@ -107,8 +107,9 @@ bool process_name_exists(std::wstring_view name) {
 
 int run_external_controller(const std::filesystem::path& config_path, int port_override,
                             const std::string& locked_serial, std::wstring watch_process) {
-    const auto base_dir = exe_directory();
-    const auto data_dir = base_dir / L"mods" / L"frdx";
+    // The helper exe lives in <game>/mods/frdx/, so exe_directory() already
+    // returns the data directory — don't append "mods/frdx" again.
+    const auto data_dir = exe_directory();
     std::error_code ec;
     std::filesystem::create_directories(data_dir, ec);
     const auto log_path = data_dir / L"dualsense_external.log";
@@ -157,7 +158,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                         ? std::string{"<none>"}
                         : cfg.dualsense.controller_lock_serial);
     std::printf("[frdx-dualsense] external mode starting\n");
-    std::printf("[frdx-dualsense] exe dir: %ls\n", base_dir.c_str());
+    std::printf("[frdx-dualsense] exe dir: %ls\n", data_dir.c_str());
     std::printf("[frdx-dualsense] log: %ls\n", log_path.c_str());
     std::printf("[frdx-dualsense] config: %ls\n", config_path.c_str());
     std::printf("[frdx-dualsense] UDP port: %d\n", cfg.dualsense.udp_port);
@@ -269,7 +270,7 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t parent_pid = 0;
     int port      = 0;
     std::wstring watch_process = L"ForzaHorizon6.exe";
-    std::filesystem::path config_path = exe_directory() / L"mods" / L"frdx" / L"config.toml";
+    std::filesystem::path config_path = exe_directory() / L"config.toml";
     for (int i = 1; i < argc; ++i) {
         std::wstring arg = argv[i];
         if (arg == L"--broker" && i + 1 < argc) {

@@ -1065,7 +1065,14 @@ public:
             return true;
         }
 
-        const auto exe = current_module_directory() / L"mods" / L"frdx" / L"frdx-helper.exe";
+        // The helper exe lives in <game>/mods/frdx/. When running in the
+        // game DLL, current_module_directory() is the game root and we need
+        // the "mods/frdx" subdirectory. When running inside the helper exe
+        // itself, current_module_directory() is already mods/frdx/.
+        auto exe = current_module_directory() / L"mods" / L"frdx" / L"frdx-helper.exe";
+        if (!std::filesystem::exists(exe)) {
+            exe = current_module_directory() / L"frdx-helper.exe";
+        }
         log::info("[dualsense] trying external HID helper at {}", exe.string());
         if (!std::filesystem::exists(exe)) {
             last_error_ = "DualSense helper executable missing";
@@ -1433,7 +1440,9 @@ bool send_test_telemetry(int udp_port) {
 }
 
 int run_controller_broker(const std::wstring& pipe_name, const std::string& locked_serial) {
-    const auto log_dir = current_module_directory() / L"mods" / L"frdx";
+    // Running inside the helper exe — current_module_directory() is already
+    // mods/frdx/, don't append it again.
+    const auto log_dir = current_module_directory();
     std::error_code ec;
     std::filesystem::create_directories(log_dir, ec);
     log::init(log_dir / L"dualsense_broker.log");
@@ -1485,7 +1494,9 @@ int run_controller_broker(const std::wstring& pipe_name, const std::string& lock
 }
 
 int run_controller_broker_server(const std::string& locked_serial) {
-    const auto log_dir = current_module_directory() / L"mods" / L"frdx";
+    // Running inside the helper exe — current_module_directory() is already
+    // mods/frdx/, don't append it again.
+    const auto log_dir = current_module_directory();
     std::error_code ec;
     std::filesystem::create_directories(log_dir, ec);
     log::init(log_dir / L"dualsense_broker.log");
