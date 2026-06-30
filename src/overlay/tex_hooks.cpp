@@ -400,9 +400,26 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
 void process_texture_injection(ID3D12CommandQueue* pQueue) {
     if (!pQueue) return;
     // Skip all texture fingerprinting and injection when the radio is off.
-    // The game may destroy or repurpose radio UI textures, and touching them
-    // with wrong barrier transitions causes GPU crashes (TDR).
     if (!g_radio_active.load(std::memory_order_acquire)) return;
+
+    // Fast path: if there's nothing to do, bail out before any expensive
+    // COM calls or mutex locking. This runs on EVERY ExecuteCommandLists
+    // call (including COMPUTE/COPY queues), so the early-out is critical
+    // for avoiding a framerate regression.
+    {
+        std::lock_guard lk{g_tex_mutex};
+        if (g_unverified.empty() && g_streamer_mode.empty() &&
+            !TextureInjector::instance().is_processing()) {
+            // Nothing to fingerprint, nothing to inject into, no pending work.
+            return;
+        }
+    }
+
+    // Only do GPU work on DIRECT command queues — fingerprinting and
+    // injection require copy operations that should happen on the graphics
+    // queue, not COMPUTE or COPY queues.
+    D3D12_COMMAND_QUEUE_DESC qdesc = pQueue->GetDesc();
+    if (qdesc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
 
     wil::com_ptr<ID3D12Device> pDevice;
     if (FAILED(pQueue->GetDevice(IID_PPV_ARGS(pDevice.put())))) return;
@@ -426,34 +443,37 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
         }
     }
 
-    // Fingerprint unverified textures after 2 seconds
+    // Fingerprint unverified textures after 2 seconds.
+    // Collect candidates under the lock, then fingerprint outside the lock
+    // to avoid stalling other threads (especially CreateSRV) during the
+    // GPU readback operation.
+    std::vector<ID3D12Resource*> to_fingerprint;
     {
         std::lock_guard lk{g_tex_mutex};
         for (auto it = g_unverified.begin(); it != g_unverified.end(); ) {
             if (now - it->first_seen >= std::chrono::seconds(2)) {
-                // Fingerprint outside the lock (GPU operation)
-                auto res = it->resource.get();
+                to_fingerprint.push_back(it->resource.get());
+                it->resource.get()->AddRef(); // keep alive for fingerprint
                 it = g_unverified.erase(it);
-                // Release lock for GPU operation
-                // Note: we already erased, so the lock can be released
-                // by scoping out — but this is tricky. For safety, we
-                // copy the resource pointer and fingerprint after unlock.
-                // Actually, let's just do it inline — the GPU operation
-                // is SEH-protected and shouldn't block long.
-                bool is_placeholder = fingerprint_texture(pDevice.get(), pQueue, res);
-                if (is_placeholder) {
-                    TrackedTexture tt;
-                    tt.resource.attach(res);
-                    res->AddRef();
-                    tt.is_placeholder = true;
-                    tt.fingerprinted = true;
-                    g_streamer_mode.push_back(std::move(tt));
-                } else {
-                    // Not a placeholder — release our tracking ref
-                    res->Release();
-                }
             } else {
                 ++it;
+            }
+        }
+    }
+
+    // Fingerprint outside the lock (GPU readback is expensive)
+    for (auto* res : to_fingerprint) {
+        bool is_placeholder = fingerprint_texture(pDevice.get(), pQueue, res);
+        {
+            std::lock_guard lk{g_tex_mutex};
+            if (is_placeholder) {
+                TrackedTexture tt;
+                tt.resource.attach(res); // takes ownership of our AddRef
+                tt.is_placeholder = true;
+                tt.fingerprinted = true;
+                g_streamer_mode.push_back(std::move(tt));
+            } else {
+                res->Release(); // not a placeholder — release our ref
             }
         }
     }
