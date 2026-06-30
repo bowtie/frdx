@@ -43,6 +43,27 @@ std::filesystem::path exe_directory() {
     return std::filesystem::path(path).parent_path();
 }
 
+// Delete the Task Scheduler task that launched us so it doesn't linger.
+void cleanup_scheduled_task() {
+    std::wstring system_dir(MAX_PATH, L'\0');
+    const UINT len = GetSystemDirectoryW(system_dir.data(), static_cast<UINT>(system_dir.size()));
+    if (len == 0) return;
+    system_dir.resize(len);
+    std::wstring cmd = L"\"" + std::filesystem::path(system_dir).append(L"schtasks.exe").wstring() +
+                       L"\" /Delete /TN \"FRDX_DualSenseHelper\" /F";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 3000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+}
+
 void print_status(const frdx::dualsense::RuntimeStatus& status) {
     std::printf("[frdx-dualsense] connected=%s telemetry=%s controller=\"%s\" error=\"%s\"\n",
                 status.controller_connected ? "yes" : "no",
@@ -192,6 +213,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
             service.stop();
             CloseHandle(singleton);
             if (stop_event) CloseHandle(stop_event);
+            cleanup_scheduled_task();
             return 0;
         }
 
@@ -210,6 +232,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                     service.stop();
                     CloseHandle(singleton);
                     if (stop_event) CloseHandle(stop_event);
+                    cleanup_scheduled_task();
                     return 0;
                 }
             }
