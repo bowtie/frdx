@@ -16,3 +16,4 @@ third_party/*
 !third_party/imanim/
 !third_party/imanim/**
 src.7z
+frdx-dist-*.zip
