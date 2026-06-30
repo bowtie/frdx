@@ -120,6 +120,8 @@ Config load_config(const std::filesystem::path& path) {
         0.0f, 1.0f);
     cfg.overlay.prevent_focus_loss_pause =
         pick<bool>(ov, "prevent_focus_loss_pause", cfg.overlay.prevent_focus_loss_pause);
+    cfg.overlay.texture_injection_enabled =
+        pick<bool>(ov, "texture_injection_enabled", cfg.overlay.texture_injection_enabled);
 
     const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -382,6 +384,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("blur_tint_opacity", static_cast<double>(cfg.overlay.blur_tint_opacity));
     e.kv("blur_widget_opacity", static_cast<double>(cfg.overlay.blur_widget_opacity));
     e.kv("prevent_focus_loss_pause", cfg.overlay.prevent_focus_loss_pause);
+    e.kv("texture_injection_enabled", cfg.overlay.texture_injection_enabled);
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);

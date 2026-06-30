@@ -172,9 +172,11 @@ void run_bridge(HMODULE self) noexcept {
 
     ConfigStore store{data_dir / "config.toml", load_config(data_dir / "config.toml")};
     auto cfg = store.snapshot();
-    // Always launch the helper — it's needed for texture injection (downloads,
-    // texconv) as well as DualSense triggers. The DualSense enabled toggle
-    // only controls trigger functionality, not helper existence.
+
+    // Always launch the unified external helper via Task Scheduler.  It
+    // runs in a separate session (needed for DualSense HID access since
+    // the game holds the XInput handle) and hosts the worker server for
+    // downloads/ffmpeg/texconv.  One process, both roles.
     maybe_launch_external_helper(dir, cfg.dualsense);
 
     auto img = fmod_bridge::parse(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)));
@@ -187,15 +189,19 @@ void run_bridge(HMODULE self) noexcept {
         log::warn("[bridge] some FMOD signatures unresolved -- DSP injection disabled");
     }
 
-    // Start the worker process for out-of-process subprocess management
-    // (downloads, ffmpeg spawning). This keeps the game's address space
-    // clean and improves Wine/Proton compatibility.
+    // Connect to the external helper's worker server (well-known pipe).
+    // The helper was launched above via Task Scheduler and hosts both the
+    // DualSense service and the worker server in a single process.
     helper::WorkerClient worker;
     {
         auto helper_exe = dir / L"mods" / L"frdx" / L"frdx-helper.exe";
         std::error_code ec;
         if (std::filesystem::exists(helper_exe, ec)) {
-            worker.start(helper_exe.wstring());
+            if (!worker.connect_external()) {
+                log::warn("[bridge] could not connect to external helper worker; "
+                          "falling back to standalone worker mode");
+                worker.start(helper_exe.wstring());
+            }
         } else {
             log::warn("[bridge] frdx-helper.exe not found; worker mode disabled");
         }
@@ -302,9 +308,9 @@ void run_bridge(HMODULE self) noexcept {
             bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
             dualsense.update_config(dualsense_service_config(c.dualsense));
 
-            // Always ensure the helper is running — it handles downloads and
-            // texconv for texture injection, not just DualSense triggers.
-            // Never stop it while the game is open.
+            // Ensure the unified external helper is running (it may have
+            // been stopped or crashed).  It hosts both the DualSense
+            // service and the worker server.
             maybe_launch_external_helper(dir, c.dualsense);
             if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
         });

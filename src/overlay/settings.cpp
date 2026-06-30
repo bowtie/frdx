@@ -89,6 +89,20 @@ void draw_general_settings_tab() {
                           "OFF = game auto-pauses on focus loss (default)");
     }
 
+    label_row("Texture Injection");
+    bool tex_inject = cfg.overlay.texture_injection_enabled;
+    if (ImGui::Checkbox("##tex_inject", &tex_inject)) {
+        set_tex_injection_enabled(tex_inject);
+        g_ctx.store->patch(
+            [&](Config& c) { c.overlay.texture_injection_enabled = tex_inject; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON = album-art texture injection active\n"
+                          "OFF = disables the DX12 CreateSRV hook + per-frame\n"
+                          "      fingerprinting (zero render-thread overhead,\n"
+                          "      useful for diagnosing FPS issues)");
+    }
+
     label_row("Log Window");
     bool show_log = g_ui.console_visible;
     if (ImGui::Checkbox("##log_window", &show_log)) {

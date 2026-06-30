@@ -26,14 +26,23 @@ public:
     WorkerClient(WorkerClient&&)                 = delete;
     WorkerClient& operator=(WorkerClient&&)      = delete;
 
-    // Launch frdx-helper.exe in worker mode. Returns false if the helper
-    // exe isn't found or the control pipe doesn't appear within the timeout.
+    // Launch frdx-helper.exe in standalone worker mode. Returns false if the
+    // helper exe isn't found or the control pipe doesn't appear within the
+    // timeout.
     bool start(std::wstring_view helper_exe_path);
 
+    // Connect to the unified external helper's well-known worker pipe.
+    // No process is launched — the external helper (started via Task
+    // Scheduler) already hosts the worker server.  Returns false if the
+    // pipe doesn't appear within the timeout.
+    bool connect_external();
+
     // Stop the worker by sending {"op":"shutdown"} and closing handles.
+    // For connect_external() mode, this just disconnects (the external
+    // helper stays alive).
     void stop() noexcept;
 
-    bool is_running() const noexcept { return process_ != nullptr; }
+    bool is_running() const noexcept { return process_ != nullptr || external_; }
 
     // ── Worker operations ──
 
@@ -61,6 +70,7 @@ public:
 private:
     std::string token_;
     HANDLE process_ = nullptr;
+    bool external_ = false;  // true when connected to the unified external helper
     std::mutex mu_;  // serializes control pipe connections
 
     std::string request(std::string_view json_msg);

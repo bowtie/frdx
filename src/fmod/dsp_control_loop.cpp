@@ -294,10 +294,15 @@ void ControlLoop::push_metadata() noexcept {
             metadata_source_       = a;
             metadata_generation_   = generation;
 
-            // Update texture injector when artwork URL changes
+            // Update texture injector when artwork URL changes — but only
+            // when texture injection is enabled.  If it's disabled (e.g.
+            // the user turned it off in Settings to diagnose FPS issues),
+            // skip the download + texconv conversion entirely; there's no
+            // point processing artwork that will never be injected.
             if (metadata_track_.artwork_url != current_artwork_url_) {
                 current_artwork_url_ = metadata_track_.artwork_url;
-                if (!current_artwork_url_.empty()) {
+                if (!current_artwork_url_.empty() &&
+                    overlay::is_tex_injection_enabled()) {
                     TextureInjector::instance().update_artwork_url(current_artwork_url_);
                 }
             }

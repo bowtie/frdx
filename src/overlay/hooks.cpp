@@ -265,10 +265,17 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         return false;
     }
 
-    // Command allocators
-    g_dx.allocators.resize(desc.BufferCount);
-    g_dx.allocator_fence_values.resize(desc.BufferCount, 0);
-    for (UINT i = 0; i < desc.BufferCount; i++) {
+    // Command allocators — use a pool larger than the backbuffer count
+    // so we can always find a ready one without blocking the Present
+    // thread.  With only N allocators (N = backbuffer count), if the GPU
+    // is behind by even one frame, the allocator for the current
+    // backbuffer index isn't ready and we'd have to block or skip.
+    // A pool of 8 gives the GPU plenty of room to lag without stalling.
+    const size_t pool_size = std::max(static_cast<size_t>(desc.BufferCount),
+                                      DxResources::kAllocatorPoolSize);
+    g_dx.allocators.resize(pool_size);
+    g_dx.allocator_fence_values.resize(pool_size, 0);
+    for (size_t i = 0; i < pool_size; i++) {
         if (FAILED(g_dx.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                        IID_PPV_ARGS(g_dx.allocators[i].put()))) ||
             !g_dx.allocators[i]) {
@@ -447,34 +454,40 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             }
         }
 
-        if (backBufferIdx >= g_dx.allocators.size() || backBufferIdx >= g_dx.fb_bufs.size() ||
-            !g_dx.fb_bufs[backBufferIdx]) {
+        if (backBufferIdx >= g_dx.fb_bufs.size() || !g_dx.fb_bufs[backBufferIdx]) {
             re_log::error("backBufferIdx {} is out of bounds or backbuffer is NULL! "
-                          "size={}, buf_size={}",
-                          backBufferIdx, g_dx.allocators.size(), g_dx.fb_bufs.size());
+                          "buf_size={}",
+                          backBufferIdx, g_dx.fb_bufs.size());
             return false;
         }
-        ID3D12CommandAllocator* allocator = g_dx.allocators[backBufferIdx].get();
 
-        if (!wait_for_fence(g_dx.allocator_fence_values[backBufferIdx])) {
-            re_log::warn("skipped frame because GPU did not release command allocator {}",
-                         backBufferIdx);
-            return false;
+        // Find a ready command allocator from the pool.  Instead of
+        // blocking on a specific allocator (which serializes the game's
+        // rendering pipeline), scan the pool for one whose GPU work has
+        // completed.  With a pool of 8, this virtually always succeeds
+        // — the GPU would need to be 8 overlay frames behind, which
+        // only happens under extreme load.  If none are ready (very
+        // rare), skip this overlay frame rather than blocking.
+        size_t alloc_idx = SIZE_MAX;
+        const UINT64 gpu_completed = g_dx.fence ? g_dx.fence->GetCompletedValue() : 0;
+        for (size_t i = 0; i < g_dx.allocators.size(); i++) {
+            if (g_dx.allocator_fence_values[i] == 0 ||
+                gpu_completed >= g_dx.allocator_fence_values[i]) {
+                alloc_idx = i;
+                break;
+            }
         }
+        if (alloc_idx == SIZE_MAX) {
+            return false;  // all allocators in-flight — skip (very rare)
+        }
+
+        ID3D12CommandAllocator* allocator = g_dx.allocators[alloc_idx].get();
 
         allocator->Reset();
         g_dx.cmd_list->Reset(allocator, nullptr);
 
         ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
         g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
-
-        // CPU-wait for every other direct queue the game uses to finish its
-        // most recent submission before we touch the backbuffer.  If the
-        // wait times out (e.g. frame-generation backlog), skip this frame
-        // — the overlay renders at a lower rate with no game stall.
-        if (!wait_for_other_queues_sync(active_queue)) {
-            return false;
-        }
 
         // Transition backbuffer to RENDER_TARGET for ImGui rendering.
         // Use COMMON as the source state — D3D12 swap-chain back buffers
@@ -527,7 +540,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         const UINT64 fence_value = ++g_dx.fence_value;
         if (SUCCEEDED(active_queue->Signal(g_dx.fence.get(), fence_value))) {
-            g_dx.allocator_fence_values[backBufferIdx] = fence_value;
+            g_dx.allocator_fence_values[alloc_idx] = fence_value;
         } else {
             re_log::warn("failed to signal ImGui GPU fence");
         }
@@ -623,6 +636,11 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
                 dualsense::DualSenseService* dualsense) noexcept {
     if (!configure_overlay_runtime(mgr, bridge, store, dualsense)) return false;
     if (g_hooks_installed) return true;
+
+    // Sync the texture injection enable flag from persisted config before
+    // any hooks are bound so process_texture_injection sees the correct
+    // state from frame one.
+    set_tex_injection_enabled(store.snapshot().overlay.texture_injection_enabled);
 
     re_log::info("initializing kiero for D3D12 hook discovery...");
 
@@ -771,43 +789,6 @@ void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumComm
         const UINT64 new_val = ++state.fence_value;
         pQueue->Signal(state.fence.get(), new_val);
     }
-}
-
-bool wait_for_other_queues_sync(ID3D12CommandQueue* self) {
-    // Snapshot each QueueSyncState* under the lock, then release the lock
-    // before doing the potentially-blocking wait on each fence.  Holding
-    // the mutex across the wait would block any queue trampoline that tries
-    // to signal into g_cq while we're flushing a different queue.  The
-    // pointers stay valid because the only place entries are added/removed
-    // is the trampoline (under the lock) and shutdown (after MinHook has
-    // disabled the trampoline).
-    //
-    // A moderate timeout (50ms) is used so that frame-generation pipelines
-    // (DLSS-FG, FSR-FG) that create cross-queue dependencies can't deadlock
-    // the present queue — which would cause a GPU TDR.  50ms is long enough
-    // for normal GPU latency but short enough to prevent a hard hang.
-    // If any queue isn't drained we return false and the caller skips this
-    // frame's overlay work — the overlay simply renders at a lower rate
-    // until the GPU catches up.
-    std::vector<QueueSyncState*> snapshot;
-    {
-        frdx::ScopedLock lk{g_cq.mutex};
-        snapshot.reserve(g_cq.queues_ref().size());
-        for (auto& [queue, state] : g_cq.queues_ref()) {
-            if (queue == self) continue;
-            snapshot.push_back(&state);
-        }
-    }
-    for (QueueSyncState* s : snapshot) {
-        if (!s->fence || !s->event) continue;
-        if (s->fence->GetCompletedValue() >= s->fence_value) continue;
-        s->fence->SetEventOnCompletion(s->fence_value, s->event);
-        DWORD result = WaitForSingleObject(s->event, 50);
-        if (result == WAIT_TIMEOUT) {
-            return false;
-        }
-    }
-    return true;
 }
 
 

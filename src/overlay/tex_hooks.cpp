@@ -35,6 +35,21 @@ extern ExecuteCommandLists_t original_ExecuteCommandLists;
 
 CreateSRV_t original_CreateSRV = nullptr;
 
+// ── Texture injection enabled flag ──
+// Mirrors OverlayConfig::texture_injection_enabled.  When false, the
+// CreateSRV hook is not installed and process_texture_injection bails
+// immediately — zero overhead on the render thread.  Toggled at runtime
+// from the Settings panel via set_tex_injection_enabled().
+static std::atomic<bool> g_tex_injection_enabled{true};
+
+bool is_tex_injection_enabled() noexcept {
+    return g_tex_injection_enabled.load(std::memory_order_acquire);
+}
+
+// Definition deferred to after the tracking globals are declared (it
+// needs g_tex_mutex / g_streamer_mode / g_unverified / g_pending_fp).
+void set_tex_injection_enabled(bool enabled) noexcept;
+
 // ── Radio active flag ──
 // Set by the control loop when the FMOD radio channel is alive.
 // When false, texture fingerprinting and injection are skipped to avoid
@@ -50,6 +65,16 @@ static std::atomic<bool> g_tex_work_pending{false};
 // ── Target texture detection ──
 
 static constexpr UINT kTargetWidth = 196;
+
+// Upper bound on how many fingerprinted placeholder textures we track at
+// once. The game has been observed to keep handing CreateSRV new resource
+// instances matching the target dimensions while it renders (see
+// process_texture_injection), so without a cap g_streamer_mode would grow
+// without bound — leaking GPU resource handles and making every cleanup /
+// injection pass progressively more expensive. Evicting the oldest entry
+// once we're over the cap keeps the working set (and the cost of iterating
+// it) bounded.
+static constexpr size_t kMaxStreamerModeTextures = 8;
 
 bool is_target_texture(ID3D12Resource* pResource) {
     if (!pResource) return false;
@@ -70,16 +95,57 @@ struct TrackedTexture {
     bool is_placeholder = false;
 };
 
+// An in-flight, asynchronous GPU readback kicked off by kickoff_fingerprint().
+// The copy + fence signal have already been submitted; nothing here blocks
+// on the GPU. try_complete_fingerprint() polls fence->GetCompletedValue()
+// (never waits) and only maps/hashes once the copy has actually landed.
+// The command allocator/list must stay alive until the GPU is done with
+// them, so they're held here rather than released right after submission.
+struct PendingFingerprint {
+    wil::com_ptr<ID3D12Resource> resource;
+    wil::com_ptr<ID3D12Resource> readback;
+    wil::com_ptr<ID3D12CommandAllocator> alloc;
+    wil::com_ptr<ID3D12GraphicsCommandList> cmd_list;
+    wil::com_ptr<ID3D12Fence> fence;
+    UINT64 target_value = 0;
+    UINT width = 0, height = 0;
+    UINT blocksX = 0, blocksY = 0, alignedRowPitch = 0;
+    std::chrono::steady_clock::time_point started;
+};
+
 std::mutex g_tex_mutex;
 std::vector<TrackedTexture> g_unverified;      // detected but not fingerprinted
 std::vector<TrackedTexture> g_streamer_mode;   // fingerprinted as placeholder
+std::vector<PendingFingerprint> g_pending_fp;  // readback submitted, awaiting GPU
 std::chrono::steady_clock::time_point g_last_cleanup;
+
+void set_tex_injection_enabled(bool enabled) noexcept {
+    const bool prev = g_tex_injection_enabled.exchange(enabled, std::memory_order_acq_rel);
+    if (prev != enabled) {
+        log::info("[texinject] injection {}", enabled ? "enabled" : "disabled");
+        if (!enabled) {
+            // Drop all tracked state so nothing tries to inject into
+            // stale textures if/when it's re-enabled later.
+            std::lock_guard lk{g_tex_mutex};
+            for (auto& tt : g_streamer_mode) { if (tt.resource) tt.resource.reset(); }
+            g_streamer_mode.clear();
+            g_unverified.clear();
+            g_tex_work_pending.store(!g_pending_fp.empty(), std::memory_order_release);
+        }
+    }
+}
 
 void set_radio_active(bool active) noexcept {
     const bool prev = g_radio_active.exchange(active, std::memory_order_acq_rel);
     if (prev && !active) {
         // Radio just went inactive — clear tracked textures to avoid
         // injecting into stale/destroyed textures on the next frame.
+        // Note: g_pending_fp is deliberately left alone here. Its command
+        // allocators/lists must stay alive until the GPU actually finishes
+        // executing them (releasing them early is undefined behavior), so
+        // in-flight readbacks are left to drain naturally via the normal
+        // poll loop in process_texture_injection; they just won't be acted
+        // on with any more urgency than usual.
         std::lock_guard lk{g_tex_mutex};
         auto count = g_streamer_mode.size();
         for (auto& tt : g_streamer_mode) {
@@ -87,7 +153,7 @@ void set_radio_active(bool active) noexcept {
         }
         g_streamer_mode.clear();
         g_unverified.clear();
-        g_tex_work_pending.store(false, std::memory_order_release);
+        g_tex_work_pending.store(!g_pending_fp.empty(), std::memory_order_release);
         log::info("[texinject] radio went inactive; cleared {} tracked texture(s)", count);
     }
 }
@@ -108,10 +174,29 @@ uint64_t calculate_fnv1a_pitched(const uint8_t* data, UINT blocksX, UINT blocksY
     return hash;
 }
 
-// ── GPU readback + fingerprint (SEH-protected) ──
+// ── GPU readback + fingerprint (async, SEH-protected) ──
+//
+// Fingerprinting used to submit the copy and then block the calling thread
+// on a GPU fence (WaitForSingleObject) right inside the ExecuteCommandLists
+// hook -- i.e. on the game's own command-submission thread. Throttling how
+// often that ran (rounds 1-3) never addressed the actual cost: each time it
+// did run, the GPU had to drain whatever the game had already queued before
+// our fence could signal, stalling frame submission. Since the game keeps
+// producing new candidate textures as it renders, that stall kept recurring
+// indefinitely instead of settling down.
+//
+// Splitting this into a kickoff (submit the copy + signal a fence, return
+// immediately) and a poll (check fence->GetCompletedValue(), never wait)
+// removes the stall entirely -- the result just shows up a tick or two
+// later, which is irrelevant since fingerprinting already has a 2s delay.
 
-bool fingerprint_texture(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
-                         ID3D12Resource* pResource) {
+// Submits a copy of `pResource` into a fresh readback buffer and signals a
+// fence, but never waits on it. On success, `out` owns everything needed to
+// poll for completion later (including the caller's extra ref on
+// pResource); the caller must NOT release that ref itself. On failure,
+// `out` is left untouched and the caller still owns the ref.
+bool kickoff_fingerprint(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
+                         ID3D12Resource* pResource, PendingFingerprint& out) {
     if (!pDevice || !pQueue || !pResource) return false;
 
     D3D12_RESOURCE_DESC desc = pResource->GetDesc();
@@ -192,7 +277,9 @@ bool fingerprint_texture(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
 
         pCmdList->Close();
 
-        // 5. Execute and wait
+        // 5. Execute and signal -- no wait. The allocator/list must outlive
+        // GPU execution, so they're stashed in `out` rather than released
+        // when this function returns.
         ID3D12CommandList* lists[] = {pCmdList.get()};
         original_ExecuteCommandLists(pQueue, 1, lists);
 
@@ -201,38 +288,69 @@ bool fingerprint_texture(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
                                          IID_PPV_ARGS(pFence.put())))) {
             return false;
         }
-        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!event) return false;
-        pQueue->Signal(pFence.get(), 1);
-        pFence->SetEventOnCompletion(1, event);
-        WaitForSingleObject(event, 5000);
-        CloseHandle(event);
-
-        // 6. Map and hash
-        uint8_t* pMapped = nullptr;
-        if (FAILED(pReadbackRes->Map(0, nullptr, reinterpret_cast<void**>(&pMapped)))) {
+        if (FAILED(pQueue->Signal(pFence.get(), 1))) {
             return false;
         }
-        uint64_t hash = calculate_fnv1a_pitched(pMapped, blocksX, blocksY, alignedRowPitch);
-        pReadbackRes->Unmap(0, nullptr);
 
-        // 7. Check against known placeholder hashes
-        bool is_placeholder = (hash == TextureInjector::kPlaceholderHash196x104 ||
-                               hash == TextureInjector::kPlaceholderHash196x196);
-
-        if (is_placeholder) {
-            // Report target dimensions to TextureInjector
-            TextureInjector::instance().set_target_dimensions(
-                static_cast<int>(width), static_cast<int>(height));
-            log::info("[texinject] fingerprinted placeholder texture: {}x{} hash=0x{:X}",
-                      width, height, hash);
-        }
-
-        return is_placeholder;
+        out.resource.attach(pResource); // takes ownership of the caller's ref
+        out.readback        = std::move(pReadbackRes);
+        out.alloc            = std::move(pAlloc);
+        out.cmd_list         = std::move(pCmdList);
+        out.fence            = std::move(pFence);
+        out.target_value     = 1;
+        out.width            = width;
+        out.height           = height;
+        out.blocksX          = blocksX;
+        out.blocksY          = blocksY;
+        out.alignedRowPitch  = alignedRowPitch;
+        out.started          = std::chrono::steady_clock::now();
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        log::warn("[texinject] SEH exception during fingerprinting");
+        log::warn("[texinject] SEH exception during fingerprint kickoff");
         return false;
     }
+}
+
+// Non-blocking poll for a single in-flight fingerprint job. Returns true
+// once the job is resolved (either the GPU finished, or we gave up after a
+// timeout) and sets `out_is_placeholder` accordingly -- the caller should
+// remove the entry from g_pending_fp either way. Returns false if the GPU
+// hasn't signaled yet (caller keeps waiting, no blocking involved).
+bool try_complete_fingerprint(PendingFingerprint& pf, bool& out_is_placeholder) {
+    constexpr auto kFingerprintTimeout = std::chrono::seconds(5);
+    out_is_placeholder = false;
+
+    const bool done = pf.fence && pf.fence->GetCompletedValue() >= pf.target_value;
+    if (!done) {
+        if (std::chrono::steady_clock::now() - pf.started > kFingerprintTimeout) {
+            log::warn("[texinject] fingerprint readback timed out");
+            return true; // give up; not a placeholder
+        }
+        return false; // still in flight
+    }
+
+    __try {
+        uint8_t* pMapped = nullptr;
+        if (FAILED(pf.readback->Map(0, nullptr, reinterpret_cast<void**>(&pMapped)))) {
+            return true;
+        }
+        uint64_t hash =
+            calculate_fnv1a_pitched(pMapped, pf.blocksX, pf.blocksY, pf.alignedRowPitch);
+        pf.readback->Unmap(0, nullptr);
+
+        out_is_placeholder = (hash == TextureInjector::kPlaceholderHash196x104 ||
+                              hash == TextureInjector::kPlaceholderHash196x196);
+        if (out_is_placeholder) {
+            TextureInjector::instance().set_target_dimensions(
+                static_cast<int>(pf.width), static_cast<int>(pf.height));
+            log::info("[texinject] fingerprinted placeholder texture: {}x{} hash=0x{:X}",
+                      pf.width, pf.height, hash);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        log::warn("[texinject] SEH exception completing fingerprint");
+        out_is_placeholder = false;
+    }
+    return true;
 }
 
 // ── BC7 pixel injection (SEH-protected) ──
@@ -371,13 +489,21 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
     if (pResource && is_target_texture(pResource)) {
         std::lock_guard lk{g_tex_mutex};
 
-        // Check if already tracked
+        // Check if already tracked. g_pending_fp must be checked too: while
+        // a resource's async fingerprint readback is in flight it's been
+        // removed from g_unverified but hasn't landed in g_streamer_mode
+        // yet, so skipping it here would let a second CreateSRV call for
+        // the same resource re-queue (and eventually double-fingerprint)
+        // it.
         bool already = false;
         for (const auto& tt : g_unverified) {
             if (tt.resource.get() == pResource) { already = true; break; }
         }
         for (const auto& tt : g_streamer_mode) {
             if (tt.resource.get() == pResource) { already = true; break; }
+        }
+        for (const auto& pf : g_pending_fp) {
+            if (pf.resource.get() == pResource) { already = true; break; }
         }
 
         if (!already) {
@@ -407,6 +533,7 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
 
 void process_texture_injection(ID3D12CommandQueue* pQueue) {
     if (!pQueue) return;
+    if (!g_tex_injection_enabled.load(std::memory_order_relaxed)) return;
 
     // ── Fast path: two tiers of checks ──
     //
@@ -482,27 +609,56 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
             }
         }
 
-    // Fingerprint outside the lock (GPU readback is expensive)
+    // Kick off readback outside the lock. This only submits a tiny copy
+    // and signals a fence -- it never blocks on the GPU (see
+    // kickoff_fingerprint's comment for why that distinction matters).
+    std::vector<PendingFingerprint> started;
     for (auto* res : to_fingerprint) {
-        bool is_placeholder = fingerprint_texture(pDevice.get(), pQueue, res);
-        {
-            std::lock_guard lk{g_tex_mutex};
-            if (is_placeholder) {
-                TrackedTexture tt;
-                tt.resource.attach(res); // takes ownership of our AddRef
-                tt.is_placeholder = true;
-                tt.fingerprinted = true;
-                g_streamer_mode.push_back(std::move(tt));
-            } else {
-                res->Release(); // not a placeholder — release our ref
-            }
+        PendingFingerprint pf;
+        if (kickoff_fingerprint(pDevice.get(), pQueue, res, pf)) {
+            started.push_back(std::move(pf));
+        } else {
+            res->Release(); // kickoff failed — release our ref, as before
         }
     }
 
-    // Update work-pending flag.
+    // Merge newly-started jobs into the pending list and poll every job
+    // (old and new) for completion. Polling only reads a fence value and,
+    // once signaled, maps a few KB of already-resident CPU-visible memory
+    // -- both effectively free, so doing this under the lock is fine. This
+    // replaces the old blocking WaitForSingleObject, which is the actual
+    // fix for the framerate regression: throttling (rounds 1-3) only
+    // reduced how often the stall happened, not the cost of the stall
+    // itself.
     {
         std::lock_guard lk{g_tex_mutex};
-        g_tex_work_pending.store(!g_unverified.empty(),
+        for (auto& pf : started) g_pending_fp.push_back(std::move(pf));
+
+        for (auto it = g_pending_fp.begin(); it != g_pending_fp.end(); ) {
+            bool is_placeholder = false;
+            if (!try_complete_fingerprint(*it, is_placeholder)) {
+                ++it; // still in flight on the GPU — check again next tick
+                continue;
+            }
+            if (is_placeholder) {
+                TrackedTexture tt;
+                tt.resource       = std::move(it->resource);
+                tt.is_placeholder = true;
+                tt.fingerprinted  = true;
+                g_streamer_mode.push_back(std::move(tt));
+                // Bound unbounded growth: the game has been observed to
+                // keep recreating this SRV as it renders, so cap how many
+                // instances we retain and inject into.
+                if (g_streamer_mode.size() > kMaxStreamerModeTextures) {
+                    g_streamer_mode.erase(g_streamer_mode.begin());
+                }
+            }
+            it = g_pending_fp.erase(it);
+        }
+
+        // Update work-pending flag: keep polling next tick if there's
+        // anything still unverified or still in flight on the GPU.
+        g_tex_work_pending.store(!g_unverified.empty() || !g_pending_fp.empty(),
                                   std::memory_order_release);
     }
     } // end if (fingerprint_due)
@@ -511,11 +667,28 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
     // Only inject when the radio is active — when the radio is off, the
     // game may have destroyed the target textures, and writing to stale
     // resources causes GPU crashes (TDR).
+    //
+    // Don't pop the pending pixels until we know there's a fingerprinted
+    // target to inject into. Artwork can finish downloading/processing
+    // before the placeholder texture has been (re-)fingerprinted -- e.g.
+    // right after a channel rebuild clears g_streamer_mode, which happens
+    // routinely during normal track transitions (see ControlLoop's
+    // staleness watchdog) -- and popping unconditionally would consume the
+    // pending image and silently drop it forever, since nothing re-queues
+    // it. Leaving it pending lets the next tick retry once fingerprinting
+    // catches up.
     if (g_radio_active.load(std::memory_order_acquire)) {
-        std::vector<uint8_t> pixels;
-        int w = 0, h = 0;
-        if (TextureInjector::instance().pop_pending_pixels(pixels, w, h)) {
-            inject_pixels(pDevice.get(), pQueue, pixels, w, h);
+        bool have_target = false;
+        {
+            std::lock_guard lk{g_tex_mutex};
+            have_target = !g_streamer_mode.empty();
+        }
+        if (have_target) {
+            std::vector<uint8_t> pixels;
+            int w = 0, h = 0;
+            if (TextureInjector::instance().pop_pending_pixels(pixels, w, h)) {
+                inject_pixels(pDevice.get(), pQueue, pixels, w, h);
+            }
         }
     }
 }
@@ -524,6 +697,13 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
 
 bool install_create_srv_hook(ID3D12Device* pDevice) {
     if (!pDevice) return false;
+
+    // If injection was disabled via the Settings panel before the device
+    // was acquired, skip installing the CreateSRV hook entirely.
+    if (!g_tex_injection_enabled.load(std::memory_order_relaxed)) {
+        log::info("[texinject] CreateSRV hook skipped (injection disabled)");
+        return true; // not a failure — rest of init should proceed
+    }
 
     // ID3D12Device vtable: CreateShaderResourceView is at index 18
     // (0-2: IUnknown, 3-6: ID3D12Object, 7+: ID3D12Device methods)

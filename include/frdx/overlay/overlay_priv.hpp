@@ -102,6 +102,10 @@ struct DxResources {
     wil::com_ptr<ID3D12Fence> fence;
     HANDLE fence_event = nullptr;
     UINT64 fence_value = 0;
+    // Pool of command allocators, larger than the backbuffer count so we
+    // can always find a ready one without blocking the Present thread.
+    // Each allocator tracks the fence value of its last submitted work.
+    static constexpr size_t kAllocatorPoolSize = 8;
     std::vector<wil::com_ptr<ID3D12CommandAllocator>> allocators;
     std::vector<UINT64> allocator_fence_values;
     std::vector<wil::com_ptr<ID3D12Resource>> fb_bufs;
@@ -405,8 +409,16 @@ void draw_backdrop_blur(float alpha_scalar = 1.0f);
 
 // ── Texture injection hooks (tex_hooks.cpp) ──
 
+// Enable/disable texture injection at runtime.  When disabled, the
+// CreateSRV hook (if not yet installed) won't be installed, and the
+// per-frame process_texture_injection bails immediately.  Mirrors
+// OverlayConfig::texture_injection_enabled.
+void set_tex_injection_enabled(bool enabled) noexcept;
+bool is_tex_injection_enabled() noexcept;
+
 // Install the CreateShaderResourceView hook on the device vtable.
-// Called once after the device is first acquired.
+// Called once after the device is first acquired.  No-op (returns true)
+// when injection is disabled.
 bool install_create_srv_hook(ID3D12Device* pDevice);
 
 // Called from the ExecuteCommandLists hook each frame to fingerprint
@@ -424,12 +436,6 @@ void set_radio_active(bool active) noexcept;
 // (pass to pop_blur_widget_styles).  No-op (returns 0) when blur is off.
 int push_blur_widget_styles(float alpha_scalar);
 void pop_blur_widget_styles(int pushed_count);
-
-// CPU-waits for every tracked direct command queue (other than `self`,
-// which the caller is about to submit into) to flush.  Returns false if
-// any queue didn't drain within the timeout (e.g. a frame-generation
-// deadlock), so the caller can skip the frame instead of hanging the GPU.
-bool wait_for_other_queues_sync(ID3D12CommandQueue* self);
 
 void enqueue_action(std::function<void()> action);
 void save_active_shoutcast_station(IAudioSource* active);

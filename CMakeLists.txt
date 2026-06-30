@@ -170,6 +170,16 @@ set_target_properties(frdx-helper PROPERTIES
 # entry point instead of WinMain.
 target_link_options(frdx-helper PRIVATE -Wl,/ENTRY:wmainCRTStartup)
 
+if(FRDX_AUTO_DEPLOY)
+    add_custom_command(TARGET frdx-helper POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+                -DFROM="$<TARGET_FILE:frdx-helper>"
+                -DTO="${FRDX_GAME_DIR}/mods/frdx/frdx-helper.exe"
+                -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
+        COMMENT "Deploying frdx-helper.exe → ${FRDX_GAME_DIR}/mods/frdx"
+    )
+endif()
+
 add_executable(dualsense_config_self_test
     tests/dualsense_config_self_test.cpp
     src/config.cpp

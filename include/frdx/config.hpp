@@ -61,6 +61,11 @@ struct OverlayConfig {
     // focus (alt-tab).  Works by swallowing WM_ACTIVATE / WM_ACTIVATEAPP /
     // WM_SETFOCUS / WM_KILLFOCUS messages so the game never sees focus loss.
     bool prevent_focus_loss_pause = false;
+    // When false, the DX12 CreateSRV hook and per-frame texture
+    // fingerprinting/injection are fully disabled — zero render-thread
+    // overhead.  Useful for diagnosing framerate regressions or running
+    // without the album-art overlay feature.
+    bool texture_injection_enabled = true;
 };
 
 struct DualSenseConfig {

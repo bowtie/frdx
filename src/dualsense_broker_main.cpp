@@ -2,6 +2,8 @@
 #include "frdx/config.hpp"
 #include "frdx/log.hpp"
 #include "frdx/helper/worker_server.hpp"
+#include "frdx/helper/ipc_protocol.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -169,7 +171,9 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     if (port_override > 0) cfg.dualsense.udp_port = port_override;
     if (!locked_serial.empty()) cfg.dualsense.controller_lock_serial = locked_serial;
     if (cfg.dualsense.reconnect_interval_s <= 0.0f) cfg.dualsense.reconnect_interval_s = 1.0f;
-    cfg.dualsense.enabled          = true;
+    // Don't force enabled=true — respect the config so the unified helper
+    // can run with DualSense off (worker-only mode).  The service handles
+    // enabled=false gracefully.
     cfg.dualsense.enable_reconnect = true;
     cfg.dualsense.external_helper  = true;
 
@@ -192,6 +196,20 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     frdx::dualsense::DualSenseService service{cfg.dualsense};
     service.start();
 
+    // ── Unified worker server ──
+    // The external helper also serves as the worker process for
+    // downloads/ffmpeg/texconv, eliminating the need for a separate
+    // frdx-helper.exe --worker child of the game.  The game connects
+    // to the well-known pipe name.
+    HANDLE worker_shutdown = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const auto worker_pipe = frdx::helper::ipc::external_worker_pipe_name();
+    std::thread worker_thread([worker_pipe, worker_shutdown]() {
+        frdx::helper::run_worker_loop(worker_pipe, worker_shutdown,
+                                      frdx::helper::ipc::kExternalWorkerToken);
+    });
+    frdx::log::info("[dualsense-external] worker server started on {}",
+                    frdx::subprocess::narrow(worker_pipe));
+
     auto last_config_check = std::chrono::steady_clock::now();
     auto last_config_write = std::filesystem::file_time_type{};
     if (std::filesystem::exists(config_path, ec)) {
@@ -202,6 +220,21 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     std::string last_name;
     std::string last_error;
     bool saw_game_process = watch_process.empty() || process_name_exists(watch_process);
+
+    // Helper to shut down the worker thread + DualSense service + handles.
+    auto shutdown_all = [&]() {
+        service.stop();
+        if (worker_shutdown) {
+            SetEvent(worker_shutdown);
+            if (worker_thread.joinable()) worker_thread.join();
+            CloseHandle(worker_shutdown);
+            worker_shutdown = nullptr;
+        }
+        CloseHandle(singleton);
+        if (stop_event) CloseHandle(stop_event);
+        cleanup_scheduled_task();
+    };
+
     while (true) {
         const auto now = std::chrono::steady_clock::now();
 
@@ -210,10 +243,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
             frdx::log::info("[dualsense-external] stop event signaled; shutting down");
             std::printf("[frdx-dualsense] stop requested; shutting down\n");
             std::fflush(stdout);
-            service.stop();
-            CloseHandle(singleton);
-            if (stop_event) CloseHandle(stop_event);
-            cleanup_scheduled_task();
+            shutdown_all();
             return 0;
         }
 
@@ -229,10 +259,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                     std::printf("[frdx-dualsense] %ls exited; shutting down\n",
                                 watch_process.c_str());
                     std::fflush(stdout);
-                    service.stop();
-                    CloseHandle(singleton);
-                    if (stop_event) CloseHandle(stop_event);
-                    cleanup_scheduled_task();
+                    shutdown_all();
                     return 0;
                 }
             }
@@ -248,7 +275,6 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                 if (next.dualsense.reconnect_interval_s <= 0.0f) {
                     next.dualsense.reconnect_interval_s = 1.0f;
                 }
-                next.dualsense.enabled          = true;
                 next.dualsense.enable_reconnect = true;
                 next.dualsense.external_helper  = true;
                 service.update_config(next.dualsense);

@@ -601,21 +601,7 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
     // backbuffer copy + multi-pass blur for every such frame.
     if (!any_blur_window_visible()) return true;
 
-    // Throttle the capture+blur to ~30fps.  The blur is a low-frequency
-    // effect — a 1-2 frame stale blurred scene is visually indistinguishable
-    // from a fresh one.  Under frame generation Present fires at 2x the
-    // real frame rate, so this halves the GPU work with no visible quality
-    // loss.  We still transition blur_tex[0] to SRV state so ImGui can
-    // composite the stale result.
-    static std::chrono::steady_clock::time_point last_capture{};
-    const auto now = std::chrono::steady_clock::now();
-    const bool skip_capture =
-        last_capture != std::chrono::steady_clock::time_point{} &&
-        (now - last_capture) < std::chrono::milliseconds(33);
-
-    if (!skip_capture) {
-        last_capture = now;
-
+    {
         const auto& strengths = blur_strength_table();
         const int s           = std::clamp(cfg.blur_strength, 1, 15) - 1;
         const int iterations =
@@ -670,8 +656,8 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
         for (int i = iterations; i >= 1; --i) run_pass(i, i - 1, g_dx.blur_up_pso.get());
     }
 
-    // 4) blur_tex[0] now holds the blurred scene (fresh or stale); hand it
-    //    to ImGui.  Ensure it's in SRV state.
+    // 4) blur_tex[0] now holds the blurred scene; hand it to ImGui.
+    //    Ensure it's in SRV state.
     transition_to(cmd, g_dx.blur_tex[0].get(), g_dx.blur_state[0],
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return true;

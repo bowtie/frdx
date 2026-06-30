@@ -88,12 +88,38 @@ bool WorkerClient::start(std::wstring_view helper_exe_path) {
     return true;
 }
 
+bool WorkerClient::connect_external() {
+    // The unified external helper hosts the worker server on a well-known
+    // pipe name.  We just need to wait for it to be ready — no process
+    // to launch.
+    token_ = ipc::kExternalWorkerToken;
+    const auto ctrl_pipe = ipc::external_worker_pipe_name();
+
+    // The external helper may still be starting up (Task Scheduler launch
+    // has some latency).  Retry for up to 10 seconds.
+    if (!wait_pipe_ready(ctrl_pipe, 10000)) {
+        log::warn("[worker] external helper pipe didn't appear within 10s");
+        token_.clear();
+        return false;
+    }
+
+    external_ = true;
+    log::info("[worker] connected to external helper");
+    return true;
+}
+
 void WorkerClient::stop() noexcept {
     if (process_) {
         request(R"({"op":"shutdown"})");
         WaitForSingleObject(process_, 2000);
         CloseHandle(process_);
         process_ = nullptr;
+    }
+    if (external_) {
+        // Just disconnect — the external helper manages its own lifetime
+        // (shuts down when the game process exits or the stop event fires).
+        external_ = false;
+        token_.clear();
     }
 }
 

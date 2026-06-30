@@ -42,4 +42,13 @@ inline std::wstring control_pipe_name(std::string_view token) {
     return name;
 }
 
+// Well-known pipe name used when the worker runs inside the unified
+// external helper (no random token — the game discovers it by name).
+inline std::wstring external_worker_pipe_name() {
+    return L"\\\\.\\pipe\\frdx-helper-external-ctrl";
+}
+
+// Token used for PCM pipe names in unified external mode.
+inline constexpr const char* kExternalWorkerToken = "external";
+
 } // namespace frdx::helper::ipc

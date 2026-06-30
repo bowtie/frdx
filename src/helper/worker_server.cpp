@@ -387,59 +387,65 @@ void handle_connection(HANDLE pipe, std::string_view token) {
 
 } // namespace
 
-// ── Main worker loop ──
+// ── Worker accept loop (shared between standalone and unified modes) ──
 
-int run_worker(std::string_view token, uint32_t parent_pid) {
-    auto ctrl_pipe_name = ipc::control_pipe_name(token);
-
-    // Create the shutdown event
-    g_shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    HANDLE shutdown_event = g_shutdown_event;
-
-    // Create multi-instance control pipe
-    HANDLE first_pipe = CreateNamedPipeW(ctrl_pipe_name.c_str(),
+void run_worker_loop(const std::wstring& pipe_name, HANDLE shutdown_event,
+                     std::string_view token) {
+    // Reserve the pipe name with a FIRST_PIPE_INSTANCE instance so we
+    // can detect if another worker is already listening on it.
+    HANDLE first_pipe = CreateNamedPipeW(pipe_name.c_str(),
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE, PIPE_UNLIMITED_INSTANCES,
         65536, 65536, 0, nullptr);
     if (first_pipe == INVALID_HANDLE_VALUE) {
-        log::warn("[worker] failed to create control pipe");
-        return 1;
+        log::warn("[worker] failed to create control pipe (err={})", GetLastError());
+        return;
     }
     CloseHandle(first_pipe);
 
-    log::info("[worker] control pipe ready: {}", subprocess::narrow(ctrl_pipe_name));
+    log::info("[worker] control pipe ready: {}", subprocess::narrow(pipe_name));
 
-    // Parent PID watcher thread
-    std::thread watcher([parent_pid, shutdown_event]() {
-        while (WaitForSingleObject(shutdown_event, 1000) == WAIT_TIMEOUT) {
-            HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
-            if (!h) break; // parent gone
-            DWORD exit_code = 0;
-            if (GetExitCodeProcess(h, &exit_code) && exit_code != STILL_ACTIVE) {
-                CloseHandle(h);
-                break;
-            }
-            CloseHandle(h);
-        }
-        SetEvent(shutdown_event);
-    });
+    // Accept loop — uses overlapped I/O so the shutdown event can
+    // interrupt ConnectNamedPipe.  Without this, the blocking
+    // ConnectNamedPipe(pipe, nullptr) would hang forever after the
+    // parent exits, since no new client will ever connect and the
+    // shutdown event would never be checked.
+    OVERLAPPED connect_ov{};
+    connect_ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!connect_ov.hEvent) {
+        log::warn("[worker] failed to create overlapped event");
+        return;
+    }
+    HANDLE wait_handles[] = { connect_ov.hEvent, shutdown_event };
 
-    // Accept loop
     while (WaitForSingleObject(shutdown_event, 0) == WAIT_TIMEOUT) {
-        HANDLE pipe = CreateNamedPipeW(ctrl_pipe_name.c_str(),
-            PIPE_ACCESS_DUPLEX,
+        HANDLE pipe = CreateNamedPipeW(pipe_name.c_str(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE, 1,
             65536, 65536, 0, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) {
             Sleep(50);
             continue;
         }
-        if (ConnectNamedPipe(pipe, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) {
-            std::thread(handle_connection, pipe, token).detach();
-        } else {
-            CloseHandle(pipe);
+        ResetEvent(connect_ov.hEvent);
+        BOOL connected = ConnectNamedPipe(pipe, &connect_ov);
+        if (connected || GetLastError() == ERROR_PIPE_CONNECTED) {
+            std::thread(handle_connection, pipe, std::string{token}).detach();
+            continue;
         }
+        if (GetLastError() != ERROR_IO_PENDING) {
+            CloseHandle(pipe);
+            continue;
+        }
+        DWORD wait_result = WaitForMultipleObjects(2, wait_handles, FALSE, INFINITE);
+        if (wait_result == WAIT_OBJECT_0 + 1) {
+            CancelIoEx(pipe, &connect_ov);
+            CloseHandle(pipe);
+            break;
+        }
+        std::thread(handle_connection, pipe, std::string{token}).detach();
     }
+    if (connect_ov.hEvent) CloseHandle(connect_ov.hEvent);
 
     // Cleanup: kill all pipelines
     {
@@ -457,9 +463,38 @@ int run_worker(std::string_view token, uint32_t parent_pid) {
         g_pipelines.clear();
     }
 
+    log::info("[worker] accept loop exiting");
+}
+
+// ── Standalone worker mode (launched as a child of the game) ──
+
+int run_worker(std::string_view token, uint32_t parent_pid) {
+    auto ctrl_pipe_name = ipc::control_pipe_name(token);
+
+    g_shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE shutdown_event = g_shutdown_event;
+
+    // Parent PID watcher thread
+    std::thread watcher([parent_pid, shutdown_event]() {
+        while (WaitForSingleObject(shutdown_event, 1000) == WAIT_TIMEOUT) {
+            HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
+            if (!h) break; // parent gone
+            DWORD exit_code = 0;
+            if (GetExitCodeProcess(h, &exit_code) && exit_code != STILL_ACTIVE) {
+                CloseHandle(h);
+                break;
+            }
+            CloseHandle(h);
+        }
+        SetEvent(shutdown_event);
+    });
+
+    run_worker_loop(ctrl_pipe_name, shutdown_event, token);
+
     SetEvent(shutdown_event);
     watcher.join();
     CloseHandle(shutdown_event);
+    g_shutdown_event = nullptr;
     log::info("[worker] shutting down");
     return 0;
 }
