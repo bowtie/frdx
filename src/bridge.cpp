@@ -66,7 +66,7 @@ bool run_hidden_process(std::wstring command_line, DWORD timeout_ms = 8000) {
 }
 
 bool launch_external_helper(const std::filesystem::path& module_dir, int udp_port) {
-    const auto exe = module_dir / L"frdx-helper.exe";
+    const auto exe = module_dir / L"mods" / L"frdx" / L"frdx-helper.exe";
     if (!std::filesystem::exists(exe)) {
         log::warn("[dualsense] external helper executable missing: {}", exe.string());
         return false;
@@ -179,7 +179,7 @@ void run_bridge(HMODULE self) noexcept {
     // clean and improves Wine/Proton compatibility.
     helper::WorkerClient worker;
     {
-        auto helper_exe = dir / L"frdx-helper.exe";
+        auto helper_exe = dir / L"mods" / L"frdx" / L"frdx-helper.exe";
         std::error_code ec;
         if (std::filesystem::exists(helper_exe, ec)) {
             worker.start(helper_exe.wstring());
