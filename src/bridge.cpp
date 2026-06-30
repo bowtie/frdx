@@ -121,7 +121,6 @@ bool helper_already_running() {
 void maybe_launch_external_helper(const std::filesystem::path& module_dir,
                                   const DualSenseConfig& cfg) {
     static auto s_last_attempt = std::chrono::steady_clock::time_point{};
-    if (!dualsense_external_helper_should_launch(cfg)) return;
     if (helper_already_running()) return;
     const auto now = std::chrono::steady_clock::now();
     if (now - s_last_attempt < std::chrono::seconds(10)) return;
@@ -160,20 +159,10 @@ void run_bridge(HMODULE self) noexcept {
 
     ConfigStore store{data_dir / "config.toml", load_config(data_dir / "config.toml")};
     auto cfg = store.snapshot();
-    if (cfg.dualsense.enabled && !cfg.dualsense.external_helper) {
-        log::info("[dualsense] enabling external helper for existing trigger config");
-        store.patch([](Config& c) { c.dualsense.external_helper = true; });
-        cfg = store.snapshot();
-    }
+    // Always launch the helper — it's needed for texture injection (downloads,
+    // texconv) as well as DualSense triggers. The DualSense enabled toggle
+    // only controls trigger functionality, not helper existence.
     maybe_launch_external_helper(dir, cfg.dualsense);
-
-    // If the helper is running from a previous session but triggers are now
-    // disabled, stop it — otherwise it keeps scanning for controllers with
-    // no game to feed it telemetry.
-    if (helper_already_running() && !dualsense_external_helper_should_launch(cfg.dualsense)) {
-        log::info("[dualsense] stopping stale external helper (triggers disabled in config)");
-        stop_external_helper();
-    }
 
     auto img = fmod_bridge::parse(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)));
     if (!img.valid()) {
@@ -293,20 +282,16 @@ void run_bridge(HMODULE self) noexcept {
         ctrl = std::make_unique<fmod_bridge::ControlLoop>(bridge, img, cfg.audio.output_gain);
 
     store.on_change(
-        [dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get(),
-         prev_enabled = cfg.dualsense.enabled](const Config& c) mutable {
+        [dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get()](const Config& c) mutable {
             if (!mgr.active() && shoutcast) mgr.set_source(shoutcast.get());
 
             bridge.set_gain(c.audio.output_gain);
             bridge.set_force_stereo_audio(c.audio.force_stereo_audio);
             dualsense.update_config(dualsense_service_config(c.dualsense));
 
-            // If triggers were on and are now off, stop the external helper.
-            if (prev_enabled && !c.dualsense.enabled) {
-                stop_external_helper();
-            }
-            prev_enabled = c.dualsense.enabled;
-
+            // Always ensure the helper is running — it handles downloads and
+            // texconv for texture injection, not just DualSense triggers.
+            // Never stop it while the game is open.
             maybe_launch_external_helper(dir, c.dualsense);
             if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
         });
