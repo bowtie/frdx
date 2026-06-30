@@ -1,6 +1,7 @@
 #include "frdx/dualsense.hpp"
 #include "frdx/config.hpp"
 #include "frdx/log.hpp"
+#include "frdx/helper/worker_server.hpp"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -263,6 +264,9 @@ int wmain(int argc, wchar_t** argv) {
     std::string locked_serial;
     bool listen   = false;
     bool external = false;
+    bool worker   = false;
+    std::string worker_token;
+    uint32_t parent_pid = 0;
     int port      = 0;
     std::wstring watch_process = L"ForzaHorizon6.exe";
     std::filesystem::path config_path = exe_directory() / L"mods" / L"frdx" / L"config.toml";
@@ -274,6 +278,10 @@ int wmain(int argc, wchar_t** argv) {
             listen = true;
         } else if (arg == L"--external") {
             external = true;
+        } else if (arg == L"--worker" && i + 1 < argc) {
+            worker = true;
+            worker_token = narrow(argv[++i]);
+            if (i + 1 < argc) parent_pid = static_cast<uint32_t>(_wtoi(argv[++i]));
         } else if (arg == L"--config" && i + 1 < argc) {
             config_path = argv[++i];
         } else if (arg == L"--port" && i + 1 < argc) {
@@ -291,6 +299,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
+    if (worker) return frdx::helper::run_worker(worker_token, parent_pid);
     if (external) return run_external_controller(config_path, port, locked_serial, watch_process);
     if (listen || pipe_name.empty())
         return frdx::dualsense::run_controller_broker_server(locked_serial);

@@ -1065,7 +1065,7 @@ public:
             return true;
         }
 
-        const auto exe = current_module_directory() / L"frdx_dualsense_helper.exe";
+        const auto exe = current_module_directory() / L"frdx-helper.exe";
         log::info("[dualsense] trying external HID helper at {}", exe.string());
         if (!std::filesystem::exists(exe)) {
             last_error_ = "DualSense helper executable missing";

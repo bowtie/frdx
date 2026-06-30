@@ -63,7 +63,7 @@ bool run_hidden_process(std::wstring command_line, DWORD timeout_ms = 8000) {
 }
 
 bool launch_external_helper(const std::filesystem::path& module_dir, int udp_port) {
-    const auto exe = module_dir / L"frdx_dualsense_helper.exe";
+    const auto exe = module_dir / L"frdx-helper.exe";
     if (!std::filesystem::exists(exe)) {
         log::warn("[dualsense] external helper executable missing: {}", exe.string());
         return false;

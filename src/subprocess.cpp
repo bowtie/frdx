@@ -4,7 +4,6 @@
 
 namespace frdx::subprocess {
 
-namespace {
 std::string narrow(std::wstring_view ws) {
     if (ws.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()), nullptr, 0,
@@ -14,7 +13,6 @@ std::string narrow(std::wstring_view ws) {
                         nullptr);
     return out;
 }
-} // namespace
 
 std::wstring widen(std::string_view s) {
     if (s.empty()) return {};

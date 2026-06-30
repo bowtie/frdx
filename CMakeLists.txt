@@ -57,6 +57,7 @@ add_library(version SHARED
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp
     src/sources/shoutcast_metadata.cpp
+    src/helper/worker_client.cpp
     third_party/hidapi/windows/hid.c
 
     # Dear ImGui
@@ -117,31 +118,34 @@ target_link_libraries(dualsense_self_test PRIVATE ws2_32 hid setupapi cfgmgr32 u
 
 add_test(NAME dualsense_self_test COMMAND dualsense_self_test)
 
-add_executable(frdx_dualsense_helper
+add_executable(frdx-helper
     src/dualsense_broker_main.cpp
     src/dualsense.cpp
     src/config.cpp
     src/log.cpp
+    src/subprocess.cpp
+    src/helper/worker_server.cpp
     third_party/hidapi/windows/hid.c
 )
 
-target_include_directories(frdx_dualsense_helper PRIVATE
+target_include_directories(frdx-helper PRIVATE
     include
     third_party/toml11
     third_party/wil/include
     third_party/hidapi
     third_party/hidapi/hidapi
+    third_party/nlohmann
 )
 
-target_link_libraries(frdx_dualsense_helper PRIVATE ws2_32 hid setupapi cfgmgr32 user32 shell32)
+target_link_libraries(frdx-helper PRIVATE ws2_32 hid setupapi cfgmgr32 user32 shell32 winhttp bcrypt)
 
-set_target_properties(frdx_dualsense_helper PROPERTIES
-    OUTPUT_NAME frdx_dualsense_helper
+set_target_properties(frdx-helper PROPERTIES
+    OUTPUT_NAME frdx-helper
     WIN32_EXECUTABLE TRUE
 )
 # Use the Windows subsystem (no console window) but keep wmain as the
 # entry point instead of WinMain.
-target_link_options(frdx_dualsense_helper PRIVATE /ENTRY:wmainCRTStartup)
+target_link_options(frdx-helper PRIVATE -Wl,/ENTRY:wmainCRTStartup)
 
 add_executable(dualsense_config_self_test
     tests/dualsense_config_self_test.cpp

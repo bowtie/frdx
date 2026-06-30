@@ -18,6 +18,7 @@ inline std::filesystem::path module_directory(HMODULE self = nullptr) {
 
 
 std::wstring widen(std::string_view s);
+std::string narrow(std::wstring_view ws);
 
 // Double-quotes only if needed; embedded quotes are backslash-escaped so the
 // child sees the literal argument through GetCommandLineW.
