@@ -4,9 +4,13 @@
 #include "frdx/audio_source_manager.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
+#include "frdx/texture_injector.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <imgui.h>
+#include <imfilebrowser.h>
 
 namespace frdx::overlay {
 using namespace frdx;
@@ -89,20 +93,6 @@ void draw_general_settings_tab() {
                           "OFF = game auto-pauses on focus loss (default)");
     }
 
-    label_row("Texture Injection");
-    bool tex_inject = cfg.overlay.texture_injection_enabled;
-    if (ImGui::Checkbox("##tex_inject", &tex_inject)) {
-        set_tex_injection_enabled(tex_inject);
-        g_ctx.store->patch(
-            [&](Config& c) { c.overlay.texture_injection_enabled = tex_inject; });
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("ON = album-art texture injection active\n"
-                          "OFF = disables the DX12 CreateSRV hook + per-frame\n"
-                          "      fingerprinting (zero render-thread overhead,\n"
-                          "      useful for diagnosing FPS issues)");
-    }
-
     label_row("Log Window");
     bool show_log = g_ui.console_visible;
     if (ImGui::Checkbox("##log_window", &show_log)) {
@@ -181,6 +171,122 @@ void draw_general_settings_tab() {
     ImGui::EndTable();
 }
 
+// ── Debug tab: custom image injection ──
+
+static char s_custom_image_path[1024] = {};
+static char s_custom_image_url[2048] = {};
+static bool s_custom_injecting = false;
+static std::string s_custom_inject_status;
+static ImGui::FileBrowser s_file_browser(
+    ImGuiFileBrowserFlags_CloseOnEsc | ImGuiFileBrowserFlags_NoModal);
+
+// Injection mode: 0 = raw (stretch to fill), 1 = album art (cover-fit + crop)
+static int s_inject_mode = 0;
+static bool s_inject_border = true;
+
+void draw_debug_tab() {
+    ImGui::TextWrapped("Inject a custom image into the radio HUD texture.");
+    ImGui::Spacing();
+
+    // Mode selector
+    ImGui::Text("Mode:");
+    ImGui::SameLine();
+    ImGui::RadioButton("Raw (stretch)", &s_inject_mode, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Album art (crop)", &s_inject_mode, 1);
+
+    if (s_inject_mode == 1) {
+        ImGui::SameLine();
+        ImGui::Checkbox("Border", &s_inject_border);
+    }
+    ImGui::Spacing();
+
+    // ── Local file section ──
+    ImGui::Text("Local file:");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(-120.0f);
+    ImGui::InputText("##custom_image_path", s_custom_image_path,
+                     sizeof(s_custom_image_path));
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...##local")) {
+        s_file_browser.SetTitle("Select image to inject");
+        s_file_browser.SetTypeFilters({
+            ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".webp", ".*"
+        });
+        s_file_browser.Open();
+    }
+
+    // Render the file browser (non-blocking, ImGui popup)
+    s_file_browser.Display();
+    if (s_file_browser.HasSelected()) {
+        auto sel = s_file_browser.GetSelected();
+        std::snprintf(s_custom_image_path, sizeof(s_custom_image_path), "%s",
+                      sel.string().c_str());
+        s_file_browser.ClearSelected();
+    }
+
+    if (ImGui::Button("Inject File")) {
+        if (s_custom_image_path[0] != '\0' && !s_custom_injecting) {
+            s_custom_injecting = true;
+            s_custom_inject_status = "Processing local file...";
+            const bool raw = s_inject_mode == 0;
+            const bool border = s_inject_border;
+            std::thread([raw, border] {
+                std::string path(s_custom_image_path);
+                std::string url = "file:///" + path;
+                std::replace(url.begin(), url.end(), '\\', '/');
+                TextureInjector::instance().update_artwork_url(url, raw, border);
+                s_custom_inject_status = "Injected — check HUD";
+                s_custom_injecting = false;
+            }).detach();
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // ── URL section ──
+    ImGui::Text("Image URL:");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(-100.0f);
+    ImGui::InputText("##custom_image_url", s_custom_image_url,
+                     sizeof(s_custom_image_url));
+    ImGui::PopItemWidth();
+
+    if (ImGui::Button("Inject URL")) {
+        if (s_custom_image_url[0] != '\0' && !s_custom_injecting) {
+            s_custom_injecting = true;
+            s_custom_inject_status = "Downloading from URL...";
+            const bool raw = s_inject_mode == 0;
+            const bool border = s_inject_border;
+            std::thread([raw, border] {
+                std::string url(s_custom_image_url);
+                TextureInjector::instance().update_artwork_url(url, raw, border);
+                s_custom_inject_status = "Injected — check HUD";
+                s_custom_injecting = false;
+            }).detach();
+        }
+    }
+
+    // Status line
+    if (!s_custom_inject_status.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s",
+                           s_custom_inject_status.c_str());
+    }
+
+    // Show current target dimensions
+    const int tw = TextureInjector::instance().target_width();
+    const int th = TextureInjector::instance().target_height();
+    ImGui::Spacing();
+    ImGui::TextDisabled("Target texture: %dx%d", tw, th);
+    ImGui::TextDisabled("Processing: %s",
+                        TextureInjector::instance().is_processing() ? "yes" : "no");
+}
+
 void draw_settings_window(const PlayerBarLayout& layout) {
     const bool opening = g_ui.settings_visible;
     const float eased  = advance_popup_anim(opening, g_ui.settings_anim);
@@ -232,6 +338,10 @@ void draw_settings_window(const PlayerBarLayout& layout) {
                 }
                 if (ImGui::BeginTabItem("Settings")) {
                     draw_general_settings_tab();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Debug")) {
+                    draw_debug_tab();
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();

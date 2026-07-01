@@ -44,7 +44,11 @@ public:
 
     // Called by the control loop when the artwork URL changes.
     // Spawns a background thread to download + process the image.
-    void update_artwork_url(const std::string& url);
+    // When raw=true, the image is stretched to the target dimensions
+    // without cover-fit cropping (for debug/custom image injection).
+    // When border=true (album art mode), a darkened average-color border
+    // is drawn around the artwork.
+    void update_artwork_url(const std::string& url, bool raw = false, bool border = true);
 
     // Called by the DX12 hook to report the target texture dimensions
     // (196x104 or 196x196) once discovered.
@@ -62,9 +66,19 @@ public:
     bool has_pending_pixels() const noexcept { return has_pending_pixels_.load(std::memory_order_acquire); }
 
     // Called by the DX12 ExecuteCommandLists hook to check for new BC7
-    // pixels to inject. Returns true if pixels were available.
-    bool pop_pending_pixels(std::vector<uint8_t>& out_pixels,
-                            int& out_width, int& out_height);
+    // pixels to inject. Returns all pending variants (one per dimension).
+    struct PixelVariant {
+        std::vector<uint8_t> pixels;
+        int width;
+        int height;
+    };
+    bool pop_pending_pixels(std::vector<PixelVariant>& out_variants);
+
+    // Re-inject the last successfully processed artwork immediately.
+    // Used on station switch so the HUD doesn't go blank while the new
+    // track's metadata arrives.  Returns false if no artwork has been
+    // processed yet.
+    bool reinject_last() noexcept;
 
     // Expected fingerprint hashes for the placeholder textures.
     // 196x104 streamer mode logo.
@@ -75,18 +89,18 @@ public:
 private:
     TextureInjector() = default;
 
-    void process_artwork(const std::string& url, uint64_t job_id);
+    void process_artwork(const std::string& url, uint64_t job_id, bool raw, bool border);
 
     std::mutex mtx_;
     helper::WorkerClient* worker_ = nullptr;
     std::filesystem::path texconv_path_;
     std::filesystem::path data_dir_;
 
-    // Pending BC7 pixels (produced by process thread, consumed by render thread)
+    // Pending BC7 pixels — one variant per target dimension (196x196,
+    // 196x104).  Produced by process thread, consumed by render thread.
     std::mutex pixels_mtx_;
-    std::vector<uint8_t> pending_pixels_;
-    int pending_width_  = 0;
-    int pending_height_ = 0;
+    std::vector<PixelVariant> pending_variants_;
+    std::vector<PixelVariant> last_variants_;  // cache for reinject_last()
     bool has_new_image_ = false;
 
     std::atomic<int> target_width_{0};

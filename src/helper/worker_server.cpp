@@ -346,6 +346,24 @@ std::string handle_download(const nlohmann::json& req) {
     auto url = req.value("url", std::string{});
     auto dest = req.value("dest_path", std::string{});
     if (url.empty() || dest.empty()) return R"({"ok":false,"error":"missing url or dest"})";
+
+    // Handle local file:// URLs by copying the file directly.
+    if (url.rfind("file://", 0) == 0) {
+        std::string local = url.substr(7);
+        // Strip leading slashes after file:// (e.g. file:///C:/path)
+        while (local.size() > 1 && local[0] == '/' && local.size() > 2 &&
+               local[2] == ':')
+            local = local.substr(1);
+        std::error_code ec;
+        std::filesystem::copy_file(local, dest,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            log::warn("[worker] file:// copy failed: {} -> {} ({})", local, dest, ec.message());
+            return R"({"ok":false,"error":"local file copy failed"})";
+        }
+        return R"({"ok":true})";
+    }
+
     if (http_download(url, dest))
         return R"({"ok":true})";
     return R"({"ok":false,"error":"download failed"})";

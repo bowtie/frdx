@@ -356,52 +356,76 @@ bool try_complete_fingerprint(PendingFingerprint& pf, bool& out_is_placeholder) 
 // ── BC7 pixel injection (SEH-protected) ──
 
 bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
-                   const std::vector<uint8_t>& pixels, int width, int height) {
-    if (!pDevice || !pQueue || pixels.empty()) return false;
+                   const std::vector<TextureInjector::PixelVariant>& variants) {
+    if (!pDevice || !pQueue || variants.empty()) return false;
 
     std::lock_guard lk{g_tex_mutex};
     if (g_streamer_mode.empty()) return false;
 
-    UINT blocksX = (width + 3) / 4;
-    UINT blocksY = (height + 3) / 4;
-    UINT tightRowPitch = blocksX * 16;
-    UINT alignedRowPitch = (tightRowPitch + 255) & ~255;
-    UINT uploadSize = alignedRowPitch * blocksY;
-
     __try {
-        // 1. Create upload buffer
-        D3D12_HEAP_PROPERTIES uploadHeap{};
-        uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC uploadDesc{};
-        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        uploadDesc.Width = uploadSize;
-        uploadDesc.Height = 1;
-        uploadDesc.DepthOrArraySize = 1;
-        uploadDesc.MipLevels = 1;
-        uploadDesc.SampleDesc.Count = 1;
-        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-        wil::com_ptr<ID3D12Resource> pUploadRes;
-        if (FAILED(pDevice->CreateCommittedResource(
-                &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                IID_PPV_ARGS(pUploadRes.put())))) {
-            return false;
+        // Index variants by (width, height) for quick lookup per target texture
+        std::unordered_map<uint32_t, const TextureInjector::PixelVariant*> variant_map;
+        for (const auto& v : variants) {
+            variant_map[static_cast<uint32_t>(v.width) | (static_cast<uint32_t>(v.height) << 16)] = &v;
         }
 
-        // 2. Map and copy with row pitch alignment
-        uint8_t* pMapped = nullptr;
-        if (FAILED(pUploadRes->Map(0, nullptr, reinterpret_cast<void**>(&pMapped)))) {
-            return false;
-        }
-        for (UINT y = 0; y < blocksY; ++y) {
-            std::memcpy(pMapped + (y * alignedRowPitch),
-                        pixels.data() + (y * tightRowPitch),
-                        tightRowPitch);
-        }
-        pUploadRes->Unmap(0, nullptr);
+        // Create one upload buffer per variant dimension
+        struct UploadBuf {
+            wil::com_ptr<ID3D12Resource> upload;
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+        };
+        std::unordered_map<uint32_t, UploadBuf> upload_bufs;
 
-        // 3. Create command allocator + list
+        for (const auto& [key, variant] : variant_map) {
+            UINT blocksX = (variant->width + 3) / 4;
+            UINT blocksY = (variant->height + 3) / 4;
+            UINT tightRowPitch = blocksX * 16;
+            UINT alignedRowPitch = (tightRowPitch + 255) & ~255;
+            UINT uploadSize = alignedRowPitch * blocksY;
+
+            D3D12_HEAP_PROPERTIES uploadHeap{};
+            uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+            D3D12_RESOURCE_DESC uploadDesc{};
+            uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            uploadDesc.Width = uploadSize;
+            uploadDesc.Height = 1;
+            uploadDesc.DepthOrArraySize = 1;
+            uploadDesc.MipLevels = 1;
+            uploadDesc.SampleDesc.Count = 1;
+            uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+            UploadBuf ub;
+            if (FAILED(pDevice->CreateCommittedResource(
+                    &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                    IID_PPV_ARGS(ub.upload.put())))) {
+                return false;
+            }
+
+            uint8_t* pMapped = nullptr;
+            if (FAILED(ub.upload->Map(0, nullptr, reinterpret_cast<void**>(&pMapped)))) {
+                return false;
+            }
+            for (UINT y = 0; y < blocksY; ++y) {
+                std::memcpy(pMapped + (y * alignedRowPitch),
+                            variant->pixels.data() + (y * tightRowPitch),
+                            tightRowPitch);
+            }
+            ub.upload->Unmap(0, nullptr);
+
+            ub.srcLoc.pResource = ub.upload.get();
+            ub.srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            ub.srcLoc.PlacedFootprint.Offset = 0;
+            ub.srcLoc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_BC7_UNORM;
+            ub.srcLoc.PlacedFootprint.Footprint.Width = variant->width;
+            ub.srcLoc.PlacedFootprint.Footprint.Height = variant->height;
+            ub.srcLoc.PlacedFootprint.Footprint.Depth = 1;
+            ub.srcLoc.PlacedFootprint.Footprint.RowPitch = alignedRowPitch;
+
+            upload_bufs[key] = std::move(ub);
+        }
+
+        // Create command allocator + list
         wil::com_ptr<ID3D12CommandAllocator> pAlloc;
         if (FAILED(pDevice->CreateCommandAllocator(
                 D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(pAlloc.put())))) {
@@ -414,21 +438,19 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             return false;
         }
 
-        // 4. Copy to all streamer mode textures
-        D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-        srcLoc.pResource = pUploadRes.get();
-        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        srcLoc.PlacedFootprint.Offset = 0;
-        srcLoc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_BC7_UNORM;
-        srcLoc.PlacedFootprint.Footprint.Width = width;
-        srcLoc.PlacedFootprint.Footprint.Height = height;
-        srcLoc.PlacedFootprint.Footprint.Depth = 1;
-        srcLoc.PlacedFootprint.Footprint.RowPitch = alignedRowPitch;
-
+        // Copy matching variant into each target texture
+        int injected_count = 0;
         for (auto& tt : g_streamer_mode) {
             if (!tt.resource) continue;
 
             D3D12_RESOURCE_DESC desc = tt.resource->GetDesc();
+            uint32_t key = static_cast<uint32_t>(desc.Width) |
+                           (static_cast<uint32_t>(desc.Height) << 16);
+            auto it = upload_bufs.find(key);
+            if (it == upload_bufs.end()) continue;  // no matching variant
+
+            const auto& ub = it->second;
+
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             barrier.Transition.pResource = tt.resource.get();
@@ -442,21 +464,15 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             dstLoc.SubresourceIndex = 0;
 
-            D3D12_BOX srcBox{};
-            srcBox.right = std::min<UINT>(width, static_cast<UINT>(desc.Width));
-            srcBox.bottom = std::min<UINT>(height, desc.Height);
-            srcBox.back = 1;
+            pCmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &ub.srcLoc, nullptr);
 
-            pCmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
-
-            // Transition back
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
             pCmdList->ResourceBarrier(1, &barrier);
+            injected_count++;
         }
 
         pCmdList->Close();
 
-        // 5. Execute and wait
         ID3D12CommandList* lists[] = {pCmdList.get()};
         original_ExecuteCommandLists(pQueue, 1, lists);
 
@@ -472,8 +488,8 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
         WaitForSingleObject(event, 5000);
         CloseHandle(event);
 
-        log::info("[texinject] injected {}x{} BC7 into {} texture(s)",
-                  width, height, g_streamer_mode.size());
+        log::info("[texinject] injected BC7 into {} texture(s) ({} variants)",
+                  injected_count, variants.size());
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         log::warn("[texinject] SEH exception during injection");
@@ -684,10 +700,9 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
             have_target = !g_streamer_mode.empty();
         }
         if (have_target) {
-            std::vector<uint8_t> pixels;
-            int w = 0, h = 0;
-            if (TextureInjector::instance().pop_pending_pixels(pixels, w, h)) {
-                inject_pixels(pDevice.get(), pQueue, pixels, w, h);
+            std::vector<TextureInjector::PixelVariant> variants;
+            if (TextureInjector::instance().pop_pending_pixels(variants)) {
+                inject_pixels(pDevice.get(), pQueue, variants);
             }
         }
     }

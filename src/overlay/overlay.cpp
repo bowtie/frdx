@@ -6,6 +6,7 @@
 #include "frdx/fastboot.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
+#include "frdx/texture_injector.hpp"
 #include "frdx/log.hpp"
 #include "frdx/platform/windows/subprocess.hpp"
 
@@ -197,6 +198,11 @@ void run_station_switch(const PendingStationSwitch& request) {
     auto* active    = g_ctx.mgr->active();
     auto* shoutcast = dynamic_cast<sources::ShoutcastSource*>(active);
     if (!shoutcast) return;
+
+    // Re-inject the last artwork immediately so the HUD doesn't go blank
+    // while the new station connects and metadata arrives.  The new
+    // track's artwork will override this once it downloads.
+    TextureInjector::instance().reinject_last();
 
     shoutcast->select_station(request.station_id, request.stream_id);
     g_ctx.mgr->ring().drain();
