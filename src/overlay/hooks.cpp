@@ -21,7 +21,8 @@
 #include <cstdio>
 
 #include <MinHook.h>
-#include <kiero.h>
+#include <kiero.hpp>
+#include <kiero_d3d12.hpp>
 #include <imgui.h>
 #include <imgui_impl_win32.h>
 #include <imgui_impl_dx12.h>
@@ -186,6 +187,22 @@ Present_t original_Present                               = nullptr;
 ResizeBuffers_t original_ResizeBuffers                   = nullptr;
 CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
 ExecuteCommandLists_t original_ExecuteCommandLists       = nullptr;
+
+// kiero2 D3D12 method table — populated once by kiero::locate<>() during
+// initialize().  Holds per-interface vtable pointers that we hook via
+// MinHook directly (kiero2 separates "locate" from "hook").
+// Also used by tex_hooks.cpp for the CreateSRV hook (device_methods[18]).
+kiero::D3D12Output g_kiero_d3d12;
+
+// Helper: install a MinHook detour on a located vtable method.
+// Returns true on success.  target is the method address from kiero's
+// D3D12Output, original receives the trampoline, hook is the detour.
+static bool mh_bind(void* target, void** original, void* hook) {
+    if (!target) return false;
+    if (MH_CreateHook(target, hook, original) != MH_OK) return false;
+    if (MH_EnableHook(target) != MH_OK) return false;
+    return true;
+}
 
 CommandQueueMap g_cq;
 
@@ -764,61 +781,71 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
     // state from frame one.
     set_tex_injection_enabled(store.snapshot().overlay.texture_injection_enabled);
 
-    re_log::info("initializing kiero for D3D12 hook discovery...");
+    re_log::info("locating D3D12 vtable methods via kiero2...");
 
-    // kiero creates the dummy device/swapchain internally and populates
-    // its methods table. This replaces our manual dummy window + vtable
-    // extraction code.
-    kiero::Status::Enum kstatus = kiero::init(kiero::RenderType::D3D12);
-    if (kstatus != kiero::Status::Success) {
-        re_log::error("kiero::init failed: {}", static_cast<int>(kstatus));
+    // Initialize MinHook before any hook operations.  kiero v1 called
+    // MH_Initialize() internally inside kiero::init(); kiero2 is stateless
+    // and doesn't, so we must do it ourselves before mh_bind() calls.
+    const MH_STATUS mh_init = MH_Initialize();
+    if (mh_init != MH_OK && mh_init != MH_ERROR_ALREADY_INITIALIZED) {
+        re_log::error("MH_Initialize failed: {}", static_cast<int>(mh_init));
         return false;
     }
 
-    // kiero vtable layout (D3D12):
-    //   0-43:    ID3D12Device (44 methods)
-    //   44-62:   ID3D12CommandQueue (19 methods)
-    //   63-71:   ID3D12CommandAllocator (9 methods)
-    //   72-131:  ID3D12CommandList (60 methods)
-    //   132-149: IDXGISwapChain (18 methods)
+    // kiero2 creates temporary D3D12 objects internally, copies their
+    // vtable pointers into D3D12Output, then releases everything.
+    // We hook the located methods directly via MinHook.
+    auto kiero_err = kiero::locate<kiero::Implementation_D3D12>(
+        nullptr, &g_kiero_d3d12);
+    if (kiero_err != kiero::Error_Nil) {
+        re_log::error("kiero::locate<D3D12> failed: {}", kiero_err);
+        return false;
+    }
+
+    // D3D12Output holds per-interface vectors:
+    //   device_methods[]          — ID3D12Device vtable
+    //   command_queue_methods[]   — ID3D12CommandQueue vtable
+    //   swapchain_methods[]       — IDXGISwapChain vtable
     //
-    // Present = swapChain[8] = kiero index 140
-    // ResizeBuffers = swapChain[13] = kiero index 145
-    // ExecuteCommandLists = commandQueue[10] = kiero index 54
-    // CreateSwapChainForHwnd = factory[15] — NOT in kiero's table; we
-    //   hook it manually via the factory vtable when we first see it.
+    // Present               = swapchain_methods[8]
+    // ResizeBuffers         = swapchain_methods[13]
+    // ExecuteCommandLists   = command_queue_methods[10]
+    // CreateShaderResourceView = device_methods[18]  (used in tex_hooks.cpp)
+    // CreateSwapChainForHwnd   = IDXGIFactory2 vtable[15] — NOT in kiero's
+    //   table; hooked manually via a temporary factory below.
 
-    if (kiero::bind(140, reinterpret_cast<void**>(&original_Present),
-                    reinterpret_cast<void*>(&hook_Present)) != kiero::Status::Success) {
-        re_log::error("kiero::bind failed for Present");
+    if (!mh_bind(g_kiero_d3d12.swapchain_methods[8],
+                 reinterpret_cast<void**>(&original_Present),
+                 reinterpret_cast<void*>(&hook_Present))) {
+        re_log::error("MinHook bind failed for Present");
         return false;
     }
-    if (kiero::bind(145, reinterpret_cast<void**>(&original_ResizeBuffers),
-                    reinterpret_cast<void*>(&hook_ResizeBuffers)) != kiero::Status::Success) {
-        re_log::error("kiero::bind failed for ResizeBuffers");
+    if (!mh_bind(g_kiero_d3d12.swapchain_methods[13],
+                 reinterpret_cast<void**>(&original_ResizeBuffers),
+                 reinterpret_cast<void*>(&hook_ResizeBuffers))) {
+        re_log::error("MinHook bind failed for ResizeBuffers");
         return false;
     }
-    if (kiero::bind(54, reinterpret_cast<void**>(&original_ExecuteCommandLists),
-                    reinterpret_cast<void*>(&hook_ExecuteCommandLists)) != kiero::Status::Success) {
-        re_log::error("kiero::bind failed for ExecuteCommandLists");
+    if (!mh_bind(g_kiero_d3d12.command_queue_methods[10],
+                 reinterpret_cast<void**>(&original_ExecuteCommandLists),
+                 reinterpret_cast<void*>(&hook_ExecuteCommandLists))) {
+        re_log::error("MinHook bind failed for ExecuteCommandLists");
         return false;
     }
 
     // CreateSwapChainForHwnd is on IDXGIFactory2, not in kiero's table.
     // We hook it manually by creating a temporary factory.
+    // (MinHook already initialized above before the kiero2 locate calls.)
     {
         wil::com_ptr<IDXGIFactory4> factory;
         if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4),
                                          reinterpret_cast<void**>(factory.put())))) {
             void** factoryVtable = *reinterpret_cast<void***>(factory.get());
             void* target_CreateSwapChainForHwnd = factoryVtable[15];
-            const MH_STATUS init = MH_Initialize();
-            if (init == MH_OK || init == MH_ERROR_ALREADY_INITIALIZED) {
-                if (MH_CreateHook(target_CreateSwapChainForHwnd,
-                                  reinterpret_cast<void*>(&hook_CreateSwapChainForHwnd),
-                                  reinterpret_cast<LPVOID*>(&original_CreateSwapChainForHwnd)) == MH_OK) {
-                    MH_EnableHook(target_CreateSwapChainForHwnd);
-                }
+            if (MH_CreateHook(target_CreateSwapChainForHwnd,
+                              reinterpret_cast<void*>(&hook_CreateSwapChainForHwnd),
+                              reinterpret_cast<LPVOID*>(&original_CreateSwapChainForHwnd)) == MH_OK) {
+                MH_EnableHook(target_CreateSwapChainForHwnd);
             }
         }
     }
@@ -835,7 +862,8 @@ void shutdown() noexcept {
         g_runtime_started = false;
     }
     if (g_hooks_installed) {            re_log::info("disabling MinHook overlay detours...");
-        kiero::shutdown();
+        // kiero2 is stateless — no shutdown needed.  Just disable all
+        // MinHook detours and uninitialize MinHook.
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
         g_hooks_installed               = false;

@@ -13,6 +13,8 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <MinHook.h>
+#include <kiero.hpp>
+#include <kiero_d3d12.hpp>
 #include <cstring>
 #include <chrono>
 #include <mutex>
@@ -33,6 +35,11 @@ using CreateSRV_t = void(__stdcall*)(ID3D12Device* pDevice, ID3D12Resource* pRes
 using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
                                                 ID3D12CommandList* const* ppCommandLists);
 extern ExecuteCommandLists_t original_ExecuteCommandLists;
+
+// Defined in hooks.cpp — kiero2's located D3D12 vtable methods.
+// We use device_methods[18] (CreateShaderResourceView) for the CreateSRV
+// hook, avoiding manual vtable pointer arithmetic.
+extern kiero::D3D12Output g_kiero_d3d12;
 
 CreateSRV_t original_CreateSRV = nullptr;
 
@@ -761,7 +768,7 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
     }
 }
 
-// ── Install CreateSRV hook on the device vtable ──
+// ── Install CreateSRV hook ──
 
 bool install_create_srv_hook(ID3D12Device* pDevice) {
     if (!pDevice) return false;
@@ -773,35 +780,17 @@ bool install_create_srv_hook(ID3D12Device* pDevice) {
         return true; // not a failure — rest of init should proceed
     }
 
-    // ID3D12Device vtable: CreateShaderResourceView is at index 18
-    // (0-2: IUnknown, 3-6: ID3D12Object, 7+: ID3D12Device methods)
-    // Counting from the d3d12.h ID3D12Device interface:
-    // 7: GetResourceTiling
-    // 8: GetCustomHeapProperties
-    // 9: CreateCommandQueue
-    // 10: CreateCommandAllocator (deprecated)
-    // ... actually the exact index depends on the SDK version.
-    // The safest approach is to use the vtable directly.
-    //
-    // From the Windows SDK d3d12.h, CreateShaderResourceView is the
-    // 7th method in ID3D12Device (after IUnknown + ID3D12Object = 7 slots):
-    //   slot 7: GetResourceTiling
-    //   slot 8: GetCustomHeapProperties
-    //   slot 9: CreateCommandQueue
-    //   slot 10: CreateCommandAllocator
-    //   slot 11: CreateCommandList (deprecated)
-    //   slot 12: CreateCommandList1 (newer SDKs)
-    //   ... this is fragile. Let me use a different approach.
-    //
-    // Actually, the most reliable way is to count from the ID3D12Device
-    // interface definition. The vtable index for CreateShaderResourceView
-    // is consistently 18 across Windows 10/11 SDKs.
-    static constexpr UINT kCreateSRVSlot = 18;
-
-    void** vtable = *reinterpret_cast<void***>(pDevice);
-    void* target = vtable[kCreateSRVSlot];
-
     if (original_CreateSRV) return true; // already hooked
+
+    // Use kiero2's located vtable pointer for CreateShaderResourceView
+    // (ID3D12Device vtable slot 18).  This avoids manual vtable pointer
+    // arithmetic — kiero already located the address during initialize().
+    static constexpr size_t kCreateSRVSlot = 18;
+    if (g_kiero_d3d12.device_methods.size() <= kCreateSRVSlot) {
+        log::warn("[texinject] kiero D3D12 device_methods too small for CreateSRV");
+        return false;
+    }
+    void* target = g_kiero_d3d12.device_methods[kCreateSRVSlot];
 
     MH_STATUS s = MH_CreateHook(target, reinterpret_cast<void*>(&hook_CreateSRV),
                                 reinterpret_cast<LPVOID*>(&original_CreateSRV));
@@ -814,7 +803,8 @@ bool install_create_srv_hook(ID3D12Device* pDevice) {
         log::warn("[texinject] failed to enable CreateSRV hook: {}", static_cast<int>(s));
         return false;
     }
-    log::info("[texinject] CreateSRV hook installed at vtable slot {}", kCreateSRVSlot);
+    log::info("[texinject] CreateSRV hook installed via kiero2 (device_methods[{}])",
+              kCreateSRVSlot);
     return true;
 }
 

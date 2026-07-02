@@ -53,7 +53,8 @@ add_library(version SHARED
     src/overlay/hooks.cpp
     src/overlay/tex_hooks.cpp
     src/overlay/player_bar.cpp
-    third_party/kiero/kiero.cpp
+    third_party/kiero2/kiero_intern.cpp
+    third_party/kiero2/kiero_d3d12.cpp
     src/overlay/settings.cpp
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
@@ -90,7 +91,7 @@ target_include_directories(version PRIVATE
     third_party/wil/include
     third_party/imgui
     third_party/minhook
-    third_party/kiero
+    third_party/kiero2
     third_party/stb
     third_party/imgui-animated
     third_party/imanim
