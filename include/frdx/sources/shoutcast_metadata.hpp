@@ -64,6 +64,8 @@ public:
                const StationMetadataMapping& mapping,
                const StationMetadataWebSocketFilter& ws_filter,
                const StationMetadataWebSocketHeartbeat& ws_heartbeat,
+               const StationMetadataWebSocketSubscribe& ws_subscribe,
+               int poll_interval_secs,
                uint64_t metadata_epoch);
 
     // Stop all background poller threads.  Blocks until they've joined.
@@ -92,8 +94,24 @@ private:
                        const StationMetadataMapping& mapping,
                        const StationMetadataWebSocketFilter& filter,
                        StationMetadataWebSocketHeartbeat hb,
+                       StationMetadataWebSocketSubscribe sub,
                        uint64_t metadata_epoch,
                        const std::stop_token& stop);
+    void run_sse_poller(std::string url,
+                        const StationMetadataMapping& mapping,
+                        const StationMetadataWebSocketFilter& filter,
+                        uint64_t metadata_epoch,
+                        const std::stop_token& stop);
+    void run_rest_poller(std::string url,
+                         const StationMetadataMapping& mapping,
+                         int poll_interval_secs,
+                         uint64_t metadata_epoch,
+                         const std::stop_token& stop);
+    void process_sse_event(const std::string& event_data,
+                           const StationMetadataMapping& mapping,
+                           const StationMetadataWebSocketFilter& filter,
+                           uint64_t metadata_epoch,
+                           const std::stop_token& stop);
 
     // ── State ────────────────────────────────────────────────────────
     OnMetadata on_metadata_;
@@ -101,6 +119,7 @@ private:
 
     mutable std::mutex ws_mu_;
     void* ws_handle_ = nullptr;  // active WebSocket handle for forced close
+    void* sse_handle_ = nullptr; // active SSE HTTP request handle for forced close
 
     std::jthread metadata_thread_;   // WS/REST poller
     std::jthread icy_poller_thread_; // ICY poller

@@ -31,6 +31,10 @@ struct StationMetadataMapping {
     std::string title;  // JSON dot-path, e.g. "data.track_title"
     std::string artist; // JSON dot-path, e.g. "data.track_artist"
     std::string
+        artwork_url;   // JSON dot-path to per-track artwork, e.g. "results.0.img_large_url"
+    std::string
+        artwork_url_template; // when set, wraps resolved artwork value: "https://cdn/{value}"
+    std::string
         artist_array_field; // if artist resolves to array of objects, extract this field from each
     std::string artist_separator{", "}; // join array elements with this separator
     std::string
@@ -59,6 +63,8 @@ struct StationMetadataWebSocketFilter {
     std::string type_field; // JSON path to the type field, e.g. "t"
     std::string type_value; // expected type string, e.g. "TRACK_UPDATE"
     std::string data_field; // JSON path to the data object, e.g. "d"
+    std::unordered_map<std::string, std::string>
+        stream_type_value_map; // stream_id -> per-stream type_value override (SSE array filter)
 };
 
 // WebSocket heartbeat / keep-alive configuration.
@@ -69,19 +75,29 @@ struct StationMetadataWebSocketHeartbeat {
     int default_interval_ms = 45000; // fallback if server doesn't provide interval
 };
 
+// WebSocket subscribe message — sent once on connect to register for updates.
+struct StationMetadataWebSocketSubscribe {
+    std::string message;       // JSON message to send on connect, e.g. "{\"action\":\"subscribe\",\"serviceId\":\"3691\"}"
+    std::unordered_map<std::string, std::string>
+        stream_message_map; // stream_id -> per-stream subscribe message override
+};
+
 struct StationMetadata {
     std::string type; // "rest", "static", "websocket", or empty
     std::string url;
     std::unordered_map<std::string, std::string> stream_url_map; // stream_id -> metadata URL
     StationMetadataMapping mapping;
+    int poll_interval_secs = 0; // 0 = use default poll interval
 
     // Static metadata (type == "static").
     std::string static_title;
     std::string static_artist;
+    std::string static_artwork_url;
 
     // WebSocket metadata (type == "websocket").
     StationMetadataWebSocketFilter ws_filter;
     StationMetadataWebSocketHeartbeat ws_heartbeat;
+    StationMetadataWebSocketSubscribe ws_subscribe;
 };
 
 struct StationPreset {
@@ -261,6 +277,11 @@ private:
     // avoid calling current_track() (which locks mu_) every frame.
     std::atomic<uint64_t> info_gen_{0};
     std::atomic<uint64_t> metadata_epoch_{1};
+
+    // Artwork lookup cancellation: incremented each time a new track
+    // is applied, so stale lookup threads (iTunes + MusicBrainz) can
+    // detect they're outdated.
+    std::atomic<uint64_t> itunes_lookup_job_{0};
 };
 
 } // namespace frdx::sources

@@ -1,76 +1,69 @@
 [
   {
-    "id": "doujinstyle",
-    "name": "DoujinStyle.FM",
-    "streams": [
-      {
-        "id": "main",
-        "name": "Doujin & Underground Electronic",
-        "url": "https://streams.radio.co/s5ff57669c/listen"
-      }
-    ]
-  },
-  {
     "id": "asiadreamradio",
     "name": "asia DREAM radio",
     "streams": [
       {
         "id": "japan_hits",
         "name": "Japan Hits",
-        "url": "https://quincy.torontocast.com/JapanHits"
+        "url": "https://quincy.torontocast.com:2020/;?type=http"
       },
       {
         "id": "natsukashii",
-        "name": "J-Pop Sakura",
-        "url": "https://quincy.torontocast.com/SakuraN"
+        "name": "Natsukashii",
+        "url": "https://quincy.torontocast.com:2070/;?type=http"
       },
       {
         "id": "jpop_kawaii",
         "name": "J-Pop Kawaii",
-        "url": "https://kathy.torontocast.com/kawaii"
+        "url": "https://kathy.torontocast.com:3060/;?type=http"
       },
       {
         "id": "jpop_power",
-        "name": "J-Pop Powerplay",
-        "url": "https://kathy.torontocast.com/powerplay"
+        "name": "J-Pop Power",
+        "url": "https://kathy.torontocast.com:3560/;?type=http"
       },
       {
         "id": "jazz_sakura",
         "name": "Jazz Sakura",
-        "url": "https://kathy.torontocast.com/jazzsakura"
+        "url": "https://kathy.torontocast.com:3330/;?type=http"
       },
       {
         "id": "jrock",
-        "name": "J-Rock Powerplay",
-        "url": "https://kathy.torontocast.com/jrock"
+        "name": "J-Rock",
+        "url": "https://kathy.torontocast.com:3340/;?type=http"
       },
       {
         "id": "jclub_hiphop",
-        "name": "J-Club Hip Hop",
-        "url": "https://kathy.torontocast.com/jclubhiphop"
+        "name": "J-Club / Hip Hop",
+        "url": "https://kathy.torontocast.com:3350/;?type=http"
       },
       {
         "id": "bandstand_jazz",
         "name": "Bandstand Jazz",
         "url": "https://cast1.torontocast.com/bandstand"
       }
-    ]
-  },
-  {
-    "id": "j1",
-    "name": "J1 Radio",
-    "streams": [
-      {
-        "id": "J1HITS",
-        "name": "J1 HITS",
-        "url": "https://jenny.torontocast.com:2000/stream/J1HITS"
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
+      "stream_url_map": {
+        "japan_hits": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
+        "natsukashii": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=3",
+        "jpop_kawaii": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=2",
+        "jpop_power": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=1",
+        "jazz_sakura": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=1",
+        "jrock": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=4",
+        "jclub_hiphop": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=5",
+        "bandstand_jazz": "https://cast1.torontocast.com:2050/api/v2/history/?limit=1&offset=0&server=1"
       },
-      {
-        "id": "J1GOLD",
-        "name": "J1 GOLD",
-        "url": "https://jenny.torontocast.com:2000/stream/J1GOLD"
+      "poll_interval_secs": 20,
+      "mapping": {
+        "title": "results.0.title",
+        "artist": "results.0.author",
+        "artwork_url": "results.0.img_large_url"
       }
-    ]
+    }
   },
   {
     "id": "listen_moe",
@@ -109,31 +102,67 @@
         "title": "song.title",
         "artist": "song.artists",
         "artist_array_field": "name",
-        "artist_separator": ", "
+        "artist_separator": ", ",
+        "artwork_url": "song.albums.0.image",
+        "artwork_url_template": "https://cdn.listen.moe/covers/{value}"
       }
     }
   },
   {
-    "id": "vocaloid",
-    "name": "Vocaloid Radio",
+    "id": "j1",
+    "name": "J1 Radio",
     "streams": [
       {
-        "id": "main",
-        "name": "All Vocaloid, All Genres",
-        "url": "https://vocaloid.radioca.st/stream"
+        "id": "J1HITS",
+        "name": "J1 HITS",
+        "url": "https://jenny.torontocast.com:2000/stream/J1HITS"
+      },
+      {
+        "id": "J1GOLD",
+        "name": "J1 GOLD",
+        "url": "https://jenny.torontocast.com:2000/stream/J1GOLD"
       }
-    ]
+    ],
+    "metadata": {
+      "type": "websocket",
+      "url": "wss://metadata.aiir.net/now-playing",
+      "subscribe": {
+        "message": "{\"action\":\"subscribe\",\"serviceId\":\"3691\"}",
+        "stream_message_map": {
+          "J1GOLD": "{\"action\":\"subscribe\",\"serviceId\":\"3693\"}"
+        }
+      },
+      "heartbeat": {
+        "message": "{\"action\":\"heartbeat\"}",
+        "default_interval_ms": 240000
+      },
+      "mapping": {
+        "title": "nowPlaying.title",
+        "artist": "nowPlaying.artist",
+        "artwork_url": "nowPlaying.imageUrl"
+      }
+    }
   },
   {
-    "id": "plaza",
-    "name": "Nightwave Plaza",
+    "id": "doujinstyle",
+    "name": "Doujinstyle",
     "streams": [
       {
         "id": "main",
-        "name": "Vaporwave & Future Funk",
-        "url": "http://radio.plaza.one/mp3"
+        "name": "radio_live_stream",
+        "url": "https://streams.radio.co/s5ff57669c/listen"
       }
-    ]
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://public.radio.co/api/v2/s5ff57669c/track/current",
+      "poll_interval_secs": 15,
+      "mapping": {
+        "title": "data.track_title",
+        "artist": "data.track_artist",
+        "artwork_url": "data.artwork_urls.large"
+      }
+    }
   },
   {
     "id": "yumico",
@@ -144,18 +173,165 @@
         "name": "Future Funk, City Pop & Anime Groove",
         "url": "https://yumicoradio.net/stream"
       }
-    ]
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://yumicoradio.net/api/nowplaying/1",
+      "poll_interval_secs": 15,
+      "mapping": {
+        "title": "now_playing.song.title",
+        "artist": "now_playing.song.artist",
+        "artwork_url": "now_playing.song.art"
+      }
+    }
   },
   {
-    "id": "radio",
-    "name": "R/a/dio",
+    "id": "boxradio",
+    "name": "Box Radio",
+    "streams": [
+      {
+        "id": "chillwave",
+        "name": "Chillwave.",
+        "url": "https://play.streamafrica.net/chillwave",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/47JSJ7yvtr9UeTN7kTH7kBkXWkQqivOCVA1x716D.jpg"
+      },
+      {
+        "id": "dreamscapes",
+        "name": "dreamscapes",
+        "url": "https://play.streamafrica.net/dreamscapes",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/lSrRp52iXyNbPdpMN1b32lhRE4WLr9cFHpRg9Mma.png"
+      },
+      {
+        "id": "game_radio",
+        "name": "Game Radio",
+        "url": "https://play.streamafrica.net/gameradio",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/jq2iVg9dFMSkvTfqiWgrBxA2auH1JGwwMyTVUSLd.png"
+      },
+      {
+        "id": "jpop_radio",
+        "name": "J-POP Radio",
+        "url": "https://play.streamafrica.net/jpopradio",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/if7vjTynWEAN4Q7iOrQxHWUhZBctNkEs8SSo3x3j.jpg"
+      },
+      {
+        "id": "japan_city_pop",
+        "name": "Japan City Pop",
+        "url": "https://play.streamafrica.net/japancitypop",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/j1kz0ciWwloZg9rRC7X720aC7gBShWfExYDj2WBX.jpg"
+      },
+      {
+        "id": "kpop_radio",
+        "name": "K-POP Radio",
+        "url": "https://play.streamafrica.net/kpopradio",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/XZxZczvnQ18CVrJsUNW0XjpWNJjDLZx1j5c5glLd.png"
+      },
+      {
+        "id": "lofi_radio",
+        "name": "Lofi Radio",
+        "url": "https://boxradio-edge-00.streamafrica.net/lofi",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/VCrXox9p31yZCoPk7Ta58hGIKMttrqCMzIbFUJYC.jpg"
+      },
+      {
+        "id": "mashup_dancehall",
+        "name": "Mash Up! Dancehall",
+        "url": "https://play.streamafrica.net/mashupradio",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/jRf6B1RLa9XcSPXFSDuxCBlkhln4QTEqA7Mtb49u.jpg"
+      },
+      {
+        "id": "pop",
+        "name": "POP!",
+        "url": "https://play.streamafrica.net/popmusicradio",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/R54nNMJnpH0F0SaaT8uigi64FhepMqvO0VRWBe0z.jpg"
+      },
+      {
+        "id": "pop_dance",
+        "name": "POP! Dance",
+        "url": "https://play.streamafrica.net/popmusicdance",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/myg3wkapZzQxOCum927DlpAymhdtF6VUGKrlZofZ.jpg"
+      },
+      {
+        "id": "radio_6",
+        "name": "Radio 6 — Classic Hip Hop",
+        "url": "https://play.streamafrica.net/radio6hiphop",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/GsLeGLOfsJJxW8PCFI0BBTl8WWBJDUdll2CM85Po.jpg"
+      },
+      {
+        "id": "radio_jazz",
+        "name": "Radio Jazz",
+        "url": "https://play.streamafrica.net/radiojazz",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/XaBn69sSW4nYFaVJ1sh2f0B2ezO4cOgXmokMVada.png"
+      },
+      {
+        "id": "rap",
+        "name": "RAP",
+        "url": "https://play.streamafrica.net/afrofusionrap",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/n2IutmlmIy21O7BPns5wHRdV5fU4cVqCnYJEf3cx.png"
+      },
+      {
+        "id": "reggae_republic",
+        "name": "Reggae Republic",
+        "url": "https://play.streamafrica.net/reggaerepublic",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/jzZomKNcuLAj3zyDy0rhBN3q77UOHLw8yCVyuRun.png"
+      },
+      {
+        "id": "weeb_anime",
+        "name": "Weeb Anime Radio",
+        "url": "https://play.streamafrica.net/weebanimeradio",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/uec4MZkLSul6g63ifN3FKLlxlgptA22okrR45dUq.png"
+      },
+      {
+        "id": "xrock",
+        "name": "Xrock Radio",
+        "url": "https://play.streamafrica.net/xrockradio",
+        "artwork_url": "https://ik.imagekit.io/boxradio/radios/okUh8WJjFilwRkhvyW83rmRFN9vHZGPN0zc9ldBW.jpg"
+      }
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://openapi.streamafrica.cloud/metadata/c8053d10-b3b7-496e-a0c3-101c70bc703e",
+      "stream_url_map": {
+        "dreamscapes": "https://openapi.streamafrica.cloud/metadata/55e357ea-b01d-413f-a455-1a701d65e22d",
+        "game_radio": "https://openapi.streamafrica.cloud/metadata/0c01d14a-c98f-4e17-9526-cf34c09b1d88",
+        "jpop_radio": "https://openapi.streamafrica.cloud/metadata/4b7216e7-1a82-49c5-a4e0-b47f237457d0",
+        "japan_city_pop": "https://openapi.streamafrica.cloud/metadata/234a4f28-ff7f-44b4-9a33-0d2c07ab847f",
+        "kpop_radio": "https://openapi.streamafrica.cloud/metadata/ad81329c-6783-443a-9647-fcca0223a028",
+        "lofi_radio": "https://openapi.streamafrica.cloud/metadata/ce5cc6e1-b50f-4b0a-a491-b68a3d0aa977",
+        "mashup_dancehall": "https://openapi.streamafrica.cloud/metadata/39396f28-0ae3-4e65-9b6b-2c5821507f58",
+        "pop": "https://openapi.streamafrica.cloud/metadata/90c1f2ee-280e-4152-8985-a74d64b125e4",
+        "pop_dance": "https://openapi.streamafrica.cloud/metadata/becf3d8f-8f28-4538-adc6-760aabdc714b",
+        "radio_6": "https://openapi.streamafrica.cloud/metadata/3918b41c-bbcd-464f-b5cf-3ea6949c5544",
+        "radio_jazz": "https://openapi.streamafrica.cloud/metadata/c4f54af9-8312-4316-bdf2-33b63521543f",
+        "rap": "https://openapi.streamafrica.cloud/metadata/9715ffea-2651-42fb-bfd1-88be9beccb0a",
+        "reggae_republic": "https://openapi.streamafrica.cloud/metadata/486d840c-7d5e-482d-8601-5ebabdb71b40",
+        "weeb_anime": "https://openapi.streamafrica.cloud/metadata/597342ce-46ad-4678-87ae-6d0717eb5eab",
+        "xrock": "https://openapi.streamafrica.cloud/metadata/54bb9304-a2b4-4f40-b8da-4bc312b0ebfe"
+      },
+      "mapping": {
+        "title": "song",
+        "artist": "artist",
+        "artwork_url": "artwork"
+      }
+    }
+  },
+  {
+    "id": "plaza",
+    "name": "Nightwave Plaza",
     "streams": [
       {
         "id": "main",
-        "name": "Your weeaboo station",
-        "url": "https://r-a-d.io/main"
+        "name": "Vaporwave & Future Funk",
+        "url": "http://radio.plaza.one/mp3"
       }
-    ]
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://api.plaza.one/status",
+      "mapping": {
+        "title": "song.title",
+        "artist": "song.artist",
+        "artwork_url": "song.artwork_src"
+      }
+    }
   },
   {
     "id": "poolsuite",
@@ -166,57 +342,37 @@
         "name": "Summer Radio",
         "url": "https://s5.radio.co/sc9cb59935/listen"
       }
-    ]
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://public.radio.co/api/v2/sc9cb59935/track/current",
+      "poll_interval_secs": 15,
+      "mapping": {
+        "title": "data.track_title",
+        "artist": "data.track_artist",
+        "artwork_url": "data.artwork_urls.large"
+      }
+    }
   },
   {
-    "id": "nightride",
-    "name": "Nightride FM",
+    "id": "mikufm",
+    "name": "Miku Radio",
     "streams": [
       {
-        "id": "nightride",
-        "name": "NIGHTRIDE FM",
-        "url": "https://stream.nightride.fm/nightride.mp3"
-      },
-      {
-        "id": "chillsynth",
-        "name": "CHILLSYNTH FM",
-        "url": "https://stream.nightride.fm/chillsynth.mp3"
-      },
-      {
-        "id": "datawave",
-        "name": "DATAWAVE FM",
-        "url": "https://stream.nightride.fm/datawave.mp3"
-      },
-      {
-        "id": "spacesynth",
-        "name": "SPACESYNTH FM",
-        "url": "https://stream.nightride.fm/spacesynth.mp3"
-      },
-      {
-        "id": "darksynth",
-        "name": "DARKSYNTH",
-        "url": "https://stream.nightride.fm/darksynth.mp3"
-      },
-      {
-        "id": "horrorsynth",
-        "name": "HORRORSYNTH",
-        "url": "https://stream.nightride.fm/horrorsynth.mp3"
-      },
-      {
-        "id": "ebsm",
-        "name": "EDM",
-        "url": "https://stream.nightride.fm/ebsm.mp3"
-      },
-      {
-        "id": "rekt",
-        "name": "BASS",
-        "url": "https://stream.nightride.fm/rekt.mp3"
-      },
-      {
-        "id": "rektory",
-        "name": "CLASSICS",
-        "url": "https://stream.nightride.fm/rektory.mp3"
+        "id": "main",
+        "name": "24/7 Miku",
+        "url": "https://miku.fm/listen/miku/mp3-320"
       }
-    ]
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "https://miku.fm/api/nowplaying/miku",
+      "poll_interval_secs": 15,
+      "mapping": {
+        "title": "now_playing.song.title",
+        "artist": "now_playing.song.artist",
+        "artwork_url": "now_playing.song.art"
+      }
+    }
   }
 ]

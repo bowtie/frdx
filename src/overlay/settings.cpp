@@ -285,6 +285,20 @@ void draw_debug_tab() {
     ImGui::TextDisabled("Target texture: %dx%d", tw, th);
     ImGui::TextDisabled("Processing: %s",
                         TextureInjector::instance().is_processing() ? "yes" : "no");
+
+    // ── Frame capture ──
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextWrapped("Capture the game's rendered frame (before overlay) to a PNG in %%TEMP%%.");
+    if (ImGui::Button("Capture Frame")) {
+        g_capture_backbuffer_requested.store(true, std::memory_order_release);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Saves the next frame's backbuffer to\n"
+                          "%%TEMP%%\\frdx_capture_<timestamp>.png\n"
+                          "Check the log for the exact path.");
+    }
 }
 
 void draw_settings_window(const PlayerBarLayout& layout) {

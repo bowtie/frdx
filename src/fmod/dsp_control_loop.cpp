@@ -78,6 +78,7 @@ void ControlLoop::run(const std::stop_token& tok) {
     // memory writes off the hot path.
     constexpr int kMetaEveryNTicks = 12; // ~240 ms at the 20 ms tick rate.
     int meta_tick                  = 0;
+    bool texture_was_processing    = false; // track texture state for fast sync
 
     auto next = std::chrono::steady_clock::now();
     while (!tok.stop_requested()) {
@@ -189,7 +190,13 @@ void ControlLoop::run(const std::stop_token& tok) {
         // the HUD isn't shown, and freezing the value lets the dedup in
         // MetadataInjector swallow the resume so the game doesn't re-pop its
         // now-playing banner on every pause/rewind.
-        if (++meta_tick >= kMetaEveryNTicks) {
+        // Fast-sync: if a texture was downloading/converting and just finished,
+        // force an immediate metadata push instead of waiting for the next 240ms tick.
+        bool texture_is_processing  = TextureInjector::instance().is_processing();
+        bool texture_just_finished  = texture_was_processing && !texture_is_processing;
+        texture_was_processing      = texture_is_processing;
+
+        if (++meta_tick >= kMetaEveryNTicks || texture_just_finished) {
             meta_tick = 0;
             if (radio_audible_) {
                 // Re-poll the discovery cache to grab the freshest

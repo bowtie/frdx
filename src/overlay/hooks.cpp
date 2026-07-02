@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <filesystem>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 
 #include <MinHook.h>
 #include <kiero.h>
@@ -34,6 +36,7 @@
 #endif
 
 #include <wil/com.h>
+#include "stb_image_write.h"
 
 // Forward WndProc handler (not exposed by imgui_impl_win32.h)
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
@@ -43,6 +46,117 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 namespace frdx::overlay {
 using namespace frdx;
+
+// Debug flag: set by the Debug tab to request a screenshot capture.
+std::atomic<bool> g_capture_backbuffer_requested{false};
+
+// ── Debug screenshot (CPU-side, no GPU touch) ──────────────────────────
+// Captures the game window via GDI BitBlt — a pure CPU-side operation
+// that doesn't touch any GPU resources the game owns, so it can't cause
+// TDR / video card crashes.  Saves to %TEMP%\frdx_capture_<ts>.png.
+static void capture_screenshot_to_png() {
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd) {
+        re_log::warn("[capture] no foreground window");
+        return;
+    }
+
+    RECT rc{};
+    if (!GetClientRect(hwnd, &rc) || rc.right == 0 || rc.bottom == 0) {
+        re_log::warn("[capture] failed to get window rect");
+        return;
+    }
+    const int width  = rc.right;
+    const int height = rc.bottom;
+
+    HDC hdc_screen = GetDC(hwnd);
+    if (!hdc_screen) {
+        re_log::warn("[capture] GetDC failed");
+        return;
+    }
+
+    HDC hdc_mem = CreateCompatibleDC(hdc_screen);
+    if (!hdc_mem) {
+        ReleaseDC(hwnd, hdc_screen);
+        re_log::warn("[capture] CreateCompatibleDC failed");
+        return;
+    }
+
+    HBITMAP hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
+    if (!hbitmap) {
+        DeleteDC(hdc_mem);
+        ReleaseDC(hwnd, hdc_screen);
+        re_log::warn("[capture] CreateCompatibleBitmap failed");
+        return;
+    }
+
+    HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(hdc_mem, hbitmap));
+
+    // BitBlt the screen content into our bitmap
+    if (!BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY)) {
+        re_log::warn("[capture] BitBlt failed");
+        SelectObject(hdc_mem, old_bmp);
+        DeleteObject(hbitmap);
+        DeleteDC(hdc_mem);
+        ReleaseDC(hwnd, hdc_screen);
+        return;
+    }
+
+    // Extract pixel data
+    BITMAPINFOHEADER bi{};
+    bi.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.biWidth       = width;
+    bi.biHeight      = -height;  // top-down
+    bi.biPlanes      = 1;
+    bi.biBitCount    = 32;
+    bi.biCompression = BI_RGB;
+
+    std::vector<uint8_t> pixels(width * height * 4);
+    if (GetDIBits(hdc_mem, hbitmap, 0, height, pixels.data(),
+                  reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS) <= 0) {
+        re_log::warn("[capture] GetDIBits failed");
+        SelectObject(hdc_mem, old_bmp);
+        DeleteObject(hbitmap);
+        DeleteDC(hdc_mem);
+        ReleaseDC(hwnd, hdc_screen);
+        return;
+    }
+
+    SelectObject(hdc_mem, old_bmp);
+    DeleteObject(hbitmap);
+    DeleteDC(hdc_mem);
+    ReleaseDC(hwnd, hdc_screen);
+
+    // GetDIBits returns BGRA; convert to RGBA for stb_image_write
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        std::swap(pixels[i], pixels[i + 2]);  // B <-> R
+    }
+
+    // Save to %TEMP%\frdx_capture_<timestamp>.png
+    wchar_t temp_path[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, temp_path);
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  now.time_since_epoch()) % 1000;
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char filename[256];
+    std::snprintf(filename, sizeof(filename),
+                  "frdx_capture_%04d%02d%02d_%02d%02d%02d%03d.png",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec,
+                  static_cast<int>(ms.count()));
+    std::filesystem::path out_path =
+        std::filesystem::path(temp_path) / filename;
+
+    stbi_write_png(out_path.string().c_str(), width, height, 4,
+                   pixels.data(), width * 4);
+
+    re_log::info("[capture] saved screenshot {}x{} to {}",
+                 width, height, out_path.string());
+}
+
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 using ResizeBuffers_t          = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT BufferCount,
                                                       UINT Width, UINT Height, DXGI_FORMAT NewFormat,
@@ -66,7 +180,7 @@ using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT 
 // Hoist the hook slot into a named constant: hijacking any other slot (notably
 // UpdateTileMappings on slot 8, called per-frame for Hi-Z) triggers a video
 // card crash within seconds.
-static constexpr UINT kExecuteCommandListsSlot = 10;
+[[maybe_unused]] static constexpr UINT kExecuteCommandListsSlot = 10;
 
 Present_t original_Present                               = nullptr;
 ResizeBuffers_t original_ResizeBuffers                   = nullptr;
@@ -434,6 +548,14 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
     }
 
     if (g_ui.is_init) {
+        // Debug: take a CPU-side screenshot when requested by the Debug
+        // tab.  Runs before any overlay work so the capture has the
+        // game's frame without our ImGui drawn on top.
+        if (g_capture_backbuffer_requested.exchange(false,
+                std::memory_order_acq_rel)) {
+            capture_screenshot_to_png();
+        }
+
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
         if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible &&
             !g_ui.console_visible && !g_ui.hud_visible && !has_visible_toasts()) {

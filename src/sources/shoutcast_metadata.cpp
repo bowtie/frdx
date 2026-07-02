@@ -43,6 +43,31 @@ bool recent_metadata_ms(int64_t timestamp_ms, int64_t now_ms) noexcept {
            now_ms - timestamp_ms <= kRecentWindowMs;
 }
 
+// Apply split_separator: when artist is empty and split_separator is set,
+// split the combined title field ("Artist - Title") into separate values.
+void apply_split_separator(const StationMetadataMapping& mapping,
+                           std::string& title, std::string& artist) {
+    if (!artist.empty() || mapping.split_separator.empty()) return;
+    auto pos = title.rfind(mapping.split_separator);
+    if (pos == std::string::npos) return;
+    artist = title.substr(0, pos);
+    title  = title.substr(pos + mapping.split_separator.size());
+    // Trim trailing/leading whitespace.
+    while (!artist.empty() && artist.back() == ' ') artist.pop_back();
+    while (!title.empty() && title.front() == ' ') title.erase(0, 1);
+}
+
+// Apply artwork_url_template: wrap the resolved artwork value if a template
+// is configured (e.g. "https://cdn/{value}").
+void apply_artwork_template(const StationMetadataMapping& mapping,
+                            std::string& artwork) {
+    if (artwork.empty() || mapping.artwork_url_template.empty()) return;
+    auto pos = mapping.artwork_url_template.find("{value}");
+    if (pos == std::string::npos) return;
+    artwork = mapping.artwork_url_template.substr(0, pos) + artwork +
+              mapping.artwork_url_template.substr(pos + 7);
+}
+
 } // namespace
 
 // ── Non-inline definitions for helpers ──────────────────────────────
@@ -126,6 +151,8 @@ void MetadataController::start(const std::string& stream_url,
                                const StationMetadataMapping& mapping,
                                const StationMetadataWebSocketFilter& ws_filter,
                                const StationMetadataWebSocketHeartbeat& ws_heartbeat,
+                               const StationMetadataWebSocketSubscribe& ws_subscribe,
+                               int poll_interval_secs,
                                uint64_t metadata_epoch) {
     // 1. Stop existing producers before starting new ones.
     stop();
@@ -134,8 +161,11 @@ void MetadataController::start(const std::string& stream_url,
     last_icy_ms_.store(0, std::memory_order_release);
     last_ffmpeg_icy_ms_.store(0, std::memory_order_release);
 
-    // 2. Start ICY poller for non-WS, non-static stations.
-    if (!stream_url.empty() && metadata_type != "websocket" && metadata_type != "static") {
+    // 2. Start ICY poller for non-WS, non-SSE, non-static, non-rest stations.
+    //    REST and icecast-json stations have their own JSON poller below.
+    if (!stream_url.empty() && metadata_type != "websocket" &&
+        metadata_type != "sse" && metadata_type != "static" &&
+        metadata_type != "rest" && metadata_type != "icecast-json") {
         icy_poller_thread_ = std::jthread(
             [this, url = stream_url, metadata_epoch](const std::stop_token& stop) {
                 run_icy_poller(url, metadata_epoch, stop);
@@ -145,15 +175,33 @@ void MetadataController::start(const std::string& stream_url,
     // 3. Static or no type → no background poller needed.
     if (metadata_type == "static" || metadata_type.empty()) return;
 
-    // No metadata URL configured → no WS poller possible.
+    // No metadata URL configured → no poller possible.
     if (metadata_url.empty()) return;
 
     // 4. WebSocket poller.
     if (metadata_type == "websocket") {
         metadata_thread_ = std::jthread(
             [this, url = metadata_url, mapping, filter = ws_filter,
-             hb = ws_heartbeat, metadata_epoch](const std::stop_token& stop) {
-                run_ws_poller(url, mapping, filter, hb, metadata_epoch, stop);
+             hb = ws_heartbeat, sub = ws_subscribe, metadata_epoch](const std::stop_token& stop) {
+                run_ws_poller(url, mapping, filter, hb, sub, metadata_epoch, stop);
+            });
+    }
+
+    // 5. SSE poller.
+    if (metadata_type == "sse") {
+        metadata_thread_ = std::jthread(
+            [this, url = metadata_url, mapping, filter = ws_filter,
+             metadata_epoch](const std::stop_token& stop) {
+                run_sse_poller(url, mapping, filter, metadata_epoch, stop);
+            });
+    }
+
+    // 6. REST / icecast-json poller.
+    if (metadata_type == "rest" || metadata_type == "icecast-json") {
+        metadata_thread_ = std::jthread(
+            [this, url = metadata_url, mapping, poll_interval_secs,
+             metadata_epoch](const std::stop_token& stop) {
+                run_rest_poller(url, mapping, poll_interval_secs, metadata_epoch, stop);
             });
     }
 }
@@ -166,6 +214,10 @@ void MetadataController::stop() {
             WinHttpWebSocketClose(ws_handle_, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,
                                   nullptr, 0);
             ws_handle_ = nullptr;
+        }
+        if (sse_handle_) {
+            WinHttpCloseHandle(static_cast<HINTERNET>(sse_handle_));
+            sse_handle_ = nullptr;
         }
     }
     if (metadata_thread_.joinable()) metadata_thread_.request_stop();
@@ -180,6 +232,7 @@ void MetadataController::run_ws_poller(std::string url,
                                        const StationMetadataMapping& mapping,
                                        const StationMetadataWebSocketFilter& filter,
                                        StationMetadataWebSocketHeartbeat hb,
+                                       StationMetadataWebSocketSubscribe sub,
                                        uint64_t metadata_epoch,
                                        const std::stop_token& stop) {
     auto parsed = ParsedUrl::parse(url);
@@ -225,6 +278,16 @@ void MetadataController::run_ws_poller(std::string url,
             ws_handle_ = hWebSocket;
         }
         log::info("[shoutcast] ws: connected to {}", url);
+
+        // Send subscribe message on connect (if configured).
+        if (!sub.message.empty()) {
+            DWORD err = WinHttpWebSocketSend(hWebSocket,
+                                             WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                             const_cast<char*>(sub.message.data()),
+                                             static_cast<DWORD>(sub.message.size()));
+            if (err != ERROR_SUCCESS)
+                log::warn("[shoutcast] ws: subscribe send failed ({})", err);
+        }
 
         int heartbeat_ms    = hb.default_interval_ms;
         auto last_heartbeat = std::chrono::steady_clock::now();
@@ -309,6 +372,10 @@ void MetadataController::run_ws_poller(std::string url,
             std::string artist = resolve_mapped_value(*data_root, mapping.artist,
                                                        mapping.artist_array_field,
                                                        mapping.artist_separator);
+            std::string artwork = resolve_mapped_value(*data_root, mapping.artwork_url, "", "");
+
+            apply_split_separator(mapping, title, artist);
+            apply_artwork_template(mapping, artwork);
 
             const auto now_ms = steady_ms();
             const bool ffmpeg_icy_active = recent_metadata_ms(
@@ -318,6 +385,7 @@ void MetadataController::run_ws_poller(std::string url,
                 TrackInfo info;
                 if (!title.empty()) info.title = sanitize_brackets(std::move(title));
                 if (!artist.empty()) info.artist = sanitize_brackets(std::move(artist));
+                if (!artwork.empty()) info.artwork_url = std::move(artwork);
 
                 if (!ffmpeg_icy_active && on_metadata_) {
                     bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
@@ -343,6 +411,312 @@ void MetadataController::run_ws_poller(std::string url,
         }
         if (stop.stop_requested()) break;
         std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+}
+
+// ---- SSE poller ---------------------------------------------------------
+
+void MetadataController::run_sse_poller(std::string url,
+                                        const StationMetadataMapping& mapping,
+                                        const StationMetadataWebSocketFilter& filter,
+                                        uint64_t metadata_epoch,
+                                        const std::stop_token& stop) {
+    auto parsed = ParsedUrl::parse(url);
+    if (!parsed) {
+        log::warn("[shoutcast] sse: failed to parse URL '{}'", url);
+        return;
+    }
+
+    while (!stop.stop_requested()) {
+        auto conn = winhttp_connect(winhttp_session_, *parsed);
+        if (!conn) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        HINTERNET hRequest = conn.request.get();
+
+        WinHttpAddRequestHeaders(
+            hRequest, L"Accept: text/event-stream\r\nCache-Control: no-cache\r\n",
+            -1L, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+        // Use a long receive timeout so the server can keep the connection open.
+        DWORD recv_timeout_ms = 300000; // 5 minutes
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT,
+                         &recv_timeout_ms, sizeof(recv_timeout_ms));
+
+        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+            log::warn("[shoutcast] sse: SendRequest failed ({})", GetLastError());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        if (!WinHttpReceiveResponse(hRequest, nullptr)) {
+            log::warn("[shoutcast] sse: ReceiveResponse failed ({})", GetLastError());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        log::info("[shoutcast] sse: connected to {}", url);
+
+        // Store request handle so stop() can close it to unblock WinHttpReadData.
+        HINTERNET hReq = conn.request.get();
+        (void)conn.request.release();
+        {
+            std::scoped_lock lk{ws_mu_};
+            sse_handle_ = hReq;
+        }
+
+        // SSE event assembly buffer.
+        std::string line_buf;      // accumulates partial lines across reads
+        std::string event_data;    // accumulates data: lines for current event
+        char recvBuf[8192];
+
+        while (!stop.stop_requested()) {
+            DWORD bytesRead = 0;
+            if (!WinHttpReadData(hRequest, recvBuf, sizeof(recvBuf) - 1, &bytesRead)) {
+                log::warn("[shoutcast] sse: read error ({})", GetLastError());
+                break;
+            }
+            if (bytesRead == 0) {
+                log::warn("[shoutcast] sse: connection closed by server");
+                break;
+            }
+            recvBuf[bytesRead] = '\0';
+            line_buf.append(recvBuf, bytesRead);
+
+            // Process complete lines (terminated by \n).
+            for (;;) {
+                auto nl = line_buf.find('\n');
+                if (nl == std::string::npos) break;
+
+                std::string line = line_buf.substr(0, nl);
+                line_buf.erase(0, nl + 1);
+
+                // Strip trailing \r.
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+
+                // Blank line → dispatch event.
+                if (line.empty()) {
+                    if (!event_data.empty()) {
+                        process_sse_event(event_data, mapping, filter,
+                                          metadata_epoch, stop);
+                        event_data.clear();
+                    }
+                    continue;
+                }
+
+                // Comment line (starts with ':').
+                if (line[0] == ':') continue;
+
+                // data: line — append to event_data.
+                if (line.starts_with("data:")) {
+                    auto val = line.substr(5);
+                    if (!val.empty() && val[0] == ' ') val.erase(0, 1);
+                    if (!event_data.empty()) event_data += '\n';
+                    event_data += val;
+                }
+                // event:, id:, retry: — ignored for now.
+            }
+        }
+
+        // Cleanup.
+        {
+            std::scoped_lock lk{ws_mu_};
+            if (sse_handle_ == hReq) sse_handle_ = nullptr;
+        }
+        WinHttpCloseHandle(hReq);
+
+        if (!stop.stop_requested()) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+        }
+    }
+}
+
+void MetadataController::process_sse_event(
+    const std::string& event_data,
+    const StationMetadataMapping& mapping,
+    const StationMetadataWebSocketFilter& filter,
+    uint64_t metadata_epoch,
+    const std::stop_token& /*stop*/) {
+
+    // Skip keepalives and non-JSON payloads.
+    if (event_data.empty() || event_data == "keepalive") return;
+
+    json msg;
+    try {
+        msg = json::parse(event_data);
+    } catch (...) { return; }
+
+    // If the payload is an array and a filter is configured, find the
+    // matching element (e.g. Nightride pushes all stations in one array).
+    const json* data_root = &msg;
+    if (msg.is_array() && !filter.type_field.empty() && !filter.type_value.empty()) {
+        const json* match = nullptr;
+        for (const auto& elem : msg) {
+            std::string val = resolve_json_path(elem, filter.type_field);
+            if (val == filter.type_value) { match = &elem; break; }
+        }
+        if (!match) return;
+        data_root = match;
+    } else if (msg.is_array()) {
+        // No filter — use first element.
+        if (msg.empty()) return;
+        data_root = &msg[0];
+    }
+
+    // For non-array payloads, apply the data_field filter if set.
+    if (!msg.is_array() && !filter.data_field.empty()) {
+        const json* data = resolve_json_node(msg, filter.data_field);
+        if (!data) return;
+        data_root = data;
+    }
+
+    std::string title = resolve_mapped_value(*data_root, mapping.title, "", "");
+    std::string artist = resolve_mapped_value(*data_root, mapping.artist,
+                                               mapping.artist_array_field,
+                                               mapping.artist_separator);
+    std::string artwork = resolve_mapped_value(*data_root, mapping.artwork_url, "", "");
+
+    apply_split_separator(mapping, title, artist);
+    apply_artwork_template(mapping, artwork);
+
+    const auto now_ms = steady_ms();
+    const bool ffmpeg_icy_active = recent_metadata_ms(
+        last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
+
+    if (!title.empty() || !artist.empty()) {
+        TrackInfo info;
+        if (!title.empty()) info.title = sanitize_brackets(std::move(title));
+        if (!artist.empty()) info.artist = sanitize_brackets(std::move(artist));
+        if (!artwork.empty()) info.artwork_url = std::move(artwork);
+
+        if (!ffmpeg_icy_active && on_metadata_) {
+            bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
+            if (accepted) {
+                log::info("[shoutcast] sse metadata queued: {} - {}",
+                          info.artist, info.title);
+            }
+        }
+    }
+}
+
+// ---- REST / icecast-json poller ------------------------------------------
+
+void MetadataController::run_rest_poller(std::string url,
+                                         const StationMetadataMapping& mapping,
+                                         int poll_interval_secs,
+                                         uint64_t metadata_epoch,
+                                         const std::stop_token& stop) {
+    auto parsed = ParsedUrl::parse(url);
+    if (!parsed) {
+        log::warn("[shoutcast] rest: failed to parse URL '{}'", url);
+        return;
+    }
+
+    // Default poll interval: 15 seconds (matches the asia DREAM radio web
+    // player's setInterval).  Config can override via poll_interval_secs.
+    const int interval = poll_interval_secs > 0 ? poll_interval_secs : 15;
+    log::info("[shoutcast] rest: polling {} every {}s", url, interval);
+
+    while (!stop.stop_requested()) {
+        auto conn = winhttp_connect(winhttp_session_, *parsed);
+        if (!conn) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        HINTERNET hRequest = conn.request.get();
+
+        WinHttpAddRequestHeaders(
+            hRequest, L"Accept: application/json\r\n", -1L,
+            WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+        if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        if (!WinHttpReceiveResponse(hRequest, nullptr)) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        // Read the full response body.
+        std::string body;
+        char buf[8192];
+        for (;;) {
+            DWORD bytes_available = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &bytes_available)) break;
+            if (bytes_available == 0) break;
+            DWORD to_read = (bytes_available < sizeof(buf) - 1)
+                                ? bytes_available
+                                : static_cast<DWORD>(sizeof(buf) - 1);
+            DWORD bytes_read = 0;
+            if (!WinHttpReadData(hRequest, buf, to_read, &bytes_read)) break;
+            if (bytes_read == 0) break;
+            body.append(buf, bytes_read);
+        }
+
+        if (body.empty()) {
+            for (int i = 0; i < interval && !stop.stop_requested(); ++i)
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        // Parse JSON and extract metadata fields.
+        json msg;
+        try {
+            msg = json::parse(body);
+        } catch (...) {
+            log::warn("[shoutcast] rest: failed to parse JSON response ({} bytes)",
+                      body.size());
+            for (int i = 0; i < interval && !stop.stop_requested(); ++i)
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        // The data root is the top-level JSON object.  If the response is an
+        // array, use the first element (e.g. asia DREAM radio's history API
+        // returns { "results": [...] }).
+        const json* data_root = &msg;
+        if (msg.is_array()) {
+            if (msg.empty()) {
+                for (int i = 0; i < interval && !stop.stop_requested(); ++i)
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+            data_root = &msg[0];
+        }
+
+        std::string title = resolve_mapped_value(*data_root, mapping.title, "", "");
+        std::string artist = resolve_mapped_value(*data_root, mapping.artist,
+                                                   mapping.artist_array_field,
+                                                   mapping.artist_separator);
+        std::string artwork = resolve_mapped_value(*data_root, mapping.artwork_url, "", "");
+
+        apply_split_separator(mapping, title, artist);
+        apply_artwork_template(mapping, artwork);
+
+        const auto now_ms = steady_ms();
+        const bool ffmpeg_icy_active = recent_metadata_ms(
+            last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
+
+        if (!title.empty() || !artist.empty()) {
+            TrackInfo info;
+            if (!title.empty()) info.title = sanitize_brackets(std::move(title));
+            if (!artist.empty()) info.artist = sanitize_brackets(std::move(artist));
+            if (!artwork.empty()) info.artwork_url = std::move(artwork);
+
+            if (!ffmpeg_icy_active && on_metadata_) {
+                bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
+                if (accepted) {
+                    log::info("[shoutcast] rest metadata queued: {} - {}",
+                              info.artist, info.title);
+                }
+            }
+        }
+
+        for (int i = 0; i < interval && !stop.stop_requested(); ++i)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
 

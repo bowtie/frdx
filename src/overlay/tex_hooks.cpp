@@ -18,6 +18,7 @@
 #include <mutex>
 #include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <wil/com.h>
@@ -63,8 +64,12 @@ static std::atomic<bool> g_radio_active{false};
 static std::atomic<bool> g_tex_work_pending{false};
 
 // ── Target texture detection ──
-
-static constexpr UINT kTargetWidth = 196;
+//
+// The game creates the radio HUD texture at a size proportional to the
+// display resolution: 196x104/196x196 at 1080p, 164x81 at 1600x900, etc.
+// We accept any BC7 2D texture in a reasonable size range with an aspect
+// ratio close to 2:1 (wide) or 1:1 (square), which covers all known
+// resolution variants without matching unrelated textures.
 
 // Upper bound on how many fingerprinted placeholder textures we track at
 // once. The game has been observed to keep handing CreateSRV new resource
@@ -79,11 +84,22 @@ static constexpr size_t kMaxStreamerModeTextures = 8;
 bool is_target_texture(ID3D12Resource* pResource) {
     if (!pResource) return false;
     D3D12_RESOURCE_DESC desc = pResource->GetDesc();
-    return (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
-            desc.Width == kTargetWidth &&
-            (desc.Height == 104 || desc.Height == 196) &&
-            (desc.Format == DXGI_FORMAT_BC7_UNORM ||
-             desc.Format == DXGI_FORMAT_BC7_UNORM_SRGB));
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return false;
+    if (desc.Format != DXGI_FORMAT_BC7_UNORM &&
+        desc.Format != DXGI_FORMAT_BC7_UNORM_SRGB) return false;
+
+    const UINT w = static_cast<UINT>(desc.Width);
+    const UINT h = desc.Height;
+    if (w < 100 || w > 400 || h < 50 || h > 400) return false;
+
+    // Accept roughly square (1:1) or roughly wide (2:1) aspect ratios.
+    // The 2:1 ratio is the wide variant (196x104 at 1080p); the 1:1 is
+    // the square variant (196x196).  Allow 20% tolerance for resolution
+    // scaling rounding.
+    const float ratio = static_cast<float>(w) / static_cast<float>(h);
+    const bool is_square = (ratio > 0.8f && ratio < 1.25f);
+    const bool is_wide  = (ratio > 1.6f && ratio < 2.5f);
+    return is_square || is_wide;
 }
 
 // ── Texture tracking ──
@@ -334,17 +350,54 @@ bool try_complete_fingerprint(PendingFingerprint& pf, bool& out_is_placeholder) 
         if (FAILED(pf.readback->Map(0, nullptr, reinterpret_cast<void**>(&pMapped)))) {
             return true;
         }
-        uint64_t hash =
+
+        // Instead of matching exact hashes (which are resolution-specific),
+        // check if the texture is "placeholder-like" by counting unique
+        // 16-byte BC7 blocks.  A placeholder logo has very few unique
+        // blocks (large uniform areas), while real artwork has high
+        // diversity.  If <25% of blocks are unique, treat as placeholder.
+        const UINT totalBlocks = pf.blocksX * pf.blocksY;
+        std::unordered_set<uint64_t> unique_block_hashes;
+        for (UINT by = 0; by < pf.blocksY; ++by) {
+            const uint8_t* rowStart = pMapped + (by * pf.alignedRowPitch);
+            for (UINT bx = 0; bx < pf.blocksX; ++bx) {
+                const uint8_t* block = rowStart + (bx * 16);
+                uint64_t bh = 0xcbf29ce484222325ull;
+                for (int i = 0; i < 16; ++i) {
+                    bh ^= block[i];
+                    bh *= 0x100000001b3ull;
+                }
+                unique_block_hashes.insert(bh);
+            }
+        }
+
+        // Compute the full FNV-1a hash too (for logging + 1080p fast path)
+        const uint64_t hash =
             calculate_fnv1a_pitched(pMapped, pf.blocksX, pf.blocksY, pf.alignedRowPitch);
         pf.readback->Unmap(0, nullptr);
 
+        const size_t unique_count = unique_block_hashes.size();
+        const float uniqueness = totalBlocks > 0
+            ? static_cast<float>(unique_count) / static_cast<float>(totalBlocks)
+            : 1.0f;
+
+        // Placeholder textures (streamer mode logo, modified icon) are
+        // simple graphics with large uniform areas → very few unique
+        // blocks.  Real artwork (album covers) has high diversity.
+        // Threshold: <25% unique blocks = placeholder.
+        // Also keep the exact hash match as a fast path for 1080p.
         out_is_placeholder = (hash == TextureInjector::kPlaceholderHash196x104 ||
-                              hash == TextureInjector::kPlaceholderHash196x196);
+                              hash == TextureInjector::kPlaceholderHash196x196 ||
+                              hash == TextureInjector::kPlaceholderHash392x208 ||
+                              hash == TextureInjector::kPlaceholderHash392x392 ||
+                              uniqueness < 0.25f);
         if (out_is_placeholder) {
             TextureInjector::instance().set_target_dimensions(
                 static_cast<int>(pf.width), static_cast<int>(pf.height));
-            log::info("[texinject] fingerprinted placeholder texture: {}x{} hash=0x{:X}",
-                      pf.width, pf.height, hash);
+            log::info("[texinject] fingerprinted placeholder texture: {}x{} "
+                      "hash=0x{:X} unique={}/{} ({:.0f}%)",
+                      pf.width, pf.height, hash,
+                      unique_count, totalBlocks, uniqueness * 100.0f);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         log::warn("[texinject] SEH exception completing fingerprint");

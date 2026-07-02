@@ -81,10 +81,14 @@ public:
     bool reinject_last() noexcept;
 
     // Expected fingerprint hashes for the placeholder textures.
-    // 196x104 streamer mode logo.
+    // 196x104 streamer mode logo (1080p).
     static constexpr uint64_t kPlaceholderHash196x104 = 0x22BC7164008461C9ull;
-    // 196x196 modified icon.
+    // 196x196 modified icon (1080p).
     static constexpr uint64_t kPlaceholderHash196x196 = 0xF5223D52CFA65930ull;
+    // 392x208 streamer mode logo (high-DPI / 4K).
+    static constexpr uint64_t kPlaceholderHash392x208 = 0xBDA325E7EF18F3AAull;
+    // 392x392 modified icon (high-DPI / 4K).
+    static constexpr uint64_t kPlaceholderHash392x392 = 0x20906BF5A8058195ull;
 
 private:
     TextureInjector() = default;

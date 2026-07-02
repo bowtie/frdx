@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -38,6 +39,192 @@ using json = nlohmann::json;
 using namespace helpers;
 
 namespace {
+
+// URL-encode a string for use in a query parameter.
+std::string url_encode(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else if (c == ' ') {
+            out += '+';
+        } else {
+            char buf[4];
+            std::snprintf(buf, sizeof(buf), "%%%02X", c);
+            out += buf;
+        }
+    }
+    return out;
+}
+
+// Query the iTunes Search API for album artwork by artist + title.
+// Returns the 600x600 artwork URL if found, or empty string on miss/error.
+std::string itunes_lookup_artwork(const std::string& artist, const std::string& title,
+                                  void* winhttp_session) {
+    std::string term = url_encode(artist + " " + title);
+    std::string path = "/search?term=" + term + "&entity=song&limit=1";
+
+    // Parse the iTunes URL.
+    ParsedUrl parsed;
+    {
+        std::string url = "https://itunes.apple.com" + path;
+        auto opt = ParsedUrl::parse(url);
+        if (!opt) return {};
+        parsed = *opt;
+    }
+
+    auto conn = winhttp_connect(winhttp_session, parsed);
+    if (!conn) return {};
+
+    HINTERNET hRequest = conn.request.get();
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+        return {};
+    if (!WinHttpReceiveResponse(hRequest, nullptr)) return {};
+
+    std::string body;
+    char buf[8192];
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &available)) break;
+        if (available == 0) break;
+        DWORD to_read = (available < sizeof(buf) - 1)
+                            ? available
+                            : static_cast<DWORD>(sizeof(buf) - 1);
+        DWORD bytes_read = 0;
+        if (!WinHttpReadData(hRequest, buf, to_read, &bytes_read)) break;
+        if (bytes_read == 0) break;
+        body.append(buf, bytes_read);
+    }
+
+    if (body.empty()) return {};
+
+    try {
+        auto msg = json::parse(body);
+        const auto& results = msg.value("results", json::array());
+        if (!results.is_array() || results.empty()) return {};
+        const auto& first = results[0];
+        std::string art = first.value("artworkUrl100", "");
+        if (art.empty()) return {};
+        // Upscale from 100x100 to 600x600.
+        auto pos = art.find("100x100bb");
+        if (pos != std::string::npos)
+            art.replace(pos, 9, "600x600bb");
+        return art;
+    } catch (...) {
+        return {};
+    }
+}
+
+// Query MusicBrainz + Cover Art Archive for album artwork by artist + title.
+// 2nd-tier fallback after iTunes — best for obscure/doujin/Vocaloid tracks
+// that iTunes misses.  MusicBrainz rate-limits to 1 req/sec, so this function
+// may sleep up to ~2s when checking multiple releases.
+// Returns the CAA front-cover URL if found, or empty string on miss/error.
+std::string musicbrainz_lookup_artwork(const std::string& artist,
+                                       const std::string& title,
+                                       void* winhttp_session) {
+    // 1. Search MusicBrainz for the recording.
+    std::string query = "artist:" + artist + " AND recording:" + title;
+    std::string path = "/ws/2/recording/?query=" + url_encode(query) +
+                       "&fmt=json&limit=1";
+
+    ParsedUrl parsed;
+    {
+        std::string url = "https://musicbrainz.org" + path;
+        auto opt = ParsedUrl::parse(url);
+        if (!opt) return {};
+        parsed = *opt;
+    }
+
+    auto conn = winhttp_connect(winhttp_session, parsed);
+    if (!conn) return {};
+
+    // MusicBrainz asks for a descriptive User-Agent with contact info.
+    WinHttpAddRequestHeaders(
+        conn.request.get(),
+        L"User-Agent: forza-radio-dx/1.0",
+        (DWORD)-1,
+        WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    HINTERNET hRequest = conn.request.get();
+    if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+        return {};
+    if (!WinHttpReceiveResponse(hRequest, nullptr)) return {};
+
+    std::string body;
+    char buf[8192];
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &available)) break;
+        if (available == 0) break;
+        DWORD to_read = (available < sizeof(buf) - 1)
+                            ? available
+                            : static_cast<DWORD>(sizeof(buf) - 1);
+        DWORD bytes_read = 0;
+        if (!WinHttpReadData(hRequest, buf, to_read, &bytes_read)) break;
+        if (bytes_read == 0) break;
+        body.append(buf, bytes_read);
+    }
+
+    if (body.empty()) return {};
+
+    // Extract release MBIDs from the first recording's releases.
+    std::vector<std::string> mbids;
+    try {
+        auto msg = json::parse(body);
+        const auto& recordings = msg.value("recordings", json::array());
+        if (!recordings.is_array() || recordings.empty()) return {};
+        const auto& releases = recordings[0].value("releases", json::array());
+        if (!releases.is_array()) return {};
+        for (const auto& rel : releases) {
+            std::string mbid = rel.value("id", "");
+            if (!mbid.empty()) {
+                mbids.push_back(mbid);
+                if (mbids.size() >= 3) break;
+            }
+        }
+    } catch (...) {
+        return {};
+    }
+
+    if (mbids.empty()) return {};
+
+    // 2. Check Cover Art Archive for each release (up to 3).
+    // CAA /front returns 307 -> image URL (WinHTTP follows redirects),
+    // or 404 if no cover exists.
+    for (size_t i = 0; i < mbids.size(); ++i) {
+        if (i > 0) std::this_thread::sleep_for(std::chrono::seconds(1));
+
+        std::string caa_url =
+            "https://coverartarchive.org/release/" + mbids[i] + "/front";
+        auto caa_opt = ParsedUrl::parse(caa_url);
+        if (!caa_opt) continue;
+        auto caa_conn = winhttp_connect(winhttp_session, *caa_opt);
+        if (!caa_conn) continue;
+
+        HINTERNET hCaaReq = caa_conn.request.get();
+        if (!WinHttpSendRequest(hCaaReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                               WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+            continue;
+        if (!WinHttpReceiveResponse(hCaaReq, nullptr)) continue;
+
+        DWORD status_code = 0;
+        DWORD status_size = sizeof(status_code);
+        if (WinHttpQueryHeaders(hCaaReq,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size,
+                WINHTTP_HEADER_NAME_BY_INDEX)) {
+            if (status_code == 200)
+                return caa_url;
+        }
+    }
+
+    return {};
+}
 
 // PCM contract written by ffmpeg: 48000 Hz * 2 ch * 2 bytes.
 constexpr std::uint64_t kPcmBytesPerSec = 48000ull * 2ull * 2ull;
@@ -96,6 +283,8 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
                     const auto& mp                         = s["mapping"];
                     ss.mapping_override.title              = mp.value("title", "");
                     ss.mapping_override.artist             = mp.value("artist", "");
+                    ss.mapping_override.artwork_url        = mp.value("artwork_url", "");
+                    ss.mapping_override.artwork_url_template = mp.value("artwork_url_template", "");
                     ss.mapping_override.artist_array_field = mp.value("artist_array_field", "");
                     ss.mapping_override.artist_separator   = mp.value("artist_separator", ", ");
                     ss.mapping_override.split_separator    = mp.value("split_separator", "");
@@ -111,10 +300,13 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
                 const auto& mp                         = m["mapping"];
                 sp.metadata.mapping.title              = mp.value("title", "");
                 sp.metadata.mapping.artist             = mp.value("artist", "");
+                sp.metadata.mapping.artwork_url        = mp.value("artwork_url", "");
+                sp.metadata.mapping.artwork_url_template = mp.value("artwork_url_template", "");
                 sp.metadata.mapping.artist_array_field = mp.value("artist_array_field", "");
                 sp.metadata.mapping.artist_separator   = mp.value("artist_separator", ", ");
                 sp.metadata.mapping.split_separator    = mp.value("split_separator", "");
             }
+            sp.metadata.poll_interval_secs = m.value("poll_interval_secs", 0);
             if (m.contains("stream_url_map") && m["stream_url_map"].is_object()) {
                 for (auto it = m["stream_url_map"].begin(); it != m["stream_url_map"].end(); ++it)
                     sp.metadata.stream_url_map[it.key()] = it.value().get<std::string>();
@@ -122,6 +314,7 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
             // Static metadata (type == "static").
             sp.metadata.static_title  = m.value("title", "");
             sp.metadata.static_artist = m.value("artist", "");
+            sp.metadata.static_artwork_url = m.value("cover_url", "");
             // WebSocket metadata (type == "websocket").
             if (m.contains("message_filter")) {
                 const auto& mf                   = m["message_filter"];
@@ -130,6 +323,12 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
                 sp.metadata.ws_filter.type_field = mf.value("type_field", "");
                 sp.metadata.ws_filter.type_value = mf.value("type_value", "");
                 sp.metadata.ws_filter.data_field = mf.value("data_field", "");
+                if (mf.contains("stream_type_value_map") && mf["stream_type_value_map"].is_object()) {
+                    for (auto it = mf["stream_type_value_map"].begin();
+                         it != mf["stream_type_value_map"].end(); ++it)
+                        sp.metadata.ws_filter.stream_type_value_map[it.key()] =
+                            it.value().get<std::string>();
+                }
             }
             if (m.contains("heartbeat")) {
                 const auto& hb                          = m["heartbeat"];
@@ -137,6 +336,16 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
                 sp.metadata.ws_heartbeat.interval_field = hb.value("interval_field", "");
                 sp.metadata.ws_heartbeat.default_interval_ms =
                     hb.value("default_interval_ms", 45000);
+            }
+            if (m.contains("subscribe")) {
+                const auto& sub                        = m["subscribe"];
+                sp.metadata.ws_subscribe.message       = sub.value("message", "");
+                if (sub.contains("stream_message_map") && sub["stream_message_map"].is_object()) {
+                    for (auto it = sub["stream_message_map"].begin();
+                         it != sub["stream_message_map"].end(); ++it)
+                        sp.metadata.ws_subscribe.stream_message_map[it.key()] =
+                            it.value().get<std::string>();
+                }
             }
         }
         return sp;
@@ -394,6 +603,9 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
                                                        : station->metadata.static_title);
             static_info.artist = sanitize_brackets(station->metadata.static_artist);
         }
+        // Station logo fallback for any metadata type.
+        if (static_info.artwork_url.empty())
+            static_info.artwork_url = station->metadata.static_artwork_url;
 
         // Stop old pipe (fast — no ffmpeg launch here).
         stop_pipe_locked();
@@ -611,6 +823,9 @@ void ShoutcastSource::cycle_and_restart(int direction) {
                     clear_pending_metadata_locked();
                     info_gen_.fetch_add(1, std::memory_order_release);
                 }
+                // Station logo fallback for any metadata type.
+                if (info_.artwork_url.empty())
+                    info_.artwork_url = st.metadata.static_artwork_url;
                 break;
             }
         }
@@ -672,10 +887,59 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
     quiet_started_ms_ = 0;
     pending_info_epoch_ = 0;
     pending_info_valid_ = false;
+
+    // Station logo fallback: if the poller didn't provide artwork, use
+    // the station's cover_url (static_artwork_url) so the texture
+    // injector still has something to display.
+    bool needs_itunes_lookup = info_.artwork_url.empty();
+    if (info_.artwork_url.empty() && !active_station_id_.empty()) {
+        for (const auto& st : stations_) {
+            if (st.id == active_station_id_) {
+                info_.artwork_url = st.metadata.static_artwork_url;
+                break;
+            }
+        }
+    }
+
     info_gen_.fetch_add(1, std::memory_order_release);
     metadata_epoch_has_track_ = true;
     log::info("[shoutcast] applied timed metadata after {}: {} - {}", reason, info_.artist,
               info_.title);
+
+    // If no per-track artwork was provided by the poller, kick off an
+    // async artwork lookup.  iTunes Search is tried first (fast, no rate
+    // limit); if it misses, MusicBrainz + Cover Art Archive is tried as a
+    // 2nd tier (catches obscure/doujin tracks iTunes misses, but rate-
+    // limited to 1 req/sec).  The lookup thread checks itunes_lookup_job_
+    // to bail out if the track has already changed.
+    if (needs_itunes_lookup && !info_.title.empty() && !info_.artist.empty()) {
+        const uint64_t job = ++itunes_lookup_job_;
+        std::string artist = info_.artist;
+        std::string title  = info_.title;
+        void* session      = winhttp_session_;
+        std::thread([this, job, artist = std::move(artist),
+                     title = std::move(title), session]() {
+            // Tier 1: iTunes Search API
+            std::string art = itunes_lookup_artwork(artist, title, session);
+            std::string source = "itunes";
+            // Tier 2: MusicBrainz + Cover Art Archive
+            if (art.empty()) {
+                if (itunes_lookup_job_.load(std::memory_order_acquire) != job) return;
+                art = musicbrainz_lookup_artwork(artist, title, session);
+                source = "musicbrainz";
+            }
+            if (art.empty()) return;
+            // Stale check: bail if a newer track has been applied.
+            if (itunes_lookup_job_.load(std::memory_order_acquire) != job) return;
+            frdx::ScopedLock lk{mu_};
+            // Bail if the track changed while we were looking up.
+            if (itunes_lookup_job_.load(std::memory_order_acquire) != job) return;
+            if (info_.artist != artist || info_.title != title) return;
+            info_.artwork_url = std::move(art);
+            info_gen_.fetch_add(1, std::memory_order_release);
+            log::info("[shoutcast] {} artwork found: {} - {}", source, artist, title);
+        }).detach();
+    }
 }
 
 void ShoutcastSource::clear_pending_metadata_locked() {
@@ -745,7 +1009,7 @@ void ShoutcastSource::restart_metadata_for_current() {
         const auto md_epoch = metadata_epoch_.load(std::memory_order_acquire);
         lk.unlock();
         if (!legacy_url.empty()) {
-            metadata_controller_->start(legacy_url, "", "", {}, {}, {}, md_epoch);
+            metadata_controller_->start(legacy_url, "", "", {}, {}, {}, {}, 0, md_epoch);
         }
         return;
     }
@@ -771,8 +1035,22 @@ void ShoutcastSource::restart_metadata_for_current() {
 
     auto md_url     = metadata_url_;
     auto md_type    = station->metadata.type;
+    auto md_poll    = station->metadata.poll_interval_secs;
     auto ws_filter  = station->metadata.ws_filter;
+    // Per-stream type_value override (SSE array filter, e.g. Nightride).
+    if (stream && !ws_filter.stream_type_value_map.empty()) {
+        auto it = ws_filter.stream_type_value_map.find(stream->id);
+        if (it != ws_filter.stream_type_value_map.end())
+            ws_filter.type_value = it->second;
+    }
     auto ws_hb      = station->metadata.ws_heartbeat;
+    auto ws_sub     = station->metadata.ws_subscribe;
+    // Per-stream subscribe message override.
+    if (stream && !ws_sub.stream_message_map.empty()) {
+        auto it = ws_sub.stream_message_map.find(stream->id);
+        if (it != ws_sub.stream_message_map.end())
+            ws_sub.message = it->second;
+    }
     const auto md_epoch = metadata_epoch_.load(std::memory_order_acquire);
 
     std::string stream_url;
@@ -784,7 +1062,7 @@ void ShoutcastSource::restart_metadata_for_current() {
     lk.unlock();
 
     metadata_controller_->start(stream_url, md_url, md_type, mapping,
-                                ws_filter, ws_hb, md_epoch);
+                                ws_filter, ws_hb, ws_sub, md_poll, md_epoch);
 }
 
 // ---- PCM pump ----

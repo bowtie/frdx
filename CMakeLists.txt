@@ -167,8 +167,9 @@ set_target_properties(frdx-helper PROPERTIES
     WIN32_EXECUTABLE TRUE
 )
 # Use the Windows subsystem (no console window) but keep wmain as the
-# entry point instead of WinMain.
-target_link_options(frdx-helper PRIVATE -Wl,/ENTRY:wmainCRTStartup)
+# entry point instead of WinMain.  Use the MSVC linker syntax directly
+# (lld-link doesn't understand the GCC-style -Wl, prefix).
+target_link_options(frdx-helper PRIVATE /ENTRY:wmainCRTStartup)
 
 if(FRDX_AUTO_DEPLOY)
     add_custom_command(TARGET frdx-helper POST_BUILD

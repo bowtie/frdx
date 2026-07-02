@@ -98,13 +98,20 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         return;
     }
 
-    // ── Step 3: Resize to cover-fit 104x104 (the inner square) ──
-    // The game's radio HUD texture is 196 wide but the artwork only
-    // occupies the left 104 pixels — the game's UV mapping handles this.
-    // We cover-fit the artwork into a 104x104 square, then for 196x196
-    // targets we vertically stretch it to fill the height.
-    constexpr int kSquareSize = 104;
-    constexpr int kTargetW = 196;
+    // ── Step 3: Determine target dimensions + artwork square size ──
+    // The game creates the radio HUD texture at a size proportional to
+    // the display resolution: 196x104/196x196 at 1080p, 164x81 at
+    // 1600x900, etc.  The artwork occupies the left ~49% of the texture
+    // width (96px of 196px at 1080p).  We read the discovered target
+    // dimensions and compute the artwork square proportionally.
+    int target_w = target_width_.load(std::memory_order_acquire);
+    int target_h = target_height_.load(std::memory_order_acquire);
+    // Default to 1080p dimensions if not yet discovered
+    if (target_w == 0) target_w = 196;
+    if (target_h == 0) target_h = 104;
+
+    // Artwork square: ~49% of the texture width (96/196 at 1080p)
+    const int kSquareSize = (target_w * 96 + 98) / 196;  // rounded
 
     if (!std::filesystem::exists(texconv_path, ec)) {
         log::warn("[texinject] texconv.exe not found at {}; skipping BC7 compression",
@@ -113,10 +120,13 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         return;
     }
 
+    // Build target variants for both square and wide formats at the
+    // discovered resolution.  The square variant has height = width;
+    // the wide variant uses the discovered height.
     struct TargetDim { int w, h; };
     const TargetDim targets[] = {
-        {196, 196},  // square
-        {196, 104},  // wide
+        {target_w, target_w},      // square
+        {target_w, target_h},      // wide
     };
 
     std::vector<PixelVariant> variants;
@@ -156,7 +166,11 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
                 log::warn("[texinject] failed to launch texconv for {}x{}", tgt.w, tgt.h);
                 continue;
             }
-            WaitForSingleObject(pi.hProcess, 30000);
+            DWORD wait_result = WaitForSingleObject(pi.hProcess, 30000);
+            if (wait_result == WAIT_TIMEOUT) {
+                TerminateProcess(pi.hProcess, 1);
+                log::warn("[texinject] texconv timed out for {}x{}, terminated", tgt.w, tgt.h);
+            }
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
 
@@ -191,7 +205,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         }
         stbi_image_free(img_data);
     } else {
-        // ── Album art mode: cover-fit to 104x104 + center crop ──
+        // ── Album art mode: cover-fit to 96x96 + center crop ──
     float scale = std::max(static_cast<float>(kSquareSize) / width,
                            static_cast<float>(kSquareSize) / height);
     int new_w = std::max(1, static_cast<int>(width * scale));
@@ -204,22 +218,22 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
 
     if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
-    // ── Step 4: Center-crop to 104x104 ──
+    // ── Step 4: Center-crop to 96x96 ──
     int src_offset_x = (new_w - kSquareSize) / 2;
     int src_offset_y = (new_h - kSquareSize) / 2;
     if (src_offset_x < 0) src_offset_x = 0;
     if (src_offset_y < 0) src_offset_y = 0;
 
-    // Extract the 104x104 crop into its own buffer
-    std::vector<unsigned char> crop_104(kSquareSize * kSquareSize * 4);
+    // Extract the 96x96 crop into its own buffer
+    std::vector<unsigned char> crop_96(kSquareSize * kSquareSize * 4);
     for (int y = 0; y < kSquareSize; ++y) {
         for (int x = 0; x < kSquareSize; ++x) {
             int src_idx = ((y + src_offset_y) * new_w + (x + src_offset_x)) * 4;
             int dst_idx = (y * kSquareSize + x) * 4;
-            crop_104[dst_idx]     = resized_data[src_idx];
-            crop_104[dst_idx + 1] = resized_data[src_idx + 1];
-            crop_104[dst_idx + 2] = resized_data[src_idx + 2];
-            crop_104[dst_idx + 3] = resized_data[src_idx + 3];
+            crop_96[dst_idx]     = resized_data[src_idx];
+            crop_96[dst_idx + 1] = resized_data[src_idx + 1];
+            crop_96[dst_idx + 2] = resized_data[src_idx + 2];
+            crop_96[dst_idx + 3] = resized_data[src_idx + 3];
         }
     }
 
@@ -228,24 +242,24 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     if (border) {
         uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
         for (int i = 0; i < kSquareSize * kSquareSize; ++i) {
-            r_sum += crop_104[i * 4];
-            g_sum += crop_104[i * 4 + 1];
-            b_sum += crop_104[i * 4 + 2];
+            r_sum += crop_96[i * 4];
+            g_sum += crop_96[i * 4 + 1];
+            b_sum += crop_96[i * 4 + 2];
         }
         int pixel_count = kSquareSize * kSquareSize;
         b_r = static_cast<unsigned char>(r_sum / pixel_count * 0.6f);
         b_g = static_cast<unsigned char>(g_sum / pixel_count * 0.6f);
         b_b = static_cast<unsigned char>(b_sum / pixel_count * 0.6f);
     }
-    constexpr int border_thickness = 4;
+    const int border_thickness = std::max(1, kSquareSize / 26);
 
     for (const auto& tgt : targets) {
         if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
-        // Vertically stretch the 104x104 crop to 104 x tgt.h using
+        // Vertically stretch the 96x96 crop to 96 x tgt.h using
         // bilinear interpolation (much smoother than nearest-neighbor).
         std::vector<unsigned char> crop_stretched(kSquareSize * tgt.h * 4);
-        stbir_resize_uint8_linear(crop_104.data(), kSquareSize, kSquareSize, 0,
+        stbir_resize_uint8_linear(crop_96.data(), kSquareSize, kSquareSize, 0,
                                   crop_stretched.data(), kSquareSize, tgt.h, 0,
                                   STBIR_RGBA);
 
@@ -294,7 +308,11 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
             log::warn("[texinject] failed to launch texconv for {}x{}", tgt.w, tgt.h);
             continue;
         }
-        WaitForSingleObject(pi.hProcess, 30000);
+        DWORD wait_result = WaitForSingleObject(pi.hProcess, 30000);
+        if (wait_result == WAIT_TIMEOUT) {
+            TerminateProcess(pi.hProcess, 1);
+            log::warn("[texinject] texconv timed out for {}x{}, terminated", tgt.w, tgt.h);
+        }
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
 

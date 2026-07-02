@@ -407,6 +407,10 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
 // fades the backdrop with the cursor; pass -1.0f to suppress.
 void draw_backdrop_blur(float alpha_scalar = 1.0f);
 
+// Debug: set by the Debug tab to request a backbuffer capture on the next
+// Present.  Cleared (and consumed) by render_overlay_frame in hooks.cpp.
+extern std::atomic<bool> g_capture_backbuffer_requested;
+
 // ── Texture injection hooks (tex_hooks.cpp) ──
 
 // Enable/disable texture injection at runtime.  When disabled, the
