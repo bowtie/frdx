@@ -61,7 +61,11 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     // ── Step 1: Download ──
     bool download_ok = false;
     if (worker_ && worker_->is_running()) {
+        log::info("[texinject] downloading artwork from {}", url);
         download_ok = worker_->download(url, raw_path.string());
+        if (!download_ok) {
+            log::warn("[texinject] artwork download failed for {}", url);
+        }
     } else {
         log::warn("[texinject] worker not running; cannot download artwork");
     }
@@ -90,6 +94,19 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         log::warn("[texinject] STB failed to load image: {}", raw_path.string());
         cleanup();
         return;
+    }
+
+    // Disable the border for transparent images.  Some station logos
+    // (e.g. PoolSuite) are transparent PNGs; the border system assumes
+    // opaque album art and looks wrong around a transparent logo.
+    const int pixel_count_load = width * height;
+    bool has_alpha = false;
+    for (int i = 0; i < pixel_count_load; ++i) {
+        if (img_data[i * 4 + 3] < 255) { has_alpha = true; break; }
+    }
+    if (has_alpha) {
+        border = false;
+        log::info("[texinject] artwork has alpha channel; border disabled");
     }
 
     if (job_id != latest_job_id_.load(std::memory_order_acquire)) {

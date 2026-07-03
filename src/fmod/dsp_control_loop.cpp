@@ -63,7 +63,8 @@ void ControlLoop::run(const std::stop_token& tok) {
     while (!target_acquired && !tok.stop_requested()) {
         target_acquired = acquire_target().has_value();
         if (target_acquired) break;
-        if (++discovery_attempts % 6 == 0 && game_state_.resolved()) {
+        if (++discovery_attempts % 6 == 0 && game_state_.resolved() &&
+            game_state_.read().on_target_station) {
             log::info("[ctrl] initial discovery stalled; auto-cycling station to force initialization...");
             [[maybe_unused]] auto _rt = game_state_.retune_streamer_station();
         }

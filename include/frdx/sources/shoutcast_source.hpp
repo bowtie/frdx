@@ -241,6 +241,10 @@ private:
     uint64_t pending_info_epoch_     FRDX_GUARDED_BY(mu_) = 0;
     bool pending_info_valid_         FRDX_GUARDED_BY(mu_) = false;
     bool metadata_epoch_has_track_   FRDX_GUARDED_BY(mu_) = false;
+    // Timestamp of the last station selection (select_station / cycle_preset).
+    // Used to hold the station logo on-screen for a grace period before
+    // the first track metadata overwrites it.
+    int64_t station_selected_ms_     FRDX_GUARDED_BY(mu_) = 0;
     std::atomic<uint64_t> position_ms_{0};
     std::atomic<PlaybackState> state_{PlaybackState::stopped};
 

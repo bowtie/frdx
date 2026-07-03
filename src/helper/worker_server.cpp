@@ -124,8 +124,18 @@ bool http_download(std::string_view url, std::string_view dest_path) {
     auto scheme_end = url_str.find("://") + 3;
     auto host_end = url_str.find('/', scheme_end);
     if (host_end == std::string::npos) host_end = url_str.size();
-    std::string host = url_str.substr(scheme_end, host_end - scheme_end);
+    std::string host_port = url_str.substr(scheme_end, host_end - scheme_end);
     std::string path = (host_end < url_str.size()) ? url_str.substr(host_end) : "/";
+
+    // Extract port from host:port (if present)
+    std::string host = host_port;
+    INTERNET_PORT port = https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+    auto colon = host_port.find(':');
+    if (colon != std::string::npos) {
+        host = host_port.substr(0, colon);
+        try { port = static_cast<INTERNET_PORT>(std::stoi(host_port.substr(colon + 1))); }
+        catch (...) {}
+    }
 
     std::wstring whost(host.begin(), host.end());
     std::wstring wpath(path.begin(), path.end());
@@ -138,8 +148,7 @@ bool http_download(std::string_view url, std::string_view dest_path) {
     DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(session, WINHTTP_OPTION_REDIRECT_POLICY,
                      &redirect_policy, sizeof(redirect_policy));
-    HINTERNET connect = WinHttpConnect(session, whost.c_str(),
-                                       https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT, 0);
+    HINTERNET connect = WinHttpConnect(session, whost.c_str(), port, 0);
     if (!connect) { WinHttpCloseHandle(session); return false; }
     HINTERNET request = WinHttpOpenRequest(connect, L"GET", wpath.c_str(), nullptr,
                                            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,

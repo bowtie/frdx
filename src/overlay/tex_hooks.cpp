@@ -88,6 +88,27 @@ static std::atomic<bool> g_tex_work_pending{false};
 // it) bounded.
 static constexpr size_t kMaxStreamerModeTextures = 8;
 
+// Known radio HUD texture dimensions.  The game creates these at fixed
+// sizes tied to the display resolution:
+//   1080p → 196x104 (wide) / 196x196 (square)
+//   4K    → 392x208 / 392x392
+// These are exact — the game doesn't interpolate, it picks from a small
+// set of pre-authored textures.  No tolerance: any other dimension is
+// a different UI element, not the radio HUD.
+struct KnownDim { UINT w, h; };
+static constexpr KnownDim kKnownDimensions[] = {
+    {196, 104}, {196, 196},   // 1080p
+    {392, 208}, {392, 392},   // 4K
+};
+
+bool matches_known_dimensions(UINT w, UINT h) {
+    for (const auto& kd : kKnownDimensions) {
+        if (w == kd.w && h == kd.h)
+            return true;
+    }
+    return false;
+}
+
 bool is_target_texture(ID3D12Resource* pResource) {
     if (!pResource) return false;
     D3D12_RESOURCE_DESC desc = pResource->GetDesc();
@@ -97,16 +118,7 @@ bool is_target_texture(ID3D12Resource* pResource) {
 
     const UINT w = static_cast<UINT>(desc.Width);
     const UINT h = desc.Height;
-    if (w < 100 || w > 400 || h < 50 || h > 400) return false;
-
-    // Accept roughly square (1:1) or roughly wide (2:1) aspect ratios.
-    // The 2:1 ratio is the wide variant (196x104 at 1080p); the 1:1 is
-    // the square variant (196x196).  Allow 20% tolerance for resolution
-    // scaling rounding.
-    const float ratio = static_cast<float>(w) / static_cast<float>(h);
-    const bool is_square = (ratio > 0.8f && ratio < 1.25f);
-    const bool is_wide  = (ratio > 1.6f && ratio < 2.5f);
-    return is_square || is_wide;
+    return matches_known_dimensions(w, h);
 }
 
 // ── Texture tracking ──
@@ -161,23 +173,21 @@ void set_tex_injection_enabled(bool enabled) noexcept {
 void set_radio_active(bool active) noexcept {
     const bool prev = g_radio_active.exchange(active, std::memory_order_acq_rel);
     if (prev && !active) {
-        // Radio just went inactive — clear tracked textures to avoid
-        // injecting into stale/destroyed textures on the next frame.
-        // Note: g_pending_fp is deliberately left alone here. Its command
-        // allocators/lists must stay alive until the GPU actually finishes
-        // executing them (releasing them early is undefined behavior), so
-        // in-flight readbacks are left to drain naturally via the normal
-        // poll loop in process_texture_injection; they just won't be acted
-        // on with any more urgency than usual.
-        std::lock_guard lk{g_tex_mutex};
-        auto count = g_streamer_mode.size();
-        for (auto& tt : g_streamer_mode) {
-            if (tt.resource) tt.resource.reset();
-        }
-        g_streamer_mode.clear();
-        g_unverified.clear();
-        g_tex_work_pending.store(!g_pending_fp.empty(), std::memory_order_release);
-        log::info("[texinject] radio went inactive; cleared {} tracked texture(s)", count);
+        // Radio just went inactive.  We do NOT clear g_streamer_mode or
+        // g_unverified here — the injection section already gates on
+        // g_radio_active, so no injection will happen while inactive.
+        // Clearing them was causing a "stuck" state: after a retune
+        // (station off→on), the game often reuses the same texture/SRV
+        // without calling CreateSRV again, so g_streamer_mode would stay
+        // empty and pending pixels could never be injected.  Keeping the
+        // tracked textures lets injection resume immediately when the
+        // radio becomes active again.  We hold refs on all tracked
+        // resources, so they remain valid even if the game releases its
+        // own refs; injecting into a no-longer-rendered texture is
+        // harmless (just wasted GPU work), and the 8-texture cap bounds
+        // memory usage.
+        log::info("[texinject] radio went inactive; keeping {} tracked texture(s)",
+                  g_streamer_mode.size());
     }
 }
 
@@ -388,16 +398,16 @@ bool try_complete_fingerprint(PendingFingerprint& pf, bool& out_is_placeholder) 
             ? static_cast<float>(unique_count) / static_cast<float>(totalBlocks)
             : 1.0f;
 
-        // Placeholder textures (streamer mode logo, modified icon) are
-        // simple graphics with large uniform areas → very few unique
-        // blocks.  Real artwork (album covers) has high diversity.
-        // Threshold: <25% unique blocks = placeholder.
-        // Also keep the exact hash match as a fast path for 1080p.
+        // Placeholder textures are identified by exact hash match only.
+        // The game ships a small set of pre-authored placeholder textures
+        // (streamer mode logo, modified icon) at fixed dimensions; their
+        // FNV-1a hashes are known constants.  No uniqueness heuristic —
+        // that was catching unrelated UI elements with simple graphics.
         out_is_placeholder = (hash == TextureInjector::kPlaceholderHash196x104 ||
+                              hash == TextureInjector::kPlaceholderHash196x104Alt ||
                               hash == TextureInjector::kPlaceholderHash196x196 ||
                               hash == TextureInjector::kPlaceholderHash392x208 ||
-                              hash == TextureInjector::kPlaceholderHash392x392 ||
-                              uniqueness < 0.25f);
+                              hash == TextureInjector::kPlaceholderHash392x392);
         if (out_is_placeholder) {
             TextureInjector::instance().set_target_dimensions(
                 static_cast<int>(pf.width), static_cast<int>(pf.height));

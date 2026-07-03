@@ -588,7 +588,8 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         // Resolve the metadata URL / type for this stream.
         metadata_url_.clear();
         md_type = station->metadata.type;
-        if (md_type == "websocket") {
+        if (md_type == "websocket" || md_type == "rest" || md_type == "sse" ||
+            md_type == "icecast-json") {
             auto mit      = station->metadata.stream_url_map.find(stream_id);
             md_url        = (mit != station->metadata.stream_url_map.end()) ? mit->second
                                                                             : station->metadata.url;
@@ -649,6 +650,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
             display_name_gen_.fetch_add(1, std::memory_order_release);
             position_ms_.store(0, std::memory_order_release);
             state_.store(PlaybackState::buffering, std::memory_order_release);
+            station_selected_ms_ = steady_ms();
         }
     }
 
@@ -692,7 +694,8 @@ void ShoutcastSource::cycle_preset(int direction) {
         active_station_id_ = new_st.id;
         active_stream_id_  = new_str.id;
         metadata_url_.clear();
-        if (new_st.metadata.type == "websocket") {
+        if (new_st.metadata.type == "websocket" || new_st.metadata.type == "rest" ||
+            new_st.metadata.type == "sse" || new_st.metadata.type == "icecast-json") {
             auto mit = new_st.metadata.stream_url_map.find(new_str.id);
             metadata_url_ =
                 (mit != new_st.metadata.stream_url_map.end()) ? mit->second : new_st.metadata.url;
@@ -830,6 +833,7 @@ void ShoutcastSource::cycle_and_restart(int direction) {
             }
         }
         has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
+        station_selected_ms_ = steady_ms();
     } // mu_ released before poller stop/start
     restart_metadata_for_current();
     if (has_pipe) {
@@ -869,9 +873,9 @@ bool ShoutcastSource::queue_timed_metadata_locked(TrackInfo info, int64_t now_ms
     quiet_started_ms_    = 0;
     pending_info_epoch_  = metadata_epoch;
     pending_info_valid_  = true;
-    if (!metadata_epoch_has_track_) {
-        apply_pending_metadata_locked("initial metadata");
-    }
+    // Don't apply immediately even if there's no track yet — the station
+    // logo grace period in observe_pcm_for_metadata_sync() will hold it
+    // for a few seconds so the user can see what station they tuned into.
     return true;
 }
 
@@ -961,15 +965,47 @@ uint64_t ShoutcastSource::reset_metadata_sync_locked() {
 void ShoutcastSource::observe_pcm_for_metadata_sync(const int16_t* samples,
                                                     std::size_t sample_count,
                                                     uint64_t metadata_epoch) {
-    constexpr int kQuietPeak = 700;
-    constexpr int64_t kQuietHoldMs = 260;
+    // Metadata sync: when a metadata poller reports a new track, we queue
+    // it as pending and wait for the right moment to apply it.
+    //
+    // Primary: quiet-gap detection — between tracks, streams typically drop
+    // to near-silence.  We detect this by counting the fraction of "quiet"
+    // samples (|sample| below a threshold) with hysteresis to avoid
+    // toggling.  This syncs metadata with the actual audio transition.
+    //
+    // Fallback: if no quiet gap is detected within a window (from when the
+    // metadata was queued), apply via fixed delay.  This handles streams
+    // with crossfading, no inter-track silence, or encoder dither.
+    constexpr int kQuietSampleThreshold = 1200;   // ~3.7% of full scale
+    constexpr float kQuietRatioEnter = 0.95f;     // 95% quiet samples → quiet
+    constexpr float kQuietRatioExit  = 0.50f;     // <50% quiet samples → loud
+    constexpr int64_t kQuietHoldMs = 350;
+    // Fallback delay: if no quiet gap is found within this window after
+    // metadata was queued, apply it anyway.  Covers ffmpeg's buffer latency.
+    constexpr int64_t kFallbackDelayMs = 3000;
     constexpr int64_t kMaxPendingMs = 25'000;
+    // Grace period after station selection: hold the station logo + name
+    // on-screen for at least this long before the first track metadata
+    // overwrites it, so the user can see what station they tuned into.
+    constexpr int64_t kStationGracePeriodMs = 3500;
 
-    int peak = 0;
+    // Count quiet samples (|sample| below threshold).
+    std::size_t quiet_count = 0;
     for (std::size_t i = 0; i < sample_count; ++i) {
         const int sample = samples[i] == INT16_MIN ? 32768 : std::abs(static_cast<int>(samples[i]));
-        if (sample > peak) peak = sample;
+        if (sample < kQuietSampleThreshold) ++quiet_count;
     }
+    const float quiet_ratio = sample_count > 0
+        ? static_cast<float>(quiet_count) / static_cast<float>(sample_count)
+        : 1.0f;
+
+    // Hysteresis: if we're already in a quiet run, stay quiet until the
+    // ratio drops below the exit threshold.  Otherwise, require the enter
+    // threshold to start a quiet run.
+    const bool currently_quiet = quiet_started_ms_ != 0;
+    const bool is_quiet = currently_quiet
+        ? (quiet_ratio >= kQuietRatioExit)
+        : (quiet_ratio >= kQuietRatioEnter);
 
     const auto now_ms = steady_ms();
     frdx::ScopedLock lk{mu_};
@@ -984,7 +1020,33 @@ void ShoutcastSource::observe_pcm_for_metadata_sync(const int16_t* samples,
         return;
     }
 
-    if (peak <= kQuietPeak) {
+    // Station logo grace period: if this is the first track metadata after
+    // a station change, hold the station logo for a few seconds before
+    // allowing the track metadata to take over.
+    if (!metadata_epoch_has_track_ && station_selected_ms_ > 0) {
+        if (now_ms - station_selected_ms_ < kStationGracePeriodMs) {
+            // Still in grace period — keep the quiet gap timer running so
+            // we can transition smoothly when the grace period ends.
+            if (is_quiet) {
+                if (quiet_started_ms_ == 0) quiet_started_ms_ = now_ms;
+            } else {
+                quiet_started_ms_ = 0;
+            }
+            return;
+        }
+        apply_pending_metadata_locked("grace period ended");
+        return;
+    }
+
+    // Fallback: if no quiet gap was found within the fallback window,
+    // apply the metadata anyway.
+    if (pending_info_ms_ > 0 && now_ms - pending_info_ms_ >= kFallbackDelayMs) {
+        apply_pending_metadata_locked("fallback delay");
+        return;
+    }
+
+    // Primary: quiet-gap detection.
+    if (is_quiet) {
         if (quiet_started_ms_ == 0) quiet_started_ms_ = now_ms;
         if (now_ms - quiet_started_ms_ >= kQuietHoldMs) {
             apply_pending_metadata_locked("quiet gap");
