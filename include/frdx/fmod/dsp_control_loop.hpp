@@ -72,6 +72,12 @@ private:
     TrackInfo metadata_track_;
     std::string metadata_display_name_;
     std::string current_artwork_url_;
+    // When a new track has new artwork, we delay pushing the track text to
+    // the game until the artwork has finished downloading/processing so
+    // they appear together.  artwork_wait_started_ is the timestamp when
+    // we started waiting; if it exceeds the timeout, we push anyway.
+    std::chrono::steady_clock::time_point artwork_wait_started_{};
+    bool artwork_wait_pending_ = false;
     std::byte* radio_stream_      = nullptr;  // current RadioStreamFmod
     std::byte* sample_props_body_ = nullptr;  // current SampleProperties body
     std::uint64_t prev_calls_     = 0;

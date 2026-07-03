@@ -66,6 +66,10 @@ struct OverlayConfig {
     // overhead.  Useful for diagnosing framerate regressions or running
     // without the album-art overlay feature.
     bool texture_injection_enabled = true;
+    // When true, the shoutcast source will look up per-track album art
+    // via iTunes Search and MusicBrainz/Cover Art Archive.  When false,
+    // only station logos (static_artwork_url) are used.
+    bool artwork_lookup_enabled = true;
 };
 
 struct DualSenseConfig {

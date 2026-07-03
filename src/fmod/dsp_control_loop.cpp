@@ -106,9 +106,20 @@ void ControlLoop::run(const std::stop_token& tok) {
         // so the radio channel stays hooked and is ready when playback starts.
         if (has_source && target_acquired) {
             bridge_.retarget_if_needed();
-            frdx::overlay::set_radio_active(true);
+            // Check if the game's radio is actually on our station.  When
+            // the user turns off the radio or switches to a native station,
+            // the game state will show on_target_station == false, and we
+            // should stop injecting textures to avoid overwriting the
+            // radio-off icon or native station artwork.
+            bool game_radio_on = true;
+            if (game_state_.resolved()) {
+                const auto gs = game_state_.read();
+                game_radio_on = gs.on_target_station;
+            }
+            frdx::overlay::set_radio_active(game_radio_on);
         } else if (!has_source) {
             bridge_.detach();
+            frdx::overlay::set_radio_active(false);
         }
 
         // Staleness watchdog: while a source is actively producing audio,
@@ -280,6 +291,7 @@ void ControlLoop::push_metadata() noexcept {
         metadata_generation_ = 0;
         metadata_track_      = {};
         metadata_display_name_.clear();
+        artwork_wait_pending_ = false;
         [[maybe_unused]] auto _meta = meta_.update("Forza Radio DX", "Idle");
         return;
     }
@@ -290,6 +302,7 @@ void ControlLoop::push_metadata() noexcept {
         metadata_generation_ = 0;
         metadata_track_      = {};
         metadata_display_name_.clear();
+        artwork_wait_pending_ = false;
         [[maybe_unused]] auto _meta = meta_.update("Forza Radio DX", "Idle");
         return;
     }
@@ -297,28 +310,68 @@ void ControlLoop::push_metadata() noexcept {
     const uint64_t generation = mp->track_generation();
     if (a != metadata_source_ || generation == 0 || generation != metadata_generation_) {
         try {
+            const bool source_changed = (a != metadata_source_);
             metadata_track_        = mp->current_track();
             metadata_display_name_ = mp->display_name();
             metadata_source_       = a;
             metadata_generation_   = generation;
 
-            // Update texture injector when artwork URL changes — but only
-            // when texture injection is enabled.  If it's disabled (e.g.
-            // the user turned it off in Settings to diagnose FPS issues),
-            // skip the download + texconv conversion entirely; there's no
-            // point processing artwork that will never be injected.
+            // Start artwork download immediately so it's processing in
+            // parallel while we wait.  When the metadata source changed
+            // (station switch), always push the artwork even if the URL
+            // is the same — the previous station's artwork is still in
+            // the texture and needs to be replaced.
+            if (source_changed) current_artwork_url_.clear();
+            bool started_new_artwork = false;
             if (metadata_track_.artwork_url != current_artwork_url_) {
                 current_artwork_url_ = metadata_track_.artwork_url;
                 if (!current_artwork_url_.empty() &&
                     overlay::is_tex_injection_enabled()) {
                     TextureInjector::instance().update_artwork_url(current_artwork_url_);
+                    started_new_artwork = true;
                 }
+            }
+
+            // If we started downloading new artwork, delay pushing the
+            // track text to the game until the artwork is ready so they
+            // appear together.  If texture injection is disabled or there
+            // was no new artwork URL, push immediately.
+            if (started_new_artwork) {
+                artwork_wait_pending_  = true;
+                artwork_wait_started_  = std::chrono::steady_clock::now();
+            } else {
+                artwork_wait_pending_ = false;
             }
         } catch (...) {
             metadata_source_     = nullptr;
             metadata_generation_ = 0;
             return;
         }
+    }
+
+    // If we're waiting for artwork to finish downloading, hold the text
+    // until the artwork is fully injected into the GPU texture (or timeout
+    // after 5 seconds).
+    //
+    // Two phases must complete:
+    //   1. is_processing() — download thread finishes (pixels ready in RAM)
+    //   2. has_pending_pixels() — ECL hook copies pixels into GPU texture
+    // We must wait for BOTH, otherwise the text appears before the artwork
+    // is visible on screen.
+    if (artwork_wait_pending_) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - artwork_wait_started_).count();
+        const bool still_processing = TextureInjector::instance().is_processing();
+        const bool has_pending = TextureInjector::instance().has_pending_pixels();
+        const bool timed_out = elapsed > 5000;
+
+        if ((still_processing || has_pending) && !timed_out) {
+            // Artwork not fully injected yet — keep showing the previous
+            // track's text.  The control loop will retry on the next tick.
+            return;
+        }
+        artwork_wait_pending_ = false;
     }
 
     const std::string& title =

@@ -98,6 +98,11 @@ struct StationMetadata {
     StationMetadataWebSocketFilter ws_filter;
     StationMetadataWebSocketHeartbeat ws_heartbeat;
     StationMetadataWebSocketSubscribe ws_subscribe;
+
+    // When true, ignore artwork_url from the metadata source and always
+    // use iTunes/MusicBrainz lookup for per-track art. Useful for stations
+    // whose WS provides a station logo instead of per-track artwork.
+    bool prefer_itunes_lookup = false;
 };
 
 struct StationPreset {
@@ -168,8 +173,10 @@ public:
     void next() override FRDX_EXCLUDES(mu_);
     void previous() override FRDX_EXCLUDES(mu_);
     void pump(RingBuffer& ring) override FRDX_EXCLUDES(mu_);
+    void on_radio_audible(bool audible) override FRDX_EXCLUDES(mu_);
 
     void set_volume_normalization(bool on) noexcept { volume_norm_.store(on, std::memory_order_release); }
+    void set_artwork_lookup_enabled(bool on) noexcept { artwork_lookup_enabled_.store(on, std::memory_order_release); }
 
     // Update the ffmpeg binary path. Takes effect on the next stream
     // (re)connect. Used by DependencyManager after auto-downloading ffmpeg.
@@ -226,6 +233,7 @@ private:
 
     ShoutcastConfig cfg_;
     std::atomic<bool> volume_norm_{false};
+    std::atomic<bool> artwork_lookup_enabled_{true};
     // Lock-free audio path: pump() loads via acquire, start_pipe_locked() stores
     // via release.  Shared ownership ensures the Pipe stays alive until pump()
     // releases its local reference, even if stop_pipe_locked() replaces pipe_.
@@ -286,6 +294,13 @@ private:
     // is applied, so stale lookup threads (iTunes + MusicBrainz) can
     // detect they're outdated.
     std::atomic<uint64_t> itunes_lookup_job_{0};
+
+    // Audible state: when the game pauses or enters a menu, the radio
+    // becomes inaudible.  We kill the ffmpeg pipe to prevent live stream
+    // drift (buffered audio plays from the past when resumed, causing
+    // metadata desync).  On resume, we reconnect and drain the ring buffer.
+    bool audible_   FRDX_GUARDED_BY(mu_) = true;
+    bool drain_pending_ FRDX_GUARDED_BY(mu_) = false;
 };
 
 } // namespace frdx::sources

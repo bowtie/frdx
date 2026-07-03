@@ -3,6 +3,7 @@
 #include "frdx/sources/shoutcast_metadata.hpp"
 #include "frdx/log.hpp"
 #include "frdx/platform/windows/subprocess.hpp"
+#include "frdx/overlay/overlay_priv.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -315,6 +316,7 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
             sp.metadata.static_title  = m.value("title", "");
             sp.metadata.static_artist = m.value("artist", "");
             sp.metadata.static_artwork_url = m.value("cover_url", "");
+            sp.metadata.prefer_itunes_lookup = m.value("prefer_itunes_lookup", false);
             // WebSocket metadata (type == "websocket").
             if (m.contains("message_filter")) {
                 const auto& mf                   = m["message_filter"];
@@ -771,6 +773,7 @@ void ShoutcastSource::play() {
     bool has_pipe = false;
     {
         frdx::ScopedLock lk{mu_};
+        drain_pending_ = true;
         if (!pipe_.load(std::memory_order_acquire)) start_pipe_locked();
         restore_station_display_locked();
         has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
@@ -800,6 +803,28 @@ void ShoutcastSource::pause() {
     state_.store(PlaybackState::paused, std::memory_order_release);
 }
 
+void ShoutcastSource::on_radio_audible(bool audible) {
+    frdx::ScopedLock lk{mu_};
+    if (audible == audible_) return;
+    audible_ = audible;
+    if (audible) {
+        // Radio became audible again (exited pause menu, etc).
+        // Reconnect to the live stream and drain stale buffered audio.
+        log::info("[shoutcast] radio audible -- reconnecting to live stream");
+        drain_pending_ = true;
+        start_pipe_locked();
+        restart_metadata_for_current();
+    } else {
+        // Radio became inaudible (pause menu, rewind, etc).
+        // Kill the ffmpeg pipe to stop buffering — otherwise the live
+        // stream keeps filling the ring buffer while paused, and when
+        // resumed it plays from the stale buffer position, causing the
+        // audio to drift behind the live feed and metadata to desync.
+        log::info("[shoutcast] radio inaudible -- disconnecting stream");
+        stop_pipe_locked();
+    }
+}
+
 void ShoutcastSource::cycle_and_restart(int direction) {
     metadata_controller_->stop();
 
@@ -807,7 +832,14 @@ void ShoutcastSource::cycle_and_restart(int direction) {
     {
         frdx::ScopedLock lk{mu_};
         cycle_preset(direction);
-        start_pipe_locked();
+        if (audible_) {
+            start_pipe_locked();
+        }
+        // Always clear pending timed metadata on station swap — the
+        // previous station's pending track info is stale and should
+        // never be applied to the new station.
+        clear_pending_metadata_locked();
+        metadata_epoch_has_track_ = false;
         // Handle static metadata from new station + artwork URL.
         for (const auto& st : stations_) {
             if (st.id == active_station_id_) {
@@ -823,7 +855,6 @@ void ShoutcastSource::cycle_and_restart(int direction) {
                         st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
                     info_.artist = st.metadata.static_artist;
                     metadata_epoch_has_track_ = true;
-                    clear_pending_metadata_locked();
                     info_gen_.fetch_add(1, std::memory_order_release);
                 }
                 // Station logo fallback for any metadata type.
@@ -895,7 +926,47 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
     // Station logo fallback: if the poller didn't provide artwork, use
     // the station's cover_url (static_artwork_url) so the texture
     // injector still has something to display.
-    bool needs_itunes_lookup = info_.artwork_url.empty();
+    //
+    // If prefer_itunes_lookup is set, ignore the poller-provided artwork
+    // URL and use iTunes/MusicBrainz instead (some stations provide a
+    // station logo as artwork rather than per-track art).
+    bool prefer_itunes = false;
+    if (!active_station_id_.empty()) {
+        for (const auto& st : stations_) {
+            if (st.id == active_station_id_) {
+                prefer_itunes = st.metadata.prefer_itunes_lookup;
+                break;
+            }
+        }
+    }
+    // Detect sentinel/null artwork URLs that some stations return when
+    // there's no cover (e.g. listen.moe returns "https://cdn.listen.moe/covers/null").
+    // Treat these as empty so the iTunes/MusicBrainz fallback can kick in.
+    if (!info_.artwork_url.empty()) {
+        const auto& url = info_.artwork_url;
+        // Check for "/null" at end of path, "null" filename, or "null.jpg" etc.
+        auto ends_with_null = [](std::string_view u) {
+            // Strip query string
+            auto qpos = u.find('?');
+            if (qpos != std::string_view::npos) u = u.substr(0, qpos);
+            // Check last path segment
+            auto slash = u.rfind('/');
+            std::string_view last = (slash != std::string_view::npos) ? u.substr(slash + 1) : u;
+            // Remove extension
+            auto dot = last.rfind('.');
+            if (dot != std::string_view::npos) last = last.substr(0, dot);
+            return last == "null" || last == "none" || last == "default" || last.empty();
+        };
+        if (ends_with_null(url)) {
+            log::info("[shoutcast] ignoring null/sentinel artwork URL: {}", url);
+            info_.artwork_url.clear();
+        }
+    }
+    const bool artwork_lookup_on = artwork_lookup_enabled_.load(std::memory_order_acquire);
+    bool needs_itunes_lookup = (info_.artwork_url.empty() || prefer_itunes) && artwork_lookup_on;
+    if (prefer_itunes && artwork_lookup_on && !info_.artwork_url.empty()) {
+        info_.artwork_url.clear();
+    }
     if (info_.artwork_url.empty() && !active_station_id_.empty()) {
         for (const auto& st : stations_) {
             if (st.id == active_station_id_) {
@@ -976,36 +1047,34 @@ void ShoutcastSource::observe_pcm_for_metadata_sync(const int16_t* samples,
     // Fallback: if no quiet gap is detected within a window (from when the
     // metadata was queued), apply via fixed delay.  This handles streams
     // with crossfading, no inter-track silence, or encoder dither.
-    constexpr int kQuietSampleThreshold = 1200;   // ~3.7% of full scale
-    constexpr float kQuietRatioEnter = 0.95f;     // 95% quiet samples → quiet
-    constexpr float kQuietRatioExit  = 0.50f;     // <50% quiet samples → loud
-    constexpr int64_t kQuietHoldMs = 350;
+    // Quiet-gap detection: between tracks, streams typically drop to near-
+    // digital silence.  We detect this by checking the peak amplitude of
+    // each PCM buffer — if the peak is below a very low threshold, the
+    // audio is effectively silent (inter-track gap or buffer underrun).
+    //
+    // Using peak amplitude instead of quiet-ratio is more robust because
+    // normal music has brief quiet moments (drum pauses, quiet sections)
+    // that can trigger ratio-based detection even though the track is
+    // still playing.  Peak amplitude only fires on actual silence.
+    constexpr int kSilencePeakThreshold = 200;  // ~0.6% of full scale = -44dB
+    constexpr int64_t kQuietHoldMs = 600;       // 600ms of silence → apply
     // Fallback delay: if no quiet gap is found within this window after
     // metadata was queued, apply it anyway.  Covers ffmpeg's buffer latency.
-    constexpr int64_t kFallbackDelayMs = 3000;
+    constexpr int64_t kFallbackDelayMs = 5000;
     constexpr int64_t kMaxPendingMs = 25'000;
     // Grace period after station selection: hold the station logo + name
     // on-screen for at least this long before the first track metadata
     // overwrites it, so the user can see what station they tuned into.
     constexpr int64_t kStationGracePeriodMs = 3500;
 
-    // Count quiet samples (|sample| below threshold).
-    std::size_t quiet_count = 0;
+    // Compute peak amplitude across the buffer.  If the peak is below the
+    // silence threshold, the audio is effectively silent.
+    int peak = 0;
     for (std::size_t i = 0; i < sample_count; ++i) {
         const int sample = samples[i] == INT16_MIN ? 32768 : std::abs(static_cast<int>(samples[i]));
-        if (sample < kQuietSampleThreshold) ++quiet_count;
+        if (sample > peak) peak = sample;
     }
-    const float quiet_ratio = sample_count > 0
-        ? static_cast<float>(quiet_count) / static_cast<float>(sample_count)
-        : 1.0f;
-
-    // Hysteresis: if we're already in a quiet run, stay quiet until the
-    // ratio drops below the exit threshold.  Otherwise, require the enter
-    // threshold to start a quiet run.
-    const bool currently_quiet = quiet_started_ms_ != 0;
-    const bool is_quiet = currently_quiet
-        ? (quiet_ratio >= kQuietRatioExit)
-        : (quiet_ratio >= kQuietRatioEnter);
+    const bool is_quiet = peak < kSilencePeakThreshold;
 
     const auto now_ms = steady_ms();
     frdx::ScopedLock lk{mu_};
@@ -1130,6 +1199,18 @@ void ShoutcastSource::restart_metadata_for_current() {
 // ---- PCM pump ----
 
 void ShoutcastSource::pump(RingBuffer& ring) {
+    // Drain stale buffered audio before processing new data.  This is set
+    // by on_radio_audible(true) or play() to discard the old contents of
+    // the ring buffer after reconnecting to a live stream, so playback
+    // resumes from the current live position instead of behind it.
+    {
+        frdx::ScopedLock lk{mu_};
+        if (drain_pending_) {
+            ring.drain();
+            drain_pending_ = false;
+        }
+    }
+
     {
         auto st = state_.load(std::memory_order_acquire);
         if (st != PlaybackState::playing && st != PlaybackState::buffering) return;

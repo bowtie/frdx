@@ -70,6 +70,20 @@ static std::atomic<bool> g_radio_active{false};
 // This lets the ECL hook fast-path without taking the mutex.
 static std::atomic<bool> g_tex_work_pending{false};
 
+// ── Crash diagnostics ──
+// Tracks the last operation attempted by process_texture_injection so
+// that if a crash occurs, the log shows exactly what was happening.
+static std::atomic<int> g_last_op{0}; // 0=idle, 1=fingerprint, 2=inject, 3=barrier, 4=copy, 5=fence_wait
+static std::atomic<uint64_t> g_last_op_resource{0}; // resource pointer being operated on
+static std::atomic<uint64_t> g_ecl_count{0};        // total ECL calls processed
+
+// Log the last operation before executing it. If we crash, this is the
+// last line in the log.
+#define TEX_TRACE_OP(op, res) do { \
+    g_last_op.store(op, std::memory_order_release); \
+    g_last_op_resource.store(reinterpret_cast<uint64_t>(res), std::memory_order_release); \
+} while(0)
+
 // ── Target texture detection ──
 //
 // The game creates the radio HUD texture at a size proportional to the
@@ -171,23 +185,41 @@ void set_tex_injection_enabled(bool enabled) noexcept {
 }
 
 void set_radio_active(bool active) noexcept {
-    const bool prev = g_radio_active.exchange(active, std::memory_order_acq_rel);
-    if (prev && !active) {
-        // Radio just went inactive.  We do NOT clear g_streamer_mode or
-        // g_unverified here — the injection section already gates on
-        // g_radio_active, so no injection will happen while inactive.
-        // Clearing them was causing a "stuck" state: after a retune
-        // (station off→on), the game often reuses the same texture/SRV
-        // without calling CreateSRV again, so g_streamer_mode would stay
-        // empty and pending pixels could never be injected.  Keeping the
-        // tracked textures lets injection resume immediately when the
-        // radio becomes active again.  We hold refs on all tracked
-        // resources, so they remain valid even if the game releases its
-        // own refs; injecting into a no-longer-rendered texture is
-        // harmless (just wasted GPU work), and the 8-texture cap bounds
-        // memory usage.
-        log::info("[texinject] radio went inactive; keeping {} tracked texture(s)",
-                  g_streamer_mode.size());
+    const bool was_active = g_radio_active.exchange(active, std::memory_order_acq_rel);
+    if (was_active && !active) {
+        // Radio just turned off.  Don't clear g_streamer_mode — the
+        // g_radio_active flag already gates injection (see
+        // process_texture_injection_impl), and clearing the tracked
+        // textures here is catastrophic when the control loop's
+        // staleness watchdog rapidly toggles radio off→on: the game
+        // doesn't re-issue CreateSRV calls for existing placeholder
+        // textures, so g_streamer_mode stays empty forever and
+        // injection never recovers.
+        //
+        // However, the game may repurpose the same texture resource for
+        // the radio-off icon.  Mark textures as needing re-fingerprinting
+        // so that when the radio turns back on, we verify they're still
+        // placeholders before injecting.  Also clear any pending pixels
+        // so stale artwork doesn't get injected into a repurposed texture.
+        std::lock_guard lk{g_tex_mutex};
+        if (!g_streamer_mode.empty()) {
+            // Move fingerprinted textures back to unverified for re-checking.
+            // Reset first_seen so the 2s fingerprint delay and 5s cleanup
+            // timeout are measured from this transition, not from the
+            // original detection (which could be minutes ago).
+            auto now = std::chrono::steady_clock::now();
+            size_t moved = 0;
+            for (auto& tt : g_streamer_mode) {
+                tt.first_seen = now;
+                g_unverified.push_back(std::move(tt));
+                moved++;
+            }
+            g_streamer_mode.clear();
+            g_tex_work_pending.store(!g_unverified.empty(), std::memory_order_release);
+            log::info("[texinject] radio turned off; moved {} texture(s) to re-fingerprint", moved);
+        } else {
+            log::info("[texinject] radio turned off; no tracked textures to move");
+        }
     }
 }
 
@@ -513,6 +545,17 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
         for (auto& tt : g_streamer_mode) {
             if (!tt.resource) continue;
 
+            // Check ref count: if only our ref remains (count==1), the
+            // game has released its reference and the texture may be in
+            // an invalid state. Skip it to avoid GPU crashes.
+            tt.resource->AddRef();
+            ULONG refcount = tt.resource->Release();
+            if (refcount <= 1) {
+                log::warn("[texinject] skipping stale texture 0x{:X} (refcount={})",
+                          reinterpret_cast<uint64_t>(tt.resource.get()), refcount);
+                continue;
+            }
+
             D3D12_RESOURCE_DESC desc = tt.resource->GetDesc();
             uint32_t key = static_cast<uint32_t>(desc.Width) |
                            (static_cast<uint32_t>(desc.Height) << 16);
@@ -521,6 +564,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
 
             const auto& ub = it->second;
 
+            TEX_TRACE_OP(3, tt.resource.get()); // barrier
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             barrier.Transition.pResource = tt.resource.get();
@@ -529,6 +573,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
             pCmdList->ResourceBarrier(1, &barrier);
 
+            TEX_TRACE_OP(4, tt.resource.get()); // copy
             D3D12_TEXTURE_COPY_LOCATION dstLoc{};
             dstLoc.pResource = tt.resource.get();
             dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -536,6 +581,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
 
             pCmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &ub.srcLoc, nullptr);
 
+            TEX_TRACE_OP(3, tt.resource.get()); // barrier back
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
             pCmdList->ResourceBarrier(1, &barrier);
             injected_count++;
@@ -543,9 +589,11 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
 
         pCmdList->Close();
 
+        TEX_TRACE_OP(2, nullptr); // execute
         ID3D12CommandList* lists[] = {pCmdList.get()};
         original_ExecuteCommandLists(pQueue, 1, lists);
 
+        TEX_TRACE_OP(5, nullptr); // fence wait
         wil::com_ptr<ID3D12Fence> pFence;
         if (FAILED(pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                          IID_PPV_ARGS(pFence.put())))) {
@@ -558,11 +606,16 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
         WaitForSingleObject(event, 5000);
         CloseHandle(event);
 
+        TEX_TRACE_OP(0, nullptr); // idle
         log::info("[texinject] injected BC7 into {} texture(s) ({} variants)",
                   injected_count, variants.size());
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        log::warn("[texinject] SEH exception during injection");
+        const DWORD code = GetExceptionCode();
+        const int op = g_last_op.load(std::memory_order_acquire);
+        const uint64_t res = g_last_op_resource.load(std::memory_order_acquire);
+        log::error("[texinject] SEH CRASH during inject (code=0x{:08X} op={} res=0x{:X})",
+                   code, op, res);
         return false;
     }
 }
@@ -574,6 +627,23 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
                                D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (pResource && is_target_texture(pResource)) {
         std::lock_guard lk{g_tex_mutex};
+
+        // Periodic clear: if no target texture has been seen for >1 second,
+        // clear unverified and pending fingerprint entries — the game likely
+        // reloaded its UI and those textures may be gone.  But keep
+        // g_streamer_mode: those textures were already fingerprinted and
+        // the game doesn't re-issue CreateSRV for existing placeholders, so
+        // clearing them would make injection permanently unrecoverable.
+        // Stale entries in g_streamer_mode are handled by the refcount check
+        // in inject_pixels and the periodic stale cleanup in the heartbeat.
+        static auto last_target_time = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_target_time).count() > 1) {
+            g_unverified.clear();
+            g_pending_fp.clear();
+            g_tex_work_pending.store(!g_streamer_mode.empty(), std::memory_order_release);
+        }
+        last_target_time = now;
 
         // Check if already tracked. g_pending_fp must be checked too: while
         // a resource's async fingerprint readback is in flight it's been
@@ -617,9 +687,36 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
 
 // ── Called from ExecuteCommandLists hook to process textures ──
 
+// Forward declaration — impl is defined after process_texture_injection.
+static void process_texture_injection_impl(ID3D12CommandQueue* pQueue);
+
 void process_texture_injection(ID3D12CommandQueue* pQueue) {
     if (!pQueue) return;
     if (!g_tex_injection_enabled.load(std::memory_order_relaxed)) return;
+
+    g_ecl_count.fetch_add(1, std::memory_order_relaxed);
+
+    // SEH crash guard: if anything in here crashes, log it instead of
+    // taking down the game process. The ECL hook is on the render thread,
+    // so an unhandled exception here = instant game crash.
+    __try {
+        process_texture_injection_impl(pQueue);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        const DWORD code = GetExceptionCode();
+        const int op = g_last_op.load(std::memory_order_acquire);
+        const uint64_t res = g_last_op_resource.load(std::memory_order_acquire);
+        log::error("[texinject] SEH CRASH in injection (code=0x{:08X} op={} res=0x{:X} ecl={})",
+                   code, op, res, g_ecl_count.load());
+        // Clear state to prevent re-entry into broken textures.
+        std::lock_guard lk{g_tex_mutex};
+        g_streamer_mode.clear();
+        g_unverified.clear();
+        g_pending_fp.clear();
+        g_tex_work_pending.store(false, std::memory_order_release);
+    }
+}
+
+void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
 
     // ── Fast path: two tiers of checks ──
     //
@@ -700,6 +797,7 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
     // kickoff_fingerprint's comment for why that distinction matters).
     std::vector<PendingFingerprint> started;
     for (auto* res : to_fingerprint) {
+        TEX_TRACE_OP(1, res); // fingerprint
         PendingFingerprint pf;
         if (kickoff_fingerprint(pDevice.get(), pQueue, res, pf)) {
             started.push_back(std::move(pf));
@@ -776,6 +874,45 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
             }
         }
     }
+
+    // ── Periodic heartbeat (every 10s) ──
+    // Dumps the full texture injection state so we can diagnose issues
+    // even if the log ends abruptly due to a crash.  Also prunes stale
+    // textures from g_streamer_mode (resources the game has released).
+    {
+        static std::atomic<int64_t> last_heartbeat_ns{0};
+        const auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+        if ((now_ns - last_heartbeat_ns.load(std::memory_order_relaxed)) > 10'000'000'000) {
+            last_heartbeat_ns.store(now_ns, std::memory_order_relaxed);
+            size_t sm_count = 0, sm_stale = 0;
+            {
+                std::lock_guard lk{g_tex_mutex};
+                // Prune stale textures (refcount <= 1 means only our ref remains)
+                g_streamer_mode.erase(
+                    std::remove_if(g_streamer_mode.begin(), g_streamer_mode.end(),
+                        [&](const TrackedTexture& tt) {
+                            if (!tt.resource) return true;
+                            tt.resource->AddRef();
+                            ULONG rc = tt.resource->Release();
+                            if (rc <= 1) { sm_stale++; return true; }
+                            sm_count++;
+                            return false;
+                        }),
+                    g_streamer_mode.end());
+            }
+            log::info("[texinject] heartbeat: ecl={} radio={} streamer_mode={} (stale={}) "
+                      "unverified={} pending_fp={} work_pending={} last_op={}",
+                      g_ecl_count.load(std::memory_order_relaxed),
+                      g_radio_active.load(std::memory_order_acquire),
+                      sm_count, sm_stale,
+                      g_unverified.size(),
+                      g_pending_fp.size(),
+                      g_tex_work_pending.load(std::memory_order_acquire),
+                      g_last_op.load(std::memory_order_acquire));
+        }
+    }
+
+    TEX_TRACE_OP(0, nullptr); // idle
 }
 
 // ── Install CreateSRV hook ──

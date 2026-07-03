@@ -227,6 +227,7 @@ void run_bridge(HMODULE self) noexcept {
     // Own the sole audio source and hand a raw pointer to the manager.
     auto shoutcast = std::make_unique<sources::ShoutcastSource>(resolved_cfg.shoutcast);
     shoutcast->set_volume_normalization(cfg.audio.volume_normalization);
+    shoutcast->set_artwork_lookup_enabled(cfg.overlay.artwork_lookup_enabled);
 
     // Now start the deps worker — the callback re-resolves ffmpeg and
     // updates the source's config. Also updates the TextureInjector's

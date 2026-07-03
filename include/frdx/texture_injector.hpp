@@ -97,6 +97,15 @@ private:
 
     void process_artwork(const std::string& url, uint64_t job_id, bool raw, bool border);
 
+    // BC7 disk cache: keyed by URL hash + dimensions.  After the first
+    // download+texconv pass, the BC7 payloads are saved to disk so
+    // subsequent requests for the same URL are instant (no download,
+    // no texconv).  This is especially useful for station logos which
+    // are the same URL every time.
+    bool try_load_cache(const std::string& url, int target_w, int target_h,
+                        std::vector<PixelVariant>& out_variants);
+    void save_cache(const std::string& url, const std::vector<PixelVariant>& variants);
+
     std::mutex mtx_;
     helper::WorkerClient* worker_ = nullptr;
     std::filesystem::path texconv_path_;

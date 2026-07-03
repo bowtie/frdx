@@ -137,9 +137,22 @@ bool http_download(std::string_view url, std::string_view dest_path) {
         catch (...) {}
     }
 
-    std::wstring whost(host.begin(), host.end());
-    std::wstring wpath(path.begin(), path.end());
-    std::wstring wdest(dest_path.begin(), dest_path.end());
+    // Convert UTF-8 to wide strings using MultiByteToWideChar.
+    // The naive string(begin(), end()) approach only works for ASCII;
+    // non-ASCII UTF-8 (e.g. Korean filenames from listen.moe) would be
+    // mangled into invalid wchar_t values, causing download failures.
+    auto to_wide = [](const std::string& s) -> std::wstring {
+        if (s.empty()) return {};
+        int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                      static_cast<int>(s.size()), nullptr, 0);
+        std::wstring ws(len, 0);
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                            static_cast<int>(s.size()), ws.data(), len);
+        return ws;
+    };
+    std::wstring whost = to_wide(host);
+    std::wstring wpath = to_wide(path);
+    std::wstring wdest = to_wide(std::string(dest_path));
 
     HINTERNET session = WinHttpOpen(L"FRDX/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);

@@ -33,6 +33,80 @@ void TextureInjector::update_artwork_url(const std::string& url, bool raw, bool 
     std::thread([this, url, job_id, raw, border] { process_artwork(url, job_id, raw, border); }).detach();
 }
 
+// ── BC7 disk cache ──
+// Cache files are stored in <data_dir>/artwork_cache/ and named by
+// FNV-1a hash of the URL + dimensions.  Each file is a simple binary
+// blob: [4-byte width][4-byte height][4-byte payload_size][payload].
+// This lets us skip the download+STB+texconv pipeline entirely for
+// URLs we've already processed (e.g. station logos).
+
+static uint64_t url_hash_fnv1a(const std::string& s) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (char c : s) { h ^= static_cast<uint8_t>(c); h *= 0x100000001b3ull; }
+    return h;
+}
+
+bool TextureInjector::try_load_cache(const std::string& url, int target_w, int target_h,
+                                     std::vector<PixelVariant>& out_variants) {
+    if (data_dir_.empty()) return false;
+
+    const auto cache_dir = data_dir_ / "artwork_cache";
+    const uint64_t h = url_hash_fnv1a(url);
+    const auto cache_file = cache_dir / (std::to_string(h) + "_" +
+                                         std::to_string(target_w) + "x" +
+                                         std::to_string(target_h) + ".bc7");
+
+    std::error_code ec;
+    if (!std::filesystem::exists(cache_file, ec)) return false;
+
+    std::ifstream f(cache_file, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const auto size = f.tellg();
+    if (size < 12) return false;  // need at least header
+    f.seekg(0);
+
+    // Read header: width, height, payload_size
+    uint32_t w = 0, ht = 0, payload_size = 0;
+    f.read(reinterpret_cast<char*>(&w), 4);
+    f.read(reinterpret_cast<char*>(&ht), 4);
+    f.read(reinterpret_cast<char*>(&payload_size), 4);
+
+    if (w == 0 || ht == 0 || payload_size == 0) return false;
+    if (static_cast<std::streamsize>(12 + payload_size) > size) return false;
+
+    std::vector<uint8_t> payload(payload_size);
+    f.read(reinterpret_cast<char*>(payload.data()), payload_size);
+    f.close();
+
+    out_variants.push_back({std::move(payload), static_cast<int>(w), static_cast<int>(ht)});
+    return true;
+}
+
+void TextureInjector::save_cache(const std::string& url,
+                                 const std::vector<PixelVariant>& variants) {
+    if (data_dir_.empty() || variants.empty()) return;
+
+    const auto cache_dir = data_dir_ / "artwork_cache";
+    std::error_code ec;
+    std::filesystem::create_directories(cache_dir, ec);
+
+    const uint64_t h = url_hash_fnv1a(url);
+    for (const auto& v : variants) {
+        const auto cache_file = cache_dir / (std::to_string(h) + "_" +
+                                             std::to_string(v.width) + "x" +
+                                             std::to_string(v.height) + ".bc7");
+        std::ofstream f(cache_file, std::ios::binary | std::ios::trunc);
+        if (!f) continue;
+        uint32_t w = static_cast<uint32_t>(v.width);
+        uint32_t ht = static_cast<uint32_t>(v.height);
+        uint32_t ps = static_cast<uint32_t>(v.pixels.size());
+        f.write(reinterpret_cast<const char*>(&w), 4);
+        f.write(reinterpret_cast<const char*>(&ht), 4);
+        f.write(reinterpret_cast<const char*>(&ps), 4);
+        f.write(reinterpret_cast<const char*>(v.pixels.data()), v.pixels.size());
+    }
+}
+
 void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, bool raw, bool border) {
     auto cleanup = [this] { processing_.store(false, std::memory_order_release); };
 
@@ -50,23 +124,90 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         return;
     }
 
+    // ── Step 0: Check BC7 disk cache ──
+    // Station logos (and any artwork URL we've processed before) are
+    // cached as BC7 payloads on disk.  This skips the entire
+    // download+STB+texconv pipeline (~2-3s) and loads the pre-compressed
+    // BC7 data directly (~10ms).  Only applies to non-raw mode (album art
+    // / station logos), not raw debug injection.
+    if (!raw) {
+        int cached_w = target_width_.load(std::memory_order_acquire);
+        int cached_h = target_height_.load(std::memory_order_acquire);
+        if (cached_w == 0) cached_w = 196;
+        if (cached_h == 0) cached_h = 104;
+
+        std::vector<PixelVariant> cached_variants;
+        // Try to load both variants from cache.
+        bool cache_hit = try_load_cache(url, cached_w, cached_w, cached_variants);
+        cache_hit = try_load_cache(url, cached_w, cached_h, cached_variants) && cache_hit;
+
+        if (cache_hit && cached_variants.size() >= 2) {
+            if (job_id != latest_job_id_.load(std::memory_order_acquire)) {
+                cleanup();
+                return;
+            }
+            log::info("[texinject] cache hit for {} ({} variants)", url, cached_variants.size());
+            {
+                std::lock_guard lk{pixels_mtx_};
+                pending_variants_ = std::move(cached_variants);
+                has_new_image_ = true;
+                has_pending_pixels_.store(true, std::memory_order_release);
+            }
+            cleanup();
+            return;
+        }
+    }
+
     const auto temp_dir = data_dir / "artwork_tmp";
     std::error_code ec;
     std::filesystem::create_directories(temp_dir, ec);
 
-    const auto raw_path = temp_dir / "raw.jpg";
-    const auto png_path = temp_dir / "artwork.png";
-    const auto dds_path = temp_dir / "artwork.dds";
+    // Include job_id in temp file names to prevent concurrent
+    // process_artwork threads from corrupting each other's files when
+    // the user skips tracks rapidly.
+    const auto job_suffix = std::to_string(job_id);
+    const auto raw_path = temp_dir / ("raw_" + job_suffix + ".jpg");
+    const auto png_path = temp_dir / ("artwork_" + job_suffix + ".png");
+    const auto dds_path = temp_dir / ("artwork_" + job_suffix + ".dds");
 
-    // ── Step 1: Download ──
+    // Scope guard: always clean up temp files on any return path.
+    struct FileCleanup {
+        std::filesystem::path raw_path_, png_path_, dds_path_;
+        std::error_code& ec_;
+        ~FileCleanup() {
+            std::filesystem::remove(raw_path_, ec_);
+            std::filesystem::remove(png_path_, ec_);
+            std::filesystem::remove(dds_path_, ec_);
+        }
+    } file_guard{raw_path, png_path, dds_path, ec};
+
+    // ── Step 1: Download (or load from local disk) ──
     bool download_ok = false;
-    if (worker_ && worker_->is_running()) {
+
+    // Check if the URL is actually a local file path (e.g. "logos/boxradio_jpop.jpg").
+    // Station logos are bundled with the dist and referenced as relative paths
+    // in stations.json.  Loading from disk is instant (~1ms) vs downloading
+    // from the web (~500ms-1s).
+    if (!raw && !data_dir_.empty()) {
+        auto local_path = data_dir_ / url;
+        std::error_code ec2;
+        if (std::filesystem::exists(local_path, ec2)) {
+            log::info("[texinject] loading local logo: {}", url);
+            std::filesystem::copy_file(local_path, raw_path,
+                                       std::filesystem::copy_options::overwrite_existing, ec2);
+            download_ok = !ec2;
+            if (!download_ok)
+                log::warn("[texinject] failed to copy local logo: {}", ec2.message());
+        }
+    }
+
+    if (!download_ok && worker_ && worker_->is_running()) {
         log::info("[texinject] downloading artwork from {}", url);
         download_ok = worker_->download(url, raw_path.string());
         if (!download_ok) {
             log::warn("[texinject] artwork download failed for {}", url);
         }
-    } else {
+    } else if (!download_ok) {
         log::warn("[texinject] worker not running; cannot download artwork");
     }
 
@@ -374,6 +515,14 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         return;
     }
 
+    // ── Step 5b: Save to BC7 disk cache ──
+    // Cache the processed BC7 payloads so future requests for the same
+    // URL skip the entire download+STB+texconv pipeline.  This makes
+    // station logos appear instantly on subsequent station switches.
+    if (!raw) {
+        save_cache(url, variants);
+    }
+
     // ── Step 6: Hand off to render thread ──
     {
         std::lock_guard lk{pixels_mtx_};
@@ -382,11 +531,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         has_pending_pixels_.store(true, std::memory_order_release);
     }
 
-    // Cleanup temp files
-    std::filesystem::remove(raw_path, ec);
-    std::filesystem::remove(png_path, ec);
-    std::filesystem::remove(dds_path, ec);
-
+    // Temp files cleaned up by file_guard destructor.
     cleanup();
 }
 

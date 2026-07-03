@@ -273,6 +273,13 @@ void MetadataController::run_ws_poller(std::string url,
         ScopedWinHttp ws(hWebSocket);
         (void)conn.request.release();
 
+        // Set a longer receive timeout for the WebSocket — the session-level
+        // 5s timeout is too aggressive for WebSocket idle periods.  Use 60s
+        // so we don't spin on ERROR_WINHTTP_TIMEOUT between heartbeats.
+        DWORD ws_recv_timeout = 60000;
+        WinHttpSetOption(hWebSocket, WINHTTP_OPTION_RECEIVE_TIMEOUT,
+                         &ws_recv_timeout, sizeof(ws_recv_timeout));
+
         {
             std::scoped_lock lk{ws_mu_};
             ws_handle_ = hWebSocket;
@@ -329,8 +336,28 @@ void MetadataController::run_ws_poller(std::string url,
             if (err != ERROR_SUCCESS) {
                 if (err == ERROR_WINHTTP_OPERATION_CANCELLED) break;
                 if (err == ERROR_WINHTTP_TIMEOUT) continue;
+                // 4317 (0x10DD) is an undocumented WinHTTP WebSocket error
+                // that appears when the server closes the connection without
+                // a proper close frame (e.g. TCP reset or idle timeout).
+                // Treat it like a normal disconnect and reconnect.
+                if (err == 4317) {
+                    log::info("[shoutcast] ws: server closed connection (4317), reconnecting...");
+                    break;
+                }
                 log::warn("[shoutcast] ws: receive error ({}), reconnecting...", err);
                 break;
+            }
+            // Handle WebSocket close/fragment buffer types.
+            if (bufType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
+                log::info("[shoutcast] ws: server sent close frame, reconnecting...");
+                break;
+            }
+            if (bufType == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE ||
+                bufType == WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE) {
+                // Partial fragment — we'd need to accumulate, but listen.moe
+                // sends small JSON messages that fit in one frame.  Skip
+                // fragments to avoid parsing partial JSON.
+                continue;
             }
             if (bytesRead == 0) continue;
             recvBuf[bytesRead] = '\0';

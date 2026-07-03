@@ -82,6 +82,20 @@ void draw_general_settings_tab() {
         ImGui::SetTooltip("Apply EBU R128 loudness normalization (ffmpeg loudnorm filter).\nTakes effect on the next stream reconnect.");
     }
 
+    label_row("Album Art Lookup");
+    bool art_lookup = cfg.overlay.artwork_lookup_enabled;
+    if (ImGui::Checkbox("##art_lookup", &art_lookup)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.artwork_lookup_enabled = art_lookup; });
+        if (g_ctx.mgr) {
+            auto* sc = dynamic_cast<frdx::sources::ShoutcastSource*>(g_ctx.mgr->active());
+            if (sc) sc->set_artwork_lookup_enabled(art_lookup);
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON = look up per-track album art via iTunes + MusicBrainz\n"
+                          "OFF = use station logos only");
+    }
+
     label_row("Prevent Focus Pause");
     bool prevent_pause = cfg.overlay.prevent_focus_loss_pause;
     if (ImGui::Checkbox("##prevent_focus_pause", &prevent_pause)) {
