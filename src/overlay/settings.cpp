@@ -96,6 +96,17 @@ void draw_general_settings_tab() {
                           "OFF = use station logos only");
     }
 
+    label_row("Artwork Cache");
+    bool art_cache = cfg.overlay.artwork_cache_enabled;
+    if (ImGui::Checkbox("##art_cache", &art_cache)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.artwork_cache_enabled = art_cache; });
+        frdx::TextureInjector::instance().set_cache_enabled(art_cache);
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON = cache processed album art to disk for instant reload\n"
+                          "OFF = re-process every time (default)");
+    }
+
     label_row("Prevent Focus Pause");
     bool prevent_pause = cfg.overlay.prevent_focus_loss_pause;
     if (ImGui::Checkbox("##prevent_focus_pause", &prevent_pause)) {

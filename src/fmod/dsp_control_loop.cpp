@@ -291,7 +291,6 @@ void ControlLoop::push_metadata() noexcept {
         metadata_generation_ = 0;
         metadata_track_      = {};
         metadata_display_name_.clear();
-        artwork_wait_pending_ = false;
         [[maybe_unused]] auto _meta = meta_.update("Forza Radio DX", "Idle");
         return;
     }
@@ -302,7 +301,6 @@ void ControlLoop::push_metadata() noexcept {
         metadata_generation_ = 0;
         metadata_track_      = {};
         metadata_display_name_.clear();
-        artwork_wait_pending_ = false;
         [[maybe_unused]] auto _meta = meta_.update("Forza Radio DX", "Idle");
         return;
     }
@@ -316,62 +314,31 @@ void ControlLoop::push_metadata() noexcept {
             metadata_source_       = a;
             metadata_generation_   = generation;
 
-            // Start artwork download immediately so it's processing in
-            // parallel while we wait.  When the metadata source changed
-            // (station switch), always push the artwork even if the URL
-            // is the same — the previous station's artwork is still in
-            // the texture and needs to be replaced.
-            if (source_changed) current_artwork_url_.clear();
-            bool started_new_artwork = false;
+            // Start artwork download immediately.  The text is pushed
+            // right away — artwork appears whenever it's ready.
+            //
+            // Since we use a single ShoutcastSource object for all
+            // stations, the source pointer never changes.  Detect
+            // station switches via the is_placeholder flag so we always
+            // re-inject the station logo even if the URL is the same.
+            if (source_changed || metadata_track_.is_placeholder) {
+                current_artwork_url_.clear();
+            }
             if (metadata_track_.artwork_url != current_artwork_url_) {
                 current_artwork_url_ = metadata_track_.artwork_url;
                 if (!current_artwork_url_.empty() &&
                     overlay::is_tex_injection_enabled()) {
-                    TextureInjector::instance().update_artwork_url(current_artwork_url_);
-                    started_new_artwork = true;
+                    // station_logo_only stations use stretch mode (raw=true)
+                    // so the logo fills the entire texture without cropping.
+                    TextureInjector::instance().update_artwork_url(
+                        current_artwork_url_, metadata_track_.artwork_stretch);
                 }
-            }
-
-            // If we started downloading new artwork, delay pushing the
-            // track text to the game until the artwork is ready so they
-            // appear together.  If texture injection is disabled or there
-            // was no new artwork URL, push immediately.
-            if (started_new_artwork) {
-                artwork_wait_pending_  = true;
-                artwork_wait_started_  = std::chrono::steady_clock::now();
-            } else {
-                artwork_wait_pending_ = false;
             }
         } catch (...) {
             metadata_source_     = nullptr;
             metadata_generation_ = 0;
             return;
         }
-    }
-
-    // If we're waiting for artwork to finish downloading, hold the text
-    // until the artwork is fully injected into the GPU texture (or timeout
-    // after 5 seconds).
-    //
-    // Two phases must complete:
-    //   1. is_processing() — download thread finishes (pixels ready in RAM)
-    //   2. has_pending_pixels() — ECL hook copies pixels into GPU texture
-    // We must wait for BOTH, otherwise the text appears before the artwork
-    // is visible on screen.
-    if (artwork_wait_pending_) {
-        const auto now = std::chrono::steady_clock::now();
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - artwork_wait_started_).count();
-        const bool still_processing = TextureInjector::instance().is_processing();
-        const bool has_pending = TextureInjector::instance().has_pending_pixels();
-        const bool timed_out = elapsed > 5000;
-
-        if ((still_processing || has_pending) && !timed_out) {
-            // Artwork not fully injected yet — keep showing the previous
-            // track's text.  The control loop will retry on the next tick.
-            return;
-        }
-        artwork_wait_pending_ = false;
     }
 
     const std::string& title =

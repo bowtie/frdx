@@ -133,7 +133,12 @@ WinHttpConn helpers::winhttp_connect(void* shared_session, const ParsedUrl& pars
 MetadataController::MetadataController(OnMetadata on_metadata, void* winhttp_session)
     : on_metadata_(std::move(on_metadata)), winhttp_session_(winhttp_session) {}
 
-MetadataController::~MetadataController() { stop(); }
+MetadataController::~MetadataController() {
+    // Destructor races against any concurrent start()/stop() calls.  Lock
+    // the control mutex to serialize; stop_unlocked() joins the threads.
+    std::scoped_lock lk{ctrl_mu_};
+    stop_unlocked();
+}
 
 void MetadataController::notify_ffmpeg_icy_metadata(int64_t now_ms) noexcept {
     last_ffmpeg_icy_ms_.store(now_ms, std::memory_order_release);
@@ -154,8 +159,10 @@ void MetadataController::start(const std::string& stream_url,
                                const StationMetadataWebSocketSubscribe& ws_subscribe,
                                int poll_interval_secs,
                                uint64_t metadata_epoch) {
+    std::scoped_lock lk{ctrl_mu_};
+
     // 1. Stop existing producers before starting new ones.
-    stop();
+    stop_unlocked();
 
     // Reset ICY timestamps so the first response fills title/artist.
     last_icy_ms_.store(0, std::memory_order_release);
@@ -207,6 +214,11 @@ void MetadataController::start(const std::string& stream_url,
 }
 
 void MetadataController::stop() {
+    std::scoped_lock lk{ctrl_mu_};
+    stop_unlocked();
+}
+
+void MetadataController::stop_unlocked() {
     // Force-close any active WebSocket handle to unblock WinHttpWebSocketReceive.
     {
         std::scoped_lock lk{ws_mu_};

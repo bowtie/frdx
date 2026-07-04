@@ -124,6 +124,8 @@ Config load_config(const std::filesystem::path& path) {
         pick<bool>(ov, "texture_injection_enabled", cfg.overlay.texture_injection_enabled);
     cfg.overlay.artwork_lookup_enabled =
         pick<bool>(ov, "artwork_lookup_enabled", cfg.overlay.artwork_lookup_enabled);
+    cfg.overlay.artwork_cache_enabled =
+        pick<bool>(ov, "artwork_cache_enabled", cfg.overlay.artwork_cache_enabled);
 
     const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -388,6 +390,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("prevent_focus_loss_pause", cfg.overlay.prevent_focus_loss_pause);
     e.kv("texture_injection_enabled", cfg.overlay.texture_injection_enabled);
     e.kv("artwork_lookup_enabled", cfg.overlay.artwork_lookup_enabled);
+    e.kv("artwork_cache_enabled", cfg.overlay.artwork_cache_enabled);
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);

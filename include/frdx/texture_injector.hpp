@@ -42,6 +42,19 @@ public:
         data_dir_ = p;
     }
 
+    // Enable/disable the BC7 disk cache for album art.  When enabled,
+    // processed album art payloads are saved to disk so repeat plays
+    // of the same track load instantly.  Station logos are always
+    // cached (they're bundled files that only change on mod update).
+    void set_cache_enabled(bool enabled) noexcept { cache_enabled_.store(enabled, std::memory_order_release); }
+    bool cache_enabled() const noexcept { return cache_enabled_.load(std::memory_order_acquire); }
+
+    // Pre-warm the BC7 disk cache for station logos.  Scans all given
+    // logo URLs, checks if each has a valid cache entry (file content
+    // hash matches), and processes any that are missing or stale.
+    // Runs in a background thread — returns immediately.
+    void prewarm_logo_cache(const std::vector<std::string>& logo_urls);
+
     // Called by the control loop when the artwork URL changes.
     // Spawns a background thread to download + process the image.
     // When raw=true, the image is stretched to the target dimensions
@@ -51,13 +64,20 @@ public:
     void update_artwork_url(const std::string& url, bool raw = false, bool border = true);
 
     // Called by the DX12 hook to report the target texture dimensions
-    // (196x104 or 196x196) once discovered.
+    // (196x104 or 196x196) once discovered.  Packed into a single atomic
+    // to avoid a torn read of width vs height when the worker samples them
+    // at different times (e.g. during a resolution change).
     void set_target_dimensions(int w, int h) noexcept {
-        target_width_.store(w, std::memory_order_release);
-        target_height_.store(h, std::memory_order_release);
+        const uint64_t packed = (static_cast<uint64_t>(static_cast<uint32_t>(w)) << 32) |
+                                static_cast<uint32_t>(h);
+        target_dims_.store(packed, std::memory_order_release);
     }
-    int target_width() const noexcept { return target_width_.load(std::memory_order_acquire); }
-    int target_height() const noexcept { return target_height_.load(std::memory_order_acquire); }
+    int target_width() const noexcept {
+        return static_cast<int>(static_cast<uint32_t>(target_dims_.load(std::memory_order_acquire) >> 32));
+    }
+    int target_height() const noexcept {
+        return static_cast<int>(static_cast<uint32_t>(target_dims_.load(std::memory_order_acquire)));
+    }
 
     // True when a download/process job is running.
     bool is_processing() const noexcept { return processing_.load(std::memory_order_acquire); }
@@ -95,16 +115,19 @@ public:
 private:
     TextureInjector() = default;
 
-    void process_artwork(const std::string& url, uint64_t job_id, bool raw, bool border);
+    void process_artwork(const std::string& url, uint64_t job_id, bool raw, bool border,
+                         bool prewarm = false);
 
-    // BC7 disk cache: keyed by URL hash + dimensions.  After the first
-    // download+texconv pass, the BC7 payloads are saved to disk so
-    // subsequent requests for the same URL are instant (no download,
-    // no texconv).  This is especially useful for station logos which
-    // are the same URL every time.
-    bool try_load_cache(const std::string& url, int target_w, int target_h,
+    // BC7 disk cache: keyed by URL hash + file content hash (for local
+    // files) + dimensions.  The file content hash ensures that when a
+    // bundled logo is updated (mod update), the cache is invalidated
+    // and the logo is reprocessed.
+    static uint64_t compute_file_hash(const std::filesystem::path& path);
+    bool try_load_cache(const std::string& url, uint64_t file_hash,
+                        int target_w, int target_h, bool raw,
                         std::vector<PixelVariant>& out_variants);
-    void save_cache(const std::string& url, const std::vector<PixelVariant>& variants);
+    void save_cache(const std::string& url, uint64_t file_hash,
+                    bool raw, const std::vector<PixelVariant>& variants);
 
     std::mutex mtx_;
     helper::WorkerClient* worker_ = nullptr;
@@ -118,11 +141,11 @@ private:
     std::vector<PixelVariant> last_variants_;  // cache for reinject_last()
     bool has_new_image_ = false;
 
-    std::atomic<int> target_width_{0};
-    std::atomic<int> target_height_{0};
+    std::atomic<uint64_t> target_dims_{0};
     std::atomic<bool> processing_{false};
     std::atomic<bool> has_pending_pixels_{false};
     std::atomic<uint64_t> latest_job_id_{0};
+    std::atomic<bool> cache_enabled_{false};
 };
 
 } // namespace frdx

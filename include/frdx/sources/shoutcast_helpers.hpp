@@ -115,6 +115,24 @@ inline std::string sanitize_brackets(std::string s) {
             const char r  = cjk_replace[b2];
             if (r != 0) { *dst++ = r; src += 3; continue; }
         }
+        // Fullwidth → ASCII: U+FF01–U+FF5E maps to U+0021–U+007E.
+        // UTF-8: 0xEF 0xBC 0x81 … 0xEF 0xBD 0x9E
+        // 0xBC range: U+FF01–U+FF3F  → 0x21–0x5F
+        // 0xBD range: U+FF40–U+FF5E  → 0x60–0x7E
+        if (c == 0xEF && src + 3 <= end) {
+            const auto b2 = static_cast<unsigned char>(*(src + 1));
+            const auto b3 = static_cast<unsigned char>(*(src + 2));
+            if (b2 == 0xBC && b3 >= 0x81 && b3 <= 0xBF) {
+                *dst++ = static_cast<char>(b3 - 0x81 + 0x21);
+                src += 3;
+                continue;
+            }
+            if (b2 == 0xBD && b3 >= 0x80 && b3 <= 0x9E) {
+                *dst++ = static_cast<char>(b3 - 0x80 + 0x60);
+                src += 3;
+                continue;
+            }
+        }
         *dst++ = *src++;
     }
     s.resize(static_cast<std::size_t>(dst - s.data()));

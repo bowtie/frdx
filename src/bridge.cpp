@@ -228,6 +228,7 @@ void run_bridge(HMODULE self) noexcept {
     auto shoutcast = std::make_unique<sources::ShoutcastSource>(resolved_cfg.shoutcast);
     shoutcast->set_volume_normalization(cfg.audio.volume_normalization);
     shoutcast->set_artwork_lookup_enabled(cfg.overlay.artwork_lookup_enabled);
+    TextureInjector::instance().set_cache_enabled(cfg.overlay.artwork_cache_enabled);
 
     // Now start the deps worker — the callback re-resolves ffmpeg and
     // updates the source's config. Also updates the TextureInjector's
@@ -292,6 +293,27 @@ void run_bridge(HMODULE self) noexcept {
     }
 
     if (!mgr.active()) log::info("[bridge] shoutcast disabled — no active source");
+
+    // Pre-warm the BC7 cache for all station logos.  This runs texconv
+    // on each logo at startup (in a background thread) so that station
+    // switches are instant instead of waiting ~2-3s for the first
+    // processing pass.  Logos that are already cached (matching file
+    // content hash) are skipped.
+    if (shoutcast && !texconv_path.empty()) {
+        std::vector<std::string> logo_urls;
+        for (const auto& st : shoutcast->stations()) {
+            for (const auto& str : st.streams) {
+                if (!str.artwork_url.empty())
+                    logo_urls.push_back(str.artwork_url);
+            }
+            if (!st.metadata.static_artwork_url.empty())
+                logo_urls.push_back(st.metadata.static_artwork_url);
+        }
+        // Deduplicate
+        std::sort(logo_urls.begin(), logo_urls.end());
+        logo_urls.erase(std::unique(logo_urls.begin(), logo_urls.end()), logo_urls.end());
+        TextureInjector::instance().prewarm_logo_cache(logo_urls);
+    }
 
     fmod_bridge::DSPBridge bridge{mgr, fns};
     bridge.set_gain(cfg.audio.output_gain);

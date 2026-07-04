@@ -12,6 +12,8 @@ struct TrackInfo {
     std::string artist;
     std::string artwork_url;  // URL for cover art / album art (empty = no artwork)
     uint64_t position_ms = 0;
+    bool artwork_stretch = false;  // true = stretch to fill texture (station logos), false = cover-fit crop (album art)
+    bool is_placeholder = false;   // true = station name placeholder (not real track metadata from poller)
 };
 
 enum class PlaybackState { stopped, playing, paused, buffering };

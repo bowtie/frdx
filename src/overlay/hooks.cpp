@@ -319,7 +319,8 @@ void post_resize(IDXGISwapChain* swapChain) {
     // PSOs/root signature survive and are reused).
     resize_backdrop_blur(desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
 
-    re_log::info("recovered DX12 backbuffer RTV resources after resize");
+    re_log::info("recovered DX12 backbuffer RTV resources after resize ({}x{})",
+                 desc.BufferDesc.Width, desc.BufferDesc.Height);
 }
 
 ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
@@ -539,6 +540,21 @@ void cleanup_imgui_resources() {
 
 static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     if (!pSwapChain || !active_queue) return false;
+
+    // Detect swap chain change: the game may create a new swap chain
+    // when changing resolution (e.g. DLDSR) instead of calling
+    // ResizeBuffers.  When this happens, our fb_bufs/fb_rtvs still
+    // reference the old swap chain's backbuffers.  Reinitialize.
+    static IDXGISwapChain* s_current_swapchain = nullptr;
+    if (g_ui.is_init && s_current_swapchain && s_current_swapchain != pSwapChain) {
+        re_log::info("swap chain changed (0x{:X} -> 0x{:X}); reinitializing overlay",
+                     reinterpret_cast<uintptr_t>(s_current_swapchain),
+                     reinterpret_cast<uintptr_t>(pSwapChain));
+        cleanup_imgui_resources();
+        g_ui.is_init = false;
+        s_current_swapchain = nullptr;
+    }
+
     if (!g_ui.is_init) {
         // Acquire a shared reference to the host's ID3D12Device via the
         // swapchain.  GetDevice() AddRef's — this is the same COM object
@@ -555,6 +571,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             if (init_imgui(pSwapChain, active_queue)) {
                 ApplyTheme(g_ui.theme_idx);
                 g_ui.is_init                   = true;
+                s_current_swapchain            = pSwapChain;
                 ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
                 re_log::info(
                     "Direct3D 12 Dear ImGui Overlay context initialized successfully!");

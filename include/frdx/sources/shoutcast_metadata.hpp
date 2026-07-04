@@ -69,6 +69,7 @@ public:
                uint64_t metadata_epoch);
 
     // Stop all background poller threads.  Blocks until they've joined.
+    // Public wrapper is thread-safe; internal stop_unlocked() does the work.
     void stop();
 
     // ── Configuration ───────────────────────────────────────────────
@@ -87,6 +88,9 @@ public:
     void notify_icy_metadata(int64_t now_ms) noexcept;
 
 private:
+    // Internal stop without locking — caller must hold ctrl_mu_.
+    void stop_unlocked();
+
     // ── Poller thread bodies ─────────────────────────────────────────
     void run_icy_poller(const std::string& stream_url, uint64_t metadata_epoch,
                         const std::stop_token& stop);
@@ -116,6 +120,11 @@ private:
     // ── State ────────────────────────────────────────────────────────
     OnMetadata on_metadata_;
     void* winhttp_session_;
+
+    // Serializes public start() / stop() calls.  Without this, two threads
+    // (e.g. overlay station switch + control-loop on_radio_audible) can
+    // race on the jthread members and double-join or corrupt state.
+    std::mutex ctrl_mu_;
 
     mutable std::mutex ws_mu_;
     void* ws_handle_ = nullptr;  // active WebSocket handle for forced close

@@ -70,6 +70,11 @@ struct OverlayConfig {
     // via iTunes Search and MusicBrainz/Cover Art Archive.  When false,
     // only station logos (static_artwork_url) are used.
     bool artwork_lookup_enabled = true;
+    // When true, processed album art BC7 payloads are cached to disk so
+    // repeat plays of the same track load instantly.  Disabled by default
+    // to avoid stale-cache issues.  Only applies to album art (not
+    // station logos).
+    bool artwork_cache_enabled = false;
 };
 
 struct DualSenseConfig {

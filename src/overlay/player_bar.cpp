@@ -4,6 +4,7 @@
 #include "frdx/config_store.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
+#include "frdx/texture_injector.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -324,6 +325,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         g_ui.combo_switch_dir = -1;
         animate_station_combo_by(-1);
         enqueue_action([active] {
+            TextureInjector::instance().reinject_last();
             active->previous();
             save_active_shoutcast_station(active);
             g_ctx.mgr->ring().drain();
@@ -346,6 +348,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         g_ui.combo_switch_dir = 1;
         animate_station_combo_by(1);
         enqueue_action([active] {
+            TextureInjector::instance().reinject_last();
             active->next();
             save_active_shoutcast_station(active);
             g_ctx.mgr->ring().drain();

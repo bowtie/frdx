@@ -646,6 +646,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
                 info_        = TrackInfo{};
                 info_.title  = station_name;
                 info_.artist = stream_name;
+                info_.is_placeholder = true;
             }
             info_.artwork_url = artwork_url;
             info_gen_.fetch_add(1, std::memory_order_release);
@@ -715,28 +716,39 @@ void ShoutcastSource::cycle_preset(int direction) {
 
 void ShoutcastSource::start_pipe_locked() {
     stop_pipe_locked();
-    // Always reset display state so stale metadata doesn't persist when
-    // returning to the station list or selecting a new station.
-    info_         = TrackInfo{};
-    info_.artist  = "Select a station";
     const auto metadata_epoch = reset_metadata_sync_locked();
-    info_gen_.fetch_add(1, std::memory_order_release);
     display_name_ = "Online Radio";
     display_name_gen_.fetch_add(1, std::memory_order_release);
-    if (target_url_.empty()) return;
+
+    // Default display state until restore_station_display_locked() finds a station.
+    info_ = TrackInfo{};
+    info_.artist = "Select a station";
+
+    if (target_url_.empty()) {
+        // No stream to play — publish the cleared state.
+        info_gen_.fetch_add(1, std::memory_order_release);
+        return;
+    }
 
     // Delegate the heavy pipe creation to the shared static helper.
     auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path,
                                            volume_norm_.load(std::memory_order_acquire));
-    if (!pipe_result) return;
+    if (!pipe_result) {
+        info_gen_.fetch_add(1, std::memory_order_release);
+        return;
+    }
 
     (*pipe_result)->metadata_epoch = metadata_epoch;
     pipe_.store(std::shared_ptr<Pipe>(std::move(*pipe_result)),
                 std::memory_order_release);
 
-    // Set initial display metadata from the active station before real
-    // track info arrives from the background poller / ICY parser.
+    // restore_station_display_locked() overwrites info_ and bumps info_gen_
+    // if it finds the active station.  If it doesn't (e.g. legacy preset mode),
+    // the default "Select a station" remains and we bump here.
     restore_station_display_locked();
+    if (info_.artist == "Select a station" && info_.title.empty()) {
+        info_gen_.fetch_add(1, std::memory_order_release);
+    }
     position_ms_.store(0, std::memory_order_release);
     state_.store(PlaybackState::buffering, std::memory_order_release);
 
@@ -757,6 +769,7 @@ void ShoutcastSource::restore_station_display_locked() {
         display_name_gen_.fetch_add(1, std::memory_order_release);
         info_.artist.clear();
         info_.artwork_url.clear();
+        info_.is_placeholder = true;
         for (const auto& str : st.streams) {
             if (str.id == active_stream_id_) {
                 info_.artist = str.name;
@@ -764,6 +777,15 @@ void ShoutcastSource::restore_station_display_locked() {
                 break;
             }
         }
+        if (st.metadata.type == "static") {
+            info_.title =
+                st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
+            info_.artist = st.metadata.static_artist;
+            metadata_epoch_has_track_ = true;
+        }
+        // Station logo fallback for any metadata type.
+        if (info_.artwork_url.empty())
+            info_.artwork_url = st.metadata.static_artwork_url;
         clear_pending_metadata_locked();
         info_gen_.fetch_add(1, std::memory_order_release);
         return;
@@ -771,12 +793,22 @@ void ShoutcastSource::restore_station_display_locked() {
 }
 
 void ShoutcastSource::play() {
+    bool started_pipe = false;
     bool has_pipe = false;
     {
         frdx::ScopedLock lk{mu_};
         drain_pending_ = true;
-        if (!pipe_.load(std::memory_order_acquire)) start_pipe_locked();
-        restore_station_display_locked();
+        if (!pipe_.load(std::memory_order_acquire)) {
+            start_pipe_locked();
+            started_pipe = true;
+        }
+        // If start_pipe_locked() didn't run (pipe already existed) or failed to
+        // set a station display (no active station), make sure the display is
+        // refreshed.  Avoid double-bumping info_gen_ when start_pipe_locked()
+        // already called restore_station_display_locked().
+        if (!started_pipe) {
+            restore_station_display_locked();
+        }
         has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
     } // mu_ released before poller restart to avoid deadlock
     // Restart the metadata poller — pause() stops it, so unpausing needs to
@@ -805,24 +837,31 @@ void ShoutcastSource::pause() {
 }
 
 void ShoutcastSource::on_radio_audible(bool audible) {
-    frdx::ScopedLock lk{mu_};
-    if (audible == audible_) return;
-    audible_ = audible;
-    if (audible) {
-        // Radio became audible again (exited pause menu, etc).
-        // Reconnect to the live stream and drain stale buffered audio.
-        log::info("[shoutcast] radio audible -- reconnecting to live stream");
-        drain_pending_ = true;
-        start_pipe_locked();
+    bool should_restart_metadata = false;
+    {
+        frdx::ScopedLock lk{mu_};
+        if (audible == audible_) return;
+        audible_ = audible;
+        if (audible) {
+            // Radio became audible again (exited pause menu, etc).
+            // Reconnect to the live stream and drain stale buffered audio.
+            log::info("[shoutcast] radio audible -- reconnecting to live stream");
+            drain_pending_ = true;
+            start_pipe_locked();
+            should_restart_metadata = true;
+        } else {
+            // Radio became inaudible (pause menu, rewind, etc).
+            // Kill the ffmpeg pipe to stop buffering — otherwise the live
+            // stream keeps filling the ring buffer while paused, and when
+            // resumed it plays from the stale buffer position, causing the
+            // audio to drift behind the live feed and metadata to desync.
+            log::info("[shoutcast] radio inaudible -- disconnecting stream");
+            stop_pipe_locked();
+        }
+    }
+    // restart_metadata_for_current() requires mu_ to be free (FRDX_EXCLUDES).
+    if (should_restart_metadata) {
         restart_metadata_for_current();
-    } else {
-        // Radio became inaudible (pause menu, rewind, etc).
-        // Kill the ffmpeg pipe to stop buffering — otherwise the live
-        // stream keeps filling the ring buffer while paused, and when
-        // resumed it plays from the stale buffer position, causing the
-        // audio to drift behind the live feed and metadata to desync.
-        log::info("[shoutcast] radio inaudible -- disconnecting stream");
-        stop_pipe_locked();
     }
 }
 
@@ -835,35 +874,16 @@ void ShoutcastSource::cycle_and_restart(int direction) {
         cycle_preset(direction);
         if (audible_) {
             start_pipe_locked();
+        } else {
+            // Not audible: update the display info so the station name is
+            // ready when the UI comes back, but don't start the pipe yet.
+            restore_station_display_locked();
         }
         // Always clear pending timed metadata on station swap — the
         // previous station's pending track info is stale and should
         // never be applied to the new station.
         clear_pending_metadata_locked();
         metadata_epoch_has_track_ = false;
-        // Handle static metadata from new station + artwork URL.
-        for (const auto& st : stations_) {
-            if (st.id == active_station_id_) {
-                info_.artwork_url.clear();
-                for (const auto& str : st.streams) {
-                    if (str.id == active_stream_id_) {
-                        info_.artwork_url = str.artwork_url;
-                        break;
-                    }
-                }
-                if (st.metadata.type == "static") {
-                    info_.title =
-                        st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
-                    info_.artist = st.metadata.static_artist;
-                    metadata_epoch_has_track_ = true;
-                    info_gen_.fetch_add(1, std::memory_order_release);
-                }
-                // Station logo fallback for any metadata type.
-                if (info_.artwork_url.empty())
-                    info_.artwork_url = st.metadata.static_artwork_url;
-                break;
-            }
-        }
         has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
         station_selected_ms_ = steady_ms();
     } // mu_ released before poller stop/start
@@ -943,8 +963,18 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
         }
     }
     // station_logo_only: always use the station logo, ignore poller art
-    // and skip iTunes/MusicBrainz lookup entirely.
+    // and skip iTunes/MusicBrainz lookup entirely.  The logo is stretched
+    // to fill the entire texture (no cover-fit cropping) since station
+    // logos are pre-sized to match the texture dimensions.
     if (logo_only) {
+        info_.artwork_url.clear();
+        info_.artwork_stretch = true;
+        prefer_itunes = false;
+    }
+    // When artwork lookup is disabled, ignore the poller-provided
+    // artwork_url too — only use the station logo (static_artwork_url).
+    const bool artwork_lookup_on = artwork_lookup_enabled_.load(std::memory_order_acquire);
+    if (!artwork_lookup_on && !logo_only) {
         info_.artwork_url.clear();
         prefer_itunes = false;
     }
@@ -971,8 +1001,7 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
             info_.artwork_url.clear();
         }
     }
-    const bool artwork_lookup_on = artwork_lookup_enabled_.load(std::memory_order_acquire);
-    bool needs_itunes_lookup = (info_.artwork_url.empty() || prefer_itunes) && artwork_lookup_on;
+    bool needs_itunes_lookup = !logo_only && (info_.artwork_url.empty() || prefer_itunes) && artwork_lookup_on;
     if (prefer_itunes && artwork_lookup_on && !info_.artwork_url.empty()) {
         info_.artwork_url.clear();
     }
@@ -1279,17 +1308,32 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 if (line.empty()) continue;
 
                 if (auto title = extract_stream_title(line)) {
-                    const auto dash = title->find(" - ");
                     std::string logged_artist;
                     std::string logged_title;
                     const auto now_ms = steady_ms();
                     bool accepted = false;
                     {
                         frdx::ScopedLock lk{mu_};
+                        // Use the active station's split_separator if
+                        // configured, otherwise fall back to " - ".
+                        std::string sep = " - ";
+                        for (const auto& st : stations_) {
+                            if (st.id == active_station_id_) {
+                                if (!st.metadata.mapping.split_separator.empty())
+                                    sep = st.metadata.mapping.split_separator;
+                                break;
+                            }
+                        }
                         TrackInfo queued;
-                        if (dash != std::string::npos) {
-                            queued.artist = title->substr(0, dash);
-                            queued.title  = title->substr(dash + 3);
+                        auto pos = title->rfind(sep);
+                        if (pos != std::string::npos) {
+                            queued.artist = title->substr(0, pos);
+                            queued.title  = title->substr(pos + sep.size());
+                            // Trim whitespace
+                            while (!queued.artist.empty() && queued.artist.back() == ' ')
+                                queued.artist.pop_back();
+                            while (!queued.title.empty() && queued.title.front() == ' ')
+                                queued.title.erase(0, 1);
                         } else {
                             queued.artist = display_name_;
                             queued.title  = std::move(*title);
