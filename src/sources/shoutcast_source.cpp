@@ -317,6 +317,7 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
             sp.metadata.static_artist = m.value("artist", "");
             sp.metadata.static_artwork_url = m.value("cover_url", "");
             sp.metadata.prefer_itunes_lookup = m.value("prefer_itunes_lookup", false);
+            sp.metadata.station_logo_only = m.value("station_logo_only", false);
             // WebSocket metadata (type == "websocket").
             if (m.contains("message_filter")) {
                 const auto& mf                   = m["message_filter"];
@@ -931,13 +932,21 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
     // URL and use iTunes/MusicBrainz instead (some stations provide a
     // station logo as artwork rather than per-track art).
     bool prefer_itunes = false;
+    bool logo_only = false;
     if (!active_station_id_.empty()) {
         for (const auto& st : stations_) {
             if (st.id == active_station_id_) {
                 prefer_itunes = st.metadata.prefer_itunes_lookup;
+                logo_only = st.metadata.station_logo_only;
                 break;
             }
         }
+    }
+    // station_logo_only: always use the station logo, ignore poller art
+    // and skip iTunes/MusicBrainz lookup entirely.
+    if (logo_only) {
+        info_.artwork_url.clear();
+        prefer_itunes = false;
     }
     // Detect sentinel/null artwork URLs that some stations return when
     // there's no cover (e.g. listen.moe returns "https://cdn.listen.moe/covers/null").

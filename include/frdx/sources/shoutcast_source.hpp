@@ -103,6 +103,9 @@ struct StationMetadata {
     // use iTunes/MusicBrainz lookup for per-track art. Useful for stations
     // whose WS provides a station logo instead of per-track artwork.
     bool prefer_itunes_lookup = false;
+    // When true, always use the station logo (static_artwork_url) and skip
+    // both poller-provided artwork and iTunes/MusicBrainz lookup.
+    bool station_logo_only = false;
 };
 
 struct StationPreset {

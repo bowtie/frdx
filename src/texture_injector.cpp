@@ -132,21 +132,18 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     // / station logos), not raw debug injection.
     if (!raw) {
         int cached_w = target_width_.load(std::memory_order_acquire);
-        int cached_h = target_height_.load(std::memory_order_acquire);
         if (cached_w == 0) cached_w = 196;
-        if (cached_h == 0) cached_h = 104;
 
+        // Always cache/load the square variant.
         std::vector<PixelVariant> cached_variants;
-        // Try to load both variants from cache.
         bool cache_hit = try_load_cache(url, cached_w, cached_w, cached_variants);
-        cache_hit = try_load_cache(url, cached_w, cached_h, cached_variants) && cache_hit;
 
-        if (cache_hit && cached_variants.size() >= 2) {
+        if (cache_hit && !cached_variants.empty()) {
             if (job_id != latest_job_id_.load(std::memory_order_acquire)) {
                 cleanup();
                 return;
             }
-            log::info("[texinject] cache hit for {} ({} variants)", url, cached_variants.size());
+            log::info("[texinject] cache hit for {} ({} variant)", url, cached_variants.size());
             {
                 std::lock_guard lk{pixels_mtx_};
                 pending_variants_ = std::move(cached_variants);
@@ -258,18 +255,23 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
 
     // ── Step 3: Determine target dimensions + artwork square size ──
     // The game creates the radio HUD texture at a size proportional to
-    // the display resolution: 196x104/196x196 at 1080p, 164x81 at
-    // 1600x900, etc.  The artwork occupies the left ~49% of the texture
-    // width (96px of 196px at 1080p).  We read the discovered target
-    // dimensions and compute the artwork square proportionally.
+    // the display resolution: 196x104/196x196 at 1080p, 392x208/392x392
+    // at 4K.  We always produce the SQUARE variant (196x196 or 392x392)
+    // and let the injection code crop it to each target's actual height
+    // via srcBox.  This matches the fh6-universal-radio approach: one
+    // payload, injected into all matching textures with height cropping.
     int target_w = target_width_.load(std::memory_order_acquire);
     int target_h = target_height_.load(std::memory_order_acquire);
     // Default to 1080p dimensions if not yet discovered
     if (target_w == 0) target_w = 196;
     if (target_h == 0) target_h = 104;
 
+    // Always use the square dimension for the payload.
+    const int square_w = target_w;
+    const int square_h = target_w;  // square = width == height
+
     // Artwork square: ~49% of the texture width (96/196 at 1080p)
-    const int kSquareSize = (target_w * 96 + 98) / 196;  // rounded
+    const int kSquareSize = (square_w * 96 + 98) / 196;  // rounded
 
     if (!std::filesystem::exists(texconv_path, ec)) {
         log::warn("[texinject] texconv.exe not found at {}; skipping BC7 compression",
@@ -278,13 +280,10 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         return;
     }
 
-    // Build target variants for both square and wide formats at the
-    // discovered resolution.  The square variant has height = width;
-    // the wide variant uses the discovered height.
+    // Single square variant — the injection code crops via srcBox.
     struct TargetDim { int w, h; };
     const TargetDim targets[] = {
-        {target_w, target_w},      // square
-        {target_w, target_h},      // wide
+        {square_w, square_h},
     };
 
     std::vector<PixelVariant> variants;

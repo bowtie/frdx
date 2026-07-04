@@ -185,42 +185,14 @@ void set_tex_injection_enabled(bool enabled) noexcept {
 }
 
 void set_radio_active(bool active) noexcept {
-    const bool was_active = g_radio_active.exchange(active, std::memory_order_acq_rel);
-    if (was_active && !active) {
-        // Radio just turned off.  Don't clear g_streamer_mode — the
-        // g_radio_active flag already gates injection (see
-        // process_texture_injection_impl), and clearing the tracked
-        // textures here is catastrophic when the control loop's
-        // staleness watchdog rapidly toggles radio off→on: the game
-        // doesn't re-issue CreateSRV calls for existing placeholder
-        // textures, so g_streamer_mode stays empty forever and
-        // injection never recovers.
-        //
-        // However, the game may repurpose the same texture resource for
-        // the radio-off icon.  Mark textures as needing re-fingerprinting
-        // so that when the radio turns back on, we verify they're still
-        // placeholders before injecting.  Also clear any pending pixels
-        // so stale artwork doesn't get injected into a repurposed texture.
-        std::lock_guard lk{g_tex_mutex};
-        if (!g_streamer_mode.empty()) {
-            // Move fingerprinted textures back to unverified for re-checking.
-            // Reset first_seen so the 2s fingerprint delay and 5s cleanup
-            // timeout are measured from this transition, not from the
-            // original detection (which could be minutes ago).
-            auto now = std::chrono::steady_clock::now();
-            size_t moved = 0;
-            for (auto& tt : g_streamer_mode) {
-                tt.first_seen = now;
-                g_unverified.push_back(std::move(tt));
-                moved++;
-            }
-            g_streamer_mode.clear();
-            g_tex_work_pending.store(!g_unverified.empty(), std::memory_order_release);
-            log::info("[texinject] radio turned off; moved {} texture(s) to re-fingerprint", moved);
-        } else {
-            log::info("[texinject] radio turned off; no tracked textures to move");
-        }
-    }
+    g_radio_active.store(active, std::memory_order_release);
+    // Intentionally do NOT touch g_streamer_mode or pending pixels here.
+    // The fh6-universal-radio approach keeps textures tracked across
+    // radio on/off transitions — the game reuses the same texture
+    // resource, and clearing our tracking would make injection
+    // unrecoverable (the game doesn't re-issue CreateSRV for existing
+    // placeholders).  Injection is now unconditional (not gated on
+    // g_radio_active), so there's no need to clear anything.
 }
 
 // ── FNV-1a hash for BC7 pitched data ──
@@ -435,8 +407,11 @@ bool try_complete_fingerprint(PendingFingerprint& pf, bool& out_is_placeholder) 
         // (streamer mode logo, modified icon) at fixed dimensions; their
         // FNV-1a hashes are known constants.  No uniqueness heuristic —
         // that was catching unrelated UI elements with simple graphics.
+        //
+        // Note: kPlaceholderHash196x104Alt is intentionally NOT matched —
+        // it's a separate radio HUD element (not the album art area) that
+        // we don't want to overwrite.
         out_is_placeholder = (hash == TextureInjector::kPlaceholderHash196x104 ||
-                              hash == TextureInjector::kPlaceholderHash196x104Alt ||
                               hash == TextureInjector::kPlaceholderHash196x196 ||
                               hash == TextureInjector::kPlaceholderHash392x208 ||
                               hash == TextureInjector::kPlaceholderHash392x392);
@@ -465,67 +440,54 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
     if (g_streamer_mode.empty()) return false;
 
     __try {
-        // Index variants by (width, height) for quick lookup per target texture
-        std::unordered_map<uint32_t, const TextureInjector::PixelVariant*> variant_map;
-        for (const auto& v : variants) {
-            variant_map[static_cast<uint32_t>(v.width) | (static_cast<uint32_t>(v.height) << 16)] = &v;
+        // Single square variant — the source payload.
+        const auto& variant = variants[0];
+        UINT blocksX = (variant.width + 3) / 4;
+        UINT blocksY = (variant.height + 3) / 4;
+        UINT tightRowPitch = blocksX * 16;
+        UINT alignedRowPitch = (tightRowPitch + 255) & ~255;
+        UINT uploadSize = alignedRowPitch * blocksY;
+
+        // Create one upload buffer for the square payload.
+        D3D12_HEAP_PROPERTIES uploadHeap{};
+        uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC uploadDesc{};
+        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        uploadDesc.Width = uploadSize;
+        uploadDesc.Height = 1;
+        uploadDesc.DepthOrArraySize = 1;
+        uploadDesc.MipLevels = 1;
+        uploadDesc.SampleDesc.Count = 1;
+        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        wil::com_ptr<ID3D12Resource> pUpload;
+        if (FAILED(pDevice->CreateCommittedResource(
+                &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                IID_PPV_ARGS(pUpload.put())))) {
+            return false;
         }
 
-        // Create one upload buffer per variant dimension
-        struct UploadBuf {
-            wil::com_ptr<ID3D12Resource> upload;
-            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
-        };
-        std::unordered_map<uint32_t, UploadBuf> upload_bufs;
-
-        for (const auto& [key, variant] : variant_map) {
-            UINT blocksX = (variant->width + 3) / 4;
-            UINT blocksY = (variant->height + 3) / 4;
-            UINT tightRowPitch = blocksX * 16;
-            UINT alignedRowPitch = (tightRowPitch + 255) & ~255;
-            UINT uploadSize = alignedRowPitch * blocksY;
-
-            D3D12_HEAP_PROPERTIES uploadHeap{};
-            uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
-            D3D12_RESOURCE_DESC uploadDesc{};
-            uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-            uploadDesc.Width = uploadSize;
-            uploadDesc.Height = 1;
-            uploadDesc.DepthOrArraySize = 1;
-            uploadDesc.MipLevels = 1;
-            uploadDesc.SampleDesc.Count = 1;
-            uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-            UploadBuf ub;
-            if (FAILED(pDevice->CreateCommittedResource(
-                    &uploadHeap, D3D12_HEAP_FLAG_NONE, &uploadDesc,
-                    D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                    IID_PPV_ARGS(ub.upload.put())))) {
-                return false;
-            }
-
-            uint8_t* pMapped = nullptr;
-            if (FAILED(ub.upload->Map(0, nullptr, reinterpret_cast<void**>(&pMapped)))) {
-                return false;
-            }
-            for (UINT y = 0; y < blocksY; ++y) {
-                std::memcpy(pMapped + (y * alignedRowPitch),
-                            variant->pixels.data() + (y * tightRowPitch),
-                            tightRowPitch);
-            }
-            ub.upload->Unmap(0, nullptr);
-
-            ub.srcLoc.pResource = ub.upload.get();
-            ub.srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            ub.srcLoc.PlacedFootprint.Offset = 0;
-            ub.srcLoc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_BC7_UNORM;
-            ub.srcLoc.PlacedFootprint.Footprint.Width = variant->width;
-            ub.srcLoc.PlacedFootprint.Footprint.Height = variant->height;
-            ub.srcLoc.PlacedFootprint.Footprint.Depth = 1;
-            ub.srcLoc.PlacedFootprint.Footprint.RowPitch = alignedRowPitch;
-
-            upload_bufs[key] = std::move(ub);
+        uint8_t* pMapped = nullptr;
+        if (FAILED(pUpload->Map(0, nullptr, reinterpret_cast<void**>(&pMapped)))) {
+            return false;
         }
+        for (UINT y = 0; y < blocksY; ++y) {
+            std::memcpy(pMapped + (y * alignedRowPitch),
+                        variant.pixels.data() + (y * tightRowPitch),
+                        tightRowPitch);
+        }
+        pUpload->Unmap(0, nullptr);
+
+        D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+        srcLoc.pResource = pUpload.get();
+        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        srcLoc.PlacedFootprint.Offset = 0;
+        srcLoc.PlacedFootprint.Footprint.Format = DXGI_FORMAT_BC7_UNORM;
+        srcLoc.PlacedFootprint.Footprint.Width = variant.width;
+        srcLoc.PlacedFootprint.Footprint.Height = variant.height;
+        srcLoc.PlacedFootprint.Footprint.Depth = 1;
+        srcLoc.PlacedFootprint.Footprint.RowPitch = alignedRowPitch;
 
         // Create command allocator + list
         wil::com_ptr<ID3D12CommandAllocator> pAlloc;
@@ -540,7 +502,9 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             return false;
         }
 
-        // Copy matching variant into each target texture
+        // Inject into ALL tracked textures, using srcBox to crop the
+        // square payload to each target's actual height.  This matches
+        // the fh6-universal-radio approach: one payload, all textures.
         int injected_count = 0;
         for (auto& tt : g_streamer_mode) {
             if (!tt.resource) continue;
@@ -557,12 +521,17 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             }
 
             D3D12_RESOURCE_DESC desc = tt.resource->GetDesc();
-            uint32_t key = static_cast<uint32_t>(desc.Width) |
-                           (static_cast<uint32_t>(desc.Height) << 16);
-            auto it = upload_bufs.find(key);
-            if (it == upload_bufs.end()) continue;  // no matching variant
 
-            const auto& ub = it->second;
+            // Crop the source to the target's dimensions via srcBox.
+            D3D12_BOX srcBox{};
+            srcBox.left = 0;
+            srcBox.top = 0;
+            srcBox.front = 0;
+            srcBox.right = std::min<UINT>(static_cast<UINT>(desc.Width),
+                                          static_cast<UINT>(variant.width));
+            srcBox.bottom = std::min<UINT>(desc.Height,
+                                           static_cast<UINT>(variant.height));
+            srcBox.back = 1;
 
             TEX_TRACE_OP(3, tt.resource.get()); // barrier
             D3D12_RESOURCE_BARRIER barrier{};
@@ -579,7 +548,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             dstLoc.SubresourceIndex = 0;
 
-            pCmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &ub.srcLoc, nullptr);
+            pCmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
 
             TEX_TRACE_OP(3, tt.resource.get()); // barrier back
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
@@ -607,8 +576,8 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
         CloseHandle(event);
 
         TEX_TRACE_OP(0, nullptr); // idle
-        log::info("[texinject] injected BC7 into {} texture(s) ({} variants)",
-                  injected_count, variants.size());
+        log::info("[texinject] injected BC7 into {} texture(s) (1 variant {}x{})",
+                  injected_count, variant.width, variant.height);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         const DWORD code = GetExceptionCode();
@@ -848,20 +817,13 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
     } // end if (fingerprint_due)
 
     // ── Injection section (every frame when pixels are pending) ──
-    // Only inject when the radio is active — when the radio is off, the
-    // game may have destroyed the target textures, and writing to stale
-    // resources causes GPU crashes (TDR).
-    //
-    // Don't pop the pending pixels until we know there's a fingerprinted
-    // target to inject into. Artwork can finish downloading/processing
-    // before the placeholder texture has been (re-)fingerprinted -- e.g.
-    // right after a channel rebuild clears g_streamer_mode, which happens
-    // routinely during normal track transitions (see ControlLoop's
-    // staleness watchdog) -- and popping unconditionally would consume the
-    // pending image and silently drop it forever, since nothing re-queues
-    // it. Leaving it pending lets the next tick retry once fingerprinting
-    // catches up.
-    if (g_radio_active.load(std::memory_order_acquire)) {
+    // Inject unconditionally — the game doesn't re-upload the placeholder
+    // every frame, so one injection persists.  Don't pop the pending
+    // pixels until we know there's a fingerprinted target to inject into;
+    // artwork can finish processing before the placeholder has been
+    // fingerprinted (e.g. right after UI reload), and popping
+    // unconditionally would silently drop the image.
+    {
         bool have_target = false;
         {
             std::lock_guard lk{g_tex_mutex};
