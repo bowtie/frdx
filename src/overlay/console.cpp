@@ -69,12 +69,25 @@ void draw_console_window() {
         return;
     }
 
+    const float ui_s    = g_ui.ui_scale;
     auto* viewport       = ImGui::GetMainViewport();
     const ImVec2 vp_pos  = viewport->WorkPos;
     const ImVec2 vp_size = viewport->WorkSize;
-    const ImVec2 size(std::min(760.0f, vp_size.x - 32.0f), std::min(360.0f, vp_size.y - 80.0f));
-    ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f, vp_pos.y + vp_size.y - 16.0f),
-                            ImGuiCond_FirstUseEver, ImVec2(1.0f, 1.0f));
+    const ImVec2 size(std::min(760.0f * ui_s, vp_size.x - 32.0f * ui_s),
+                      std::min(360.0f * ui_s, vp_size.y - 80.0f * ui_s));
+    // Track the console's last known position to detect when it's off-screen
+    // (e.g. after resolution change shrank the viewport).  If so, force
+    // repositioning to the bottom-right corner.
+    static ImVec2 s_last_pos(1e9f, 1e9f);
+    const bool needs_reposition =
+        s_last_pos.x + 50.0f > vp_pos.x + vp_size.x ||
+        s_last_pos.y + 50.0f > vp_pos.y + vp_size.y ||
+        s_last_pos.x < vp_pos.x - 50.0f ||
+        s_last_pos.y < vp_pos.y - 50.0f;
+    ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f * ui_s,
+                                   vp_pos.y + vp_size.y - 16.0f * ui_s),
+                            needs_reposition ? ImGuiCond_Always : ImGuiCond_FirstUseEver,
+                            ImVec2(1.0f, 1.0f));
     ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
     // Size floor so the panel can't be collapsed past legibility.
     // 480 px is the WRAP-THRESHOLD width: above it the filter row stays
@@ -87,7 +100,6 @@ void draw_console_window() {
     // so the bottom-right grip is the only resize handle.  Ceiling
     // stays loose (viewport minus 16 px margin on each side) so the
     // panel can still grow near-fullscreen during scan bursts.
-    const float ui_s = g_ui.ui_scale;
     ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f * ui_s, 165.0f * ui_s),
                                          ImVec2(vp_size.x - 16.0f * ui_s,
                                                 vp_size.y - 16.0f * ui_s));
@@ -99,7 +111,9 @@ void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f * ui_s);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     bool local_open = true;
-    if (ImGui::Begin("FRDX Console##frdx_console", &local_open, flags)) {
+    const bool window_expanded = ImGui::Begin("FRDX Console##frdx_console", &local_open, flags);
+    s_last_pos = ImGui::GetWindowPos();
+    if (window_expanded) {
 
         // ── Refresh from the global logger (with optional dedup). ────
         // When log generation bumps OR the dedup toggle flips, we rebuild
