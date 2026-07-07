@@ -73,10 +73,12 @@ static void capture_screenshot_to_png(IDXGISwapChain* pSwapChain, UINT backBuffe
     const UINT height = static_cast<UINT>(desc.Height);
 
     // Create a readback buffer (CPU-accessible) large enough for the
-    // backbuffer pixels.  Use RGBA8 layout to match the backbuffer.
-    D3D12_RESOURCE_DESC readback_desc = desc;
+    // backbuffer pixels.  Build the desc from scratch — copying from
+    // the backbuffer desc would inherit flags like ALLOW_RENDER_TARGET
+    // which are invalid for a READBACK heap and cause creation to fail.
+    D3D12_RESOURCE_DESC readback_desc{};
     readback_desc.Dimension         = D3D12_RESOURCE_DIMENSION_BUFFER;
-    readback_desc.Layout            = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    readback_desc.Alignment         = 0;
     readback_desc.Width             = static_cast<UINT64>(width) * height * 4;
     readback_desc.Height            = 1;
     readback_desc.DepthOrArraySize  = 1;
@@ -84,6 +86,8 @@ static void capture_screenshot_to_png(IDXGISwapChain* pSwapChain, UINT backBuffe
     readback_desc.Format            = DXGI_FORMAT_UNKNOWN;
     readback_desc.SampleDesc.Count  = 1;
     readback_desc.SampleDesc.Quality = 0;
+    readback_desc.Layout            = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    readback_desc.Flags             = D3D12_RESOURCE_FLAG_NONE;
 
     D3D12_HEAP_PROPERTIES heap_props{};
     heap_props.Type                 = D3D12_HEAP_TYPE_READBACK;
