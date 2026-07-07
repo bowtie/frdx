@@ -2,6 +2,7 @@
 
 #include "frdx/audio_source.hpp"
 #include "frdx/config.hpp"
+#include "frdx/sources/mpg123_stream.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -227,11 +228,9 @@ private:
                                        uint64_t metadata_epoch)
         FRDX_EXCLUDES(mu_);
 
-    // Launches ffmpeg subprocess for the given URL.  Does NOT lock mu_.
+    // Launches an mpg123 in-process decoder for the given URL.  Does NOT lock mu_.
     static std::expected<std::unique_ptr<Pipe>, ShoutcastError>
-    launch_ffmpeg_pipe(const std::string& url,
-                       const std::filesystem::path& ffmpeg_path,
-                       bool volume_normalization);
+    launch_mpg123_pipe(const std::string& url, void* winhttp_session);
 
     ShoutcastConfig cfg_;
     std::atomic<bool> volume_norm_{false};

@@ -204,22 +204,12 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
 // ---- Pipe ----
 
 struct ShoutcastSource::Pipe {
-    HANDLE job         = nullptr;
-    HANDLE proc_ff     = nullptr;
-    HANDLE read_pipe   = nullptr;
-    HANDLE stderr_pipe = nullptr;
-    std::string stderr_buf;
+    std::unique_ptr<Mpg123Stream> stream;
     std::uint64_t bytes_written = 0;
     std::uint64_t metadata_epoch = 0;
     bool ended                  = false;
-    bool stderr_empty           = false;
 
-    ~Pipe() {
-        if (read_pipe) CloseHandle(read_pipe);
-        if (stderr_pipe) CloseHandle(stderr_pipe);
-        if (proc_ff) CloseHandle(proc_ff);
-        if (job) CloseHandle(job);
-    }
+    ~Pipe() = default;
 };
 
 // ---- ShoutcastSource ----
@@ -293,87 +283,19 @@ void ShoutcastSource::load_stations(const std::filesystem::path& path) {
     log::info("[shoutcast] {} station(s) available", stations_.size());
 }
 
-// ---- ffmpeg subprocess launcher (no mu_ held) ----
+// ---- mpg123 in-process stream launcher (no mu_ held) ----
 
 std::expected<std::unique_ptr<ShoutcastSource::Pipe>, ShoutcastError>
-ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
-                                    const std::filesystem::path& ffmpeg_path,
-                                    bool volume_normalization) {
+ShoutcastSource::launch_mpg123_pipe(const std::string& url, void* winhttp_session) {
     auto pipe = std::make_unique<Pipe>();
-    pipe->job = frdx::subprocess::create_kill_on_close_job();
-    if (!pipe->job) {
-        log::warn("[shoutcast] CreateJobObject failed ({})", GetLastError());
-        return std::unexpected{ShoutcastError::pipe_creation_failed};
-    }
 
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE ff_out_r = nullptr, ff_out_w = nullptr;
-    HANDLE err_r = nullptr, err_w = nullptr;
-
-    auto bail = [&] {
-        if (ff_out_r) CloseHandle(ff_out_r);
-        if (ff_out_w) CloseHandle(ff_out_w);
-        if (err_r) CloseHandle(err_r);
-        if (err_w) CloseHandle(err_w);
-    };
-
-    // Small pipe buffer (64KB ≈ 333ms) so stale data doesn't accumulate
-    // between the ring buffer throttle ticks.
-    if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 64 * 1024)) {
-        bail();
-        return std::unexpected{ShoutcastError::pipe_creation_failed};
-    }
-    SetHandleInformation(ff_out_r, 0, HANDLE_FLAG_INHERIT);
-
-    // Stderr pipe for ICY metadata. ffmpeg prints [icy] StreamTitle='...' lines here.
-    if (!CreatePipe(&err_r, &err_w, &sa, 1 << 16)) {
-        bail();
-        return std::unexpected{ShoutcastError::pipe_creation_failed};
-    }
-    SetHandleInformation(err_r, 0, HANDLE_FLAG_INHERIT);
-
-    HANDLE nul_in = frdx::subprocess::open_nul(GENERIC_READ);
-
-    const auto ff = resolve_ffmpeg_path(ffmpeg_path);
-
-    std::wstring ff_cmd = frdx::subprocess::quote(ff) +
-                          L" -hide_banner -nostats -loglevel warning"
-                          L" -user_agent \"WinampMPEG/5.0\""
-                          L" -reconnect 1"
-                          L" -reconnect_streamed 1"
-                          L" -reconnect_delay_max 5"
-                          L" -fflags +discardcorrupt+nobuffer"
-                          L" -flags low_delay"
-                          L" -probesize 32"
-                          L" -analyzeduration 0"
-                          L" -max_delay 0"
-                          L" -rtbufsize 0"
-                          L" -i " +
-                          frdx::subprocess::quote(frdx::subprocess::widen(url));
-    if (volume_normalization) {
-        ff_cmd += L" -af loudnorm=I=-14:TP=-2:LRA=11";
-    }
-    ff_cmd += L" -f s16le -acodec pcm_s16le -ar 48000 -ac 2 pipe:1";
-
-    pipe->proc_ff     = frdx::subprocess::spawn_in_job(pipe->job, ff_cmd, nul_in, ff_out_w, err_w);
-    const DWORD ec_ff = pipe->proc_ff ? 0u : GetLastError();
-    CloseHandle(ff_out_w);
-    CloseHandle(err_w);
-    ff_out_w = nullptr;
-    err_w    = nullptr;
-    if (nul_in) CloseHandle(nul_in);
-
-    if (!pipe->proc_ff) {
-        log::warn(
-            "[shoutcast] failed to launch ffmpeg -- {}",
-            frdx::subprocess::describe_launch_failure(std::wstring{ff}, ec_ff, ff != L"ffmpeg"));
-        if (ff_out_r) CloseHandle(ff_out_r);
-        if (err_r) CloseHandle(err_r);
+    auto result = Mpg123Stream::create(url, winhttp_session);
+    if (!result) {
+        log::warn("[shoutcast] mpg123 stream creation failed for {}", url);
         return std::unexpected{ShoutcastError::spawn_failed};
     }
 
-    pipe->read_pipe   = ff_out_r;
-    pipe->stderr_pipe = err_r;
+    pipe->stream = std::move(*result);
     return pipe;
 }
 
@@ -459,11 +381,10 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         metadata_controller_->notify_ffmpeg_icy_metadata(0);
     } // mu_ released — ffmpeg launch happens outside the lock
 
-    // Phase 2: launch ffmpeg OUTSIDE the lock (expensive subprocess creation).
+    // Phase 2: launch mpg123 stream OUTSIDE the lock (HTTP handshake).
     auto new_pipe_result = launch_url.empty()
                                ? std::expected<std::unique_ptr<Pipe>, ShoutcastError>{nullptr}
-                               : launch_ffmpeg_pipe(launch_url, cfg_.ffmpeg_path,
-                                                     volume_norm_.load(std::memory_order_acquire));
+                               : launch_mpg123_pipe(launch_url, winhttp_session_);
     auto new_pipe = new_pipe_result ? std::move(*new_pipe_result) : nullptr;
 
     // Phase 3: install pipe and set metadata under lock.
@@ -578,9 +499,8 @@ void ShoutcastSource::start_pipe_locked() {
         return;
     }
 
-    // Delegate the heavy pipe creation to the shared static helper.
-    auto pipe_result = launch_ffmpeg_pipe(target_url_, cfg_.ffmpeg_path,
-                                           volume_norm_.load(std::memory_order_acquire));
+    // Delegate the stream creation to the mpg123 launcher.
+    auto pipe_result = launch_mpg123_pipe(target_url_, winhttp_session_);
     if (!pipe_result) {
         info_gen_.fetch_add(1, std::memory_order_release);
         return;
@@ -1081,11 +1001,9 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     // Lock-free acquire of the current pipe.  Shared ownership ensures the Pipe
     // stays alive for the entire call, even if a concurrent stop_pipe_locked()
     // replaces pipe_ with nullptr.
-    auto p          = pipe_.load(std::memory_order_acquire);
+    auto p = pipe_.load(std::memory_order_acquire);
     if (!p) return;
-    HANDLE stderr_pipe = p->stderr_pipe;
-    HANDLE read_pipe   = p->read_pipe;
-    bool ended         = p->ended;
+    bool ended = p->ended;
 
     auto update_position = [&] {
         const std::size_t r        = ring.readable();
@@ -1094,46 +1012,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         return r;
     };
 
-    // ---- Stderr drain (ffmpeg warnings/errors only) ----
-    // ICY metadata parsing has been removed — all stations use REST/WebSocket
-    // pollers for metadata.  We still drain stderr to prevent the pipe from
-    // blocking ffmpeg, and log unexpected warnings.
-    if (stderr_pipe) {
-        for (int safety = 0; safety < 3; ++safety) {
-            DWORD eavail = 0;
-            if (!PeekNamedPipe(stderr_pipe, nullptr, 0, nullptr, &eavail, nullptr)) {
-                CloseHandle(stderr_pipe);
-                p->stderr_pipe = nullptr;
-                break;
-            }
-            if (eavail == 0) break;
-            char ebuf[512];
-            DWORD egot = 0;
-            if (!ReadFile(stderr_pipe, ebuf, sizeof(ebuf) - 1, &egot, nullptr) || egot == 0) {
-                CloseHandle(stderr_pipe);
-                p->stderr_pipe = nullptr;
-                break;
-            }
-            p->stderr_buf.append(ebuf, egot);
-            if (p->stderr_buf.size() > 65536)
-                p->stderr_buf.erase(0, p->stderr_buf.size() - 32768);
-
-            std::size_t consumed = 0;
-            for (;;) {
-                const auto nl = p->stderr_buf.find('\n', consumed);
-                if (nl == std::string::npos) break;
-                std::string_view line{p->stderr_buf.data() + consumed, nl - consumed};
-                consumed = nl + 1;
-                while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-                    line.remove_suffix(1);
-                if (!line.empty())
-                    log::warn("[shoutcast] ffmpeg: {}", line);
-            }
-            if (consumed > 0) p->stderr_buf.erase(0, consumed);
-        }
-    }
-
-    // If ffmpeg has exited and the ring is drained, try reconnecting.
+    // If the stream has ended and the ring is drained, try reconnecting.
     if (ended) {
         if (update_position() == 0) {
             frdx::UniqueLock lk{mu_};
@@ -1162,17 +1041,13 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             start_pipe_locked();
             bool has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
             if (!has_pipe) {
-                // Pipe launch failed — restore unreachable status.
+                // Stream launch failed — restore unreachable status.
                 info_.title   = prev_name;
                 info_.artist  = "Unable to reach this station";
                 clear_pending_metadata_locked();
                 info_gen_.fetch_add(1, std::memory_order_release);
             }
             lk.unlock();
-            // Deliberately NOT calling restart_metadata_for_current() here —
-            // that does a blocking HTTP GET which would stall the audio thread.
-            // The sync poll already ran during select_station()/next()/previous().
-            // ICY metadata from ffmpeg will fill in track info as the stream plays.
             if (has_pipe) {
                 state_.store(PlaybackState::playing, std::memory_order_release);
             }
@@ -1180,9 +1055,71 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         return;
     }
 
-    if (!read_pipe) return;
+    if (!p->stream || !p->stream->is_alive()) return;
 
-    auto on_eof = [&] {
+    // Throttle writing into the ring buffer: only feed the ring when it's
+    // below the target level.  200ms of buffered audio (38400 bytes at
+    // 48kHz S16 stereo) is enough to absorb timing jitter and short FMOD
+    // callback freezes without adding much latency.
+    constexpr std::size_t kRingTargetBytes = 38400; // ~200ms
+    const std::size_t ring_readable = ring.readable();
+    if (ring_readable >= kRingTargetBytes) {
+        update_position();
+        return;  // ring has enough — let the DSP drain it before adding more
+    }
+
+    // Read decoded PCM from mpg123 and write to the ring buffer.
+    // We read in chunks until the ring is full enough or no more data
+    // is available from the decoder right now.
+    bool stream_ended = false;
+    std::size_t total_read_this_tick = 0;
+
+    while (ring_readable + total_read_this_tick < kRingTargetBytes) {
+        const std::size_t writable = ring.writable();
+        if (writable < 4) break;
+
+        int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
+        std::size_t want = std::min<std::size_t>(writable, sizeof(buf));
+
+        bool ended_flag = false;
+        std::size_t got = p->stream->read_pcm(
+            std::span<std::byte>(reinterpret_cast<std::byte*>(buf), want), ended_flag);
+
+        if (ended_flag) {
+            stream_ended = true;
+            break;
+        }
+
+        if (got == 0) {
+            // No data available right now — check for stall.
+            break;
+        }
+
+        reconnect_attempts_.store(0, std::memory_order_relaxed);
+        last_data_ms_.store(steady_ms(), std::memory_order_release);
+
+        ring.write(reinterpret_cast<std::byte*>(buf), got);
+        observe_pcm_for_metadata_sync(buf, got / sizeof(int16_t), p->metadata_epoch);
+        p->bytes_written += got;
+        total_read_this_tick += got;
+    }
+
+    // ── Stall detection ──
+    // If the stream is alive but hasn't produced data for >10s, reconnect.
+    if (total_read_this_tick == 0 && !stream_ended) {
+        const auto now_ms = steady_ms();
+        int64_t last = last_data_ms_.load(std::memory_order_acquire);
+        if (last == 0) {
+            last_data_ms_.store(now_ms, std::memory_order_release);
+        } else if (now_ms - last > 10'000) {
+            log::warn("[shoutcast] stream stalled (no data for {}ms); reconnecting",
+                      now_ms - last);
+            stream_ended = true;
+            last_data_ms_.store(0, std::memory_order_release);
+        }
+    }
+
+    if (stream_ended) {
         if (p->bytes_written == 0) {
             log::warn("[shoutcast] stream produced 0 bytes; stopping");
             frdx::UniqueLock lk{mu_};
@@ -1197,88 +1134,8 @@ void ShoutcastSource::pump(RingBuffer& ring) {
             clear_pending_metadata_locked();
             info_gen_.fetch_add(1, std::memory_order_release);
         }
-        if (p->read_pipe) {
-            CloseHandle(p->read_pipe);
-            p->read_pipe = nullptr;
-        }
-        if (p->stderr_pipe) {
-            CloseHandle(p->stderr_pipe);
-            p->stderr_pipe = nullptr;
-        }
-    };
-
-    DWORD avail = 0;
-    if (!PeekNamedPipe(read_pipe, nullptr, 0, nullptr, &avail, nullptr)) {
-        on_eof();
-        return;
     }
 
-    // Throttle writing into the ring buffer: only feed the ring when it's
-    // below the target level.  This prevents the pump from filling the
-    // entire ring from ffmpeg's read-ahead buffer every tick, which would
-    // cause the drift correction to fire constantly.  200ms of buffered
-    // audio (38400 bytes at 48kHz S16 stereo) is enough to absorb timing
-    // jitter and short FMOD callback freezes without adding much latency.
-    constexpr std::size_t kRingTargetBytes = 38400; // ~200ms
-    const std::size_t ring_readable = ring.readable();
-    if (ring_readable >= kRingTargetBytes) {
-        update_position();
-        return;  // ring has enough — let the DSP drain it before adding more
-    }
-
-    // ── Stall detection ──
-    // If ffmpeg is alive but hasn't produced data for >10s, the stream
-    // has hiccuped (network issue, server stall, etc).  Kill the pipe
-    // and let the reconnect logic in the `ended` path restart it.
-    if (avail == 0) {
-        const auto now_ms = steady_ms();
-        int64_t last = last_data_ms_.load(std::memory_order_acquire);
-        if (last == 0) {
-            last_data_ms_.store(now_ms, std::memory_order_release);
-        } else if (now_ms - last > 10'000) {
-            log::warn("[shoutcast] stream stalled (no data for {}ms); reconnecting",
-                      now_ms - last);
-            // Force the pipe to end so the reconnect path fires.
-            if (p->bytes_written == 0) {
-                frdx::UniqueLock lk{mu_};
-                stop_pipe_locked();
-            } else {
-                p->ended = true;
-                {
-                    frdx::UniqueLock lk{mu_};
-                    info_.title  = display_name_;
-                    info_.artist = "Reconnecting to station";
-                    clear_pending_metadata_locked();
-                    info_gen_.fetch_add(1, std::memory_order_release);
-                }
-                if (p->read_pipe) { CloseHandle(p->read_pipe); p->read_pipe = nullptr; }
-                if (p->stderr_pipe) { CloseHandle(p->stderr_pipe); p->stderr_pipe = nullptr; }
-            }
-            last_data_ms_.store(0, std::memory_order_release);
-        }
-        return;
-    }
-
-    int16_t buf[2048]; // 1024 stereo frames * 2 channels = 4096 bytes
-    while (avail > 0) {
-        const std::size_t writable = ring.writable();
-        if (writable < 4) break;
-        std::size_t want = std::min<std::size_t>(writable, avail);
-        if (want > 4096) want = 4096;
-        DWORD got = 0;
-        if (!ReadFile(read_pipe, buf, static_cast<DWORD>(want), &got, nullptr) || got == 0) {
-            on_eof();
-            return;
-        }
-        if (got > 0) {
-            reconnect_attempts_.store(0, std::memory_order_relaxed);
-            last_data_ms_.store(steady_ms(), std::memory_order_release);
-        }
-        ring.write(reinterpret_cast<std::byte*>(buf), got);
-        observe_pcm_for_metadata_sync(buf, got / sizeof(int16_t), p->metadata_epoch);
-        p->bytes_written += got;
-        avail = avail > got ? avail - got : 0;
-    }
     if (update_position() > 8 * 1024) {
         auto expected = PlaybackState::buffering;
         if (state_.compare_exchange_strong(expected, PlaybackState::playing,

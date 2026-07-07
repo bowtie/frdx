@@ -61,6 +61,7 @@ add_library(version SHARED
     src/fmod/metadata_injector.cpp
     src/sources/shoutcast_source.cpp
     src/sources/shoutcast_metadata.cpp
+    src/sources/mpg123_stream.cpp
     src/helper/worker_client.cpp
     src/dependency_manager.cpp
     src/texture_injector.cpp
@@ -99,10 +100,13 @@ target_include_directories(version PRIVATE
     third_party/imanim
     third_party/hidapi
     third_party/hidapi/hidapi
+    third_party/mpg123/include
 )
 
+target_link_directories(version PRIVATE third_party/mpg123/lib)
+
 target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi cfgmgr32
-                                      user32 dbghelp)
+                                      user32 dbghelp libmpg123-0)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version
@@ -124,6 +128,13 @@ if(FRDX_AUTO_DEPLOY)
                 -DTO="${FRDX_GAME_DIR}/version.dll"
                 -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
         COMMENT "Deploying version.dll → ${FRDX_GAME_DIR}"
+    )
+    add_custom_command(TARGET version POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+                -DFROM="${CMAKE_SOURCE_DIR}/third_party/mpg123/lib/libmpg123-0.dll"
+                -DTO="${FRDX_GAME_DIR}/mods/frdx/libmpg123-0.dll"
+                -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
+        COMMENT "Deploying libmpg123-0.dll → ${FRDX_GAME_DIR}/mods/frdx"
     )
 endif()
 
