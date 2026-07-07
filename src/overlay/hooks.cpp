@@ -10,6 +10,7 @@
 #include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
+#include <windowsx.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <vector>
@@ -218,6 +219,13 @@ bool g_hooks_installed    = false;
 
 // ── Grouped overlay state ───────────────────────────────────────────────
 
+// Cached swap chain + window resolution.  When the game uses a non-native
+// render resolution, the swap chain differs from the window client size.
+// ImGui's DisplaySize must match the swap chain (render target), but mouse
+// coordinates from Windows are in window space, so we scale them.
+static UINT g_sc_width = 0, g_sc_height = 0;
+static UINT g_win_width = 0, g_win_height = 0;
+
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     // Suppress focus-loss messages so the game doesn't auto-pause on alt-tab.
     // We rewrite WM_ACTIVATE(ACTIVATE_INACTIVE) → ACTIVATE_ACTIVE and swallow
@@ -236,12 +244,35 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
         }
     }
 
+    // Cache window client size from WM_SIZE so we can scale mouse
+    // coordinates when the swap chain resolution differs from the
+    // window size (non-native render resolution).
+    if (uMsg == WM_SIZE && wParam != SIZE_MINIMIZED) {
+        g_win_width  = LOWORD(lParam);
+        g_win_height = HIWORD(lParam);
+    }
+
+    // When the swap chain resolution differs from the window size, scale
+    // mouse coordinates from window space to swap chain space so ImGui's
+    // mouse position matches its coordinate system.
     const bool route_to_imgui    = g_ui.player_visible || g_ui.settings_visible ||
                                    g_ui.stations_visible || g_ui.console_visible;
     const bool block_mouse_input = g_ui.cursor_visible && g_ui.interactive_alpha > 0.05f &&
                                    g_ui.mouse_capture.load(std::memory_order_acquire);
     if (route_to_imgui) {
-        const bool imgui_handled = ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
+        // Scale mouse coordinates for messages that carry them in lParam.
+        LPARAM scaled_lParam = lParam;
+        if (g_sc_width > 0 && g_sc_height > 0 &&
+            g_win_width > 0 && g_win_height > 0 &&
+            (g_sc_width != g_win_width || g_sc_height != g_win_height) &&
+            uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) {
+            short mx = GET_X_LPARAM(lParam);
+            short my = GET_Y_LPARAM(lParam);
+            mx = static_cast<short>(static_cast<float>(mx) * g_sc_width  / g_win_width);
+            my = static_cast<short>(static_cast<float>(my) * g_sc_height / g_win_height);
+            scaled_lParam = MAKELPARAM(mx, my);
+        }
+        const bool imgui_handled = ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, scaled_lParam);
         if (block_mouse_input && imgui_handled && uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) {
             return true;
         }
@@ -289,12 +320,6 @@ void pre_resize() {
     re_log::info("released DX12 backbuffer RTV resources before resize");
 }
 
-// Cached swap chain resolution — updated by init_imgui() and post_resize()
-// so the render loop doesn't need to call GetDesc every frame (which can
-// stall during loading screens).
-static UINT g_sc_width = 0;
-static UINT g_sc_height = 0;
-
 // Compute UI scale from the monitor resolution (not the swap chain
 // resolution, which may differ due to dynamic resolution scaling).
 // 1080p monitor = 1.0x, 1440p = 1.33x, 4K = 2.0x.
@@ -320,6 +345,12 @@ void post_resize(IDXGISwapChain* swapChain) {
     // Cache the swap chain resolution for the render loop.
     g_sc_width  = desc.BufferDesc.Width;
     g_sc_height = desc.BufferDesc.Height;
+    // Refresh window client size for mouse coordinate scaling.
+    RECT rc{};
+    if (GetClientRect(desc.OutputWindow, &rc)) {
+        g_win_width  = rc.right - rc.left;
+        g_win_height = rc.bottom - rc.top;
+    }
 
     // The game can change the swap chain resolution without changing the
     // window size (e.g. lowering in-game resolution while in fullscreen).
@@ -438,8 +469,15 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     g_ui.ui_scale = compute_monitor_ui_scale(desc.OutputWindow);
     g_sc_width  = desc.BufferDesc.Width;
     g_sc_height = desc.BufferDesc.Height;
-    re_log::info("swap chain: {}x{}, monitor ui_scale={:.2f}",
-                 desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
+    // Cache window client size for mouse coordinate scaling.
+    RECT rc{};
+    if (GetClientRect(desc.OutputWindow, &rc)) {
+        g_win_width  = rc.right - rc.left;
+        g_win_height = rc.bottom - rc.top;
+    }
+    re_log::info("swap chain: {}x{}, window: {}x{}, monitor ui_scale={:.2f}",
+                 desc.BufferDesc.Width, desc.BufferDesc.Height,
+                 g_win_width, g_win_height, g_ui.ui_scale);
 
     original_wnd_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
         desc.OutputWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wnd_proc_hook)));
@@ -655,24 +693,15 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
     }
 
     if (g_ui.is_init) {
-        // Enforce DisplaySize matches the swap chain resolution every frame.
-        // The Win32 backend may reset it from WM_SIZE (window size) which
-        // can differ from the swap chain resolution when the game uses a
-        // non-native render resolution.  Query the swap chain directly to
-        // detect resolution changes that don't go through ResizeBuffers.
+        // Query swap chain resolution to detect in-game resolution changes
+        // that don't go through ResizeBuffers.
         DXGI_SWAP_CHAIN_DESC sc_desc;
         if (SUCCEEDED(pSwapChain->GetDesc(&sc_desc))) {
-            g_sc_width  = sc_desc.BufferDesc.Width;
-            g_sc_height = sc_desc.BufferDesc.Height;
-            auto& io = ImGui::GetIO();
-            if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(g_sc_width) ||
-                static_cast<int>(io.DisplaySize.y) != static_cast<int>(g_sc_height)) {
-                re_log::info("DisplaySize corrected: {}x{} -> {}x{}",
-                             static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y),
-                             g_sc_width, g_sc_height);
-                io.DisplaySize = ImVec2(
-                    static_cast<float>(g_sc_width),
-                    static_cast<float>(g_sc_height));
+            if (g_sc_width != sc_desc.BufferDesc.Width ||
+                g_sc_height != sc_desc.BufferDesc.Height) {
+                g_sc_width  = sc_desc.BufferDesc.Width;
+                g_sc_height = sc_desc.BufferDesc.Height;
+                re_log::info("swap chain resolution changed to {}x{}", g_sc_width, g_sc_height);
             }
         }
 
@@ -761,6 +790,20 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // Render custom dashboard panel UI
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        // ImGui_ImplWin32_NewFrame() sets DisplaySize from WM_SIZE (window
+        // size).  When the game uses a non-native render resolution, the
+        // swap chain is smaller than the window.  Override DisplaySize to
+        // match the swap chain so ImGui's coordinate system matches the
+        // render target.  Mouse coordinates are scaled in wnd_proc_hook.
+        if (g_sc_width > 0 && g_sc_height > 0) {
+            auto& io = ImGui::GetIO();
+            if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(g_sc_width) ||
+                static_cast<int>(io.DisplaySize.y) != static_cast<int>(g_sc_height)) {
+                io.DisplaySize = ImVec2(
+                    static_cast<float>(g_sc_width),
+                    static_cast<float>(g_sc_height));
+            }
+        }
         ImGui::NewFrame();
         iam_update_begin_frame();
         iam_clip_update(ImGui::GetIO().DeltaTime);
