@@ -317,7 +317,9 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
         if (err_w) CloseHandle(err_w);
     };
 
-    if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 1 << 20)) {
+    // Small pipe buffer (64KB ≈ 333ms) so stale data doesn't accumulate
+    // between the ring buffer throttle ticks.
+    if (!CreatePipe(&ff_out_r, &ff_out_w, &sa, 64 * 1024)) {
         bail();
         return std::unexpected{ShoutcastError::pipe_creation_failed};
     }
@@ -340,9 +342,12 @@ ShoutcastSource::launch_ffmpeg_pipe(const std::string& url,
                           L" -reconnect 1"
                           L" -reconnect_streamed 1"
                           L" -reconnect_delay_max 5"
-                          L" -fflags +discardcorrupt"
+                          L" -fflags +discardcorrupt+nobuffer"
+                          L" -flags low_delay"
                           L" -probesize 32"
                           L" -analyzeduration 0"
+                          L" -max_delay 0"
+                          L" -rtbufsize 0"
                           L" -i " +
                           frdx::subprocess::quote(frdx::subprocess::widen(url));
     if (volume_normalization) {
@@ -1206,6 +1211,19 @@ void ShoutcastSource::pump(RingBuffer& ring) {
     if (!PeekNamedPipe(read_pipe, nullptr, 0, nullptr, &avail, nullptr)) {
         on_eof();
         return;
+    }
+
+    // Throttle writing into the ring buffer: only feed the ring when it's
+    // below the target level.  This prevents the pump from filling the
+    // entire ring from ffmpeg's read-ahead buffer every tick, which would
+    // cause the drift correction to fire constantly.  200ms of buffered
+    // audio (38400 bytes at 48kHz S16 stereo) is enough to absorb timing
+    // jitter and short FMOD callback freezes without adding much latency.
+    constexpr std::size_t kRingTargetBytes = 38400; // ~200ms
+    const std::size_t ring_readable = ring.readable();
+    if (ring_readable >= kRingTargetBytes) {
+        update_position();
+        return;  // ring has enough — let the DSP drain it before adding more
     }
 
     // ── Stall detection ──

@@ -408,20 +408,15 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     // Drift correction: if the ring buffer has accumulated too much data
     // (from FMOD callback micro-freezes while driving — each skip leaves
     // ~20ms of unread audio that never gets caught up), drain the excess
-    // so the audio stays aligned with the live stream.  Without this,
-    // drift accumulates at ~120ms/min while driving, eventually causing
-    // metadata desync and buffer overflow.
+    // so the audio stays aligned with the live stream.
     //
-    // The threshold must be high enough that normal buffer levels (1-2s
-    // when a station starts, or during brief FMOD scheduling jitter) are
-    // NOT treated as drift.  Only fire when the buffer has grown to an
-    // abnormally high level that can only come from sustained drift.
+    // The pump throttles the ring to ~200ms, so the buffer should never
+    // legitimately exceed ~400ms.  If it does, it's from drift (FMOD
+    // callback freezes accumulating unread audio).  Drop back to 200ms.
     //
-    // 48kHz * 2ch * 2bytes(s16) = 4 bytes/frame.
-    // Threshold: 5 seconds = 960000 bytes (drift takes ~40 min to reach this).
-    // Target: 1 second = 192000 bytes (safe buffer level after correction).
-    constexpr std::size_t kDriftTargetBytes   = 192000;
-    constexpr std::size_t kDriftThresholdBytes = 960000;
+    // 48kHz * 2ch * 2bytes(s16) = 4 bytes/frame → 192 bytes/ms.
+    constexpr std::size_t kDriftTargetBytes    = 38400;    // 200ms
+    constexpr std::size_t kDriftThresholdBytes = 76800;    // 400ms
     const std::size_t readable = ring.readable();
     if (readable > kDriftThresholdBytes) {
         const std::size_t excess = readable - kDriftTargetBytes;
