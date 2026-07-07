@@ -95,8 +95,8 @@ void draw_console_window() {
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoScrollbar;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * ui_s);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f * ui_s);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     bool local_open = true;
     if (ImGui::Begin("FRDX Console##frdx_console", &local_open, flags)) {
@@ -336,7 +336,7 @@ void draw_console_window() {
         const float clear_w      = ImGui::CalcTextSize("Clear").x +
                                    ImGui::GetStyle().FramePadding.x * 2.0f;
         const float row_max_x    = ImGui::GetContentRegionMax().x;
-        ImGui::SameLine(row_max_x - clear_w - counter_w - 8.0f);
+        ImGui::SameLine(row_max_x - clear_w - counter_w - 8.0f * ui_s);
         ImGui::TextDisabled("%s", counter_text);
         ImGui::SameLine();
         if (ImGui::Button("Clear")) {
@@ -393,7 +393,7 @@ void draw_console_window() {
             // filter row regardless of BeginChild height — avoids the
             // previous `window_size.y * 0.4f` collision risk on sub-200px
             // console heights where 40% put the hint under the filter row.
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f * ui_s);
             ImGui::SetCursorPosX((window_size.x - text_size.x) * 0.5f);
             ImGui::TextUnformatted(msg);
             ImGui::PopStyleColor();

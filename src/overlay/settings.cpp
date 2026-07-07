@@ -402,7 +402,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
         flags |= ImGuiWindowFlags_NoScrollbar;
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * ui_s);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
@@ -439,7 +439,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
             }
 
             const auto& style                       = ImGui::GetStyle();
-            constexpr float kSettingsFooterPaddingY = 10.0f;
+            const float kSettingsFooterPaddingY = 10.0f * g_ui.ui_scale;
             g_ui.settings_content_height =
                 ImGui::GetCursorPosY() +
                 std::max(0.0f, kSettingsFooterPaddingY - style.ItemSpacing.y);

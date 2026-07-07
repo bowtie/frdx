@@ -205,7 +205,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             const ImVec2 preview_text_size = ImGui::CalcTextSize(preview);
             const float text_y    = pmin.y + (combo_size.y - ImGui::GetTextLineHeight()) * 0.5f;
             const float settled_x = pmin.x + (combo_size.x - preview_text_size.x) * 0.5f;
-            const float travel    = 34.0f;
+            const float travel    = 34.0f * ui_s;
             if (!g_ui.combo_prev_label.empty() && combo_t < 0.995f) {
                 ImVec4 old_col             = base_preview_col;
                 old_col.w                 *= 1.0f - combo_t;
@@ -315,7 +315,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         s_glyph_sz[2] = ImGui::CalcTextSize(s_glyph_strs[2]);
     }
 
-    ImGui::SameLine(0, 20);
+    ImGui::SameLine(0, 20.0f * ui_s);
 
     // ── Transport buttons ──
     // Dim and disable when FMOD isn't ready yet — clicking play would start a
@@ -332,7 +332,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             g_ctx.mgr->ring().drain();
         });
     }
-    ImGui::SameLine(0, 3);
+    ImGui::SameLine(0, 3.0f * ui_s);
     if (draw_icon_btn("##play", is_playing ? "\u23F8" : "\u23F5") && active && fmod_ready) {
         enqueue_action([active, is_playing] {
             if (is_playing) {
@@ -344,7 +344,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             }
         });
     }
-    ImGui::SameLine(0, 3);
+    ImGui::SameLine(0, 3.0f * ui_s);
     if (draw_icon_btn("##next", "\u23ED") && active && fmod_ready) {
         g_ui.combo_switch_dir = 1;
         animate_station_combo_by(1);
@@ -358,7 +358,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
 
     if (!fmod_ready) ImGui::EndDisabled();
 
-    ImGui::SameLine(0, 20);
+    ImGui::SameLine(0, 20.0f * ui_s);
 
     // ── Volume progress bar (clickable + scroll) ──
     // Read the configured gain from the config store, NOT bridge->gain().
@@ -406,7 +406,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     }
     if (!active) ImGui::EndDisabled();
 
-    ImGui::SameLine(0, 3);
+    ImGui::SameLine(0, 3.0f * ui_s);
 
     // ── Unified settings window ──
     float gear_right = 0.0f;
@@ -477,7 +477,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
     const float collapsed_body_h = st_style.WindowPadding.y * 2.4f + station_count * header_h +
                                    std::max(0.0f, station_count - 1.0f) * st_style.ItemSpacing.y;
     const float target_h         = std::min(st_tb + collapsed_body_h, vp_room);
-    const float current_h        = std::max(st_tb + 4.0f, target_h * eased);
+    const float current_h        = std::max(st_tb + 4.0f * ui_s, target_h * eased);
     ImGui::SetNextWindowPos(ImVec2(target_x, target_y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(target_w, current_h), ImGuiCond_Always);
     // Slightly more transparent than the player bar (0.96).

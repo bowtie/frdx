@@ -10,7 +10,8 @@ using namespace frdx;
 // patch_dualsense template defined in overlay_priv.hpp
 
 bool dualsense_toggle(const char* label, bool value, bool DualSenseConfig::* field) {
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+    const float s = g_ui.ui_scale;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f * s, 2.0f * s));
     const bool changed = ImGui::Toggle(label, &value);
     ImGui::PopStyleVar();
     if (changed) {
@@ -22,12 +23,13 @@ bool dualsense_toggle(const char* label, bool value, bool DualSenseConfig::* fie
 
 void dualsense_numeric_layout(float& row_x, float& label_w, float& slider_w, float& input_w) {
     const auto& style = ImGui::GetStyle();
+    const float s     = g_ui.ui_scale;
     row_x             = ImGui::GetCursorPosX();
-    const float row_r = ImGui::GetWindowContentRegionMax().x - 4.0f;
-    const float avail = std::max(96.0f, row_r - row_x);
-    input_w           = 62.0f;
-    label_w           = std::min(215.0f, std::max(190.0f, avail * 0.58f));
-    slider_w          = std::max(72.0f, avail - label_w - input_w - style.ItemSpacing.x * 2.0f);
+    const float row_r = ImGui::GetWindowContentRegionMax().x - 4.0f * s;
+    const float avail = std::max(96.0f * s, row_r - row_x);
+    input_w           = 62.0f * s;
+    label_w           = std::min(215.0f * s, std::max(190.0f * s, avail * 0.58f));
+    slider_w          = std::max(72.0f * s, avail - label_w - input_w - style.ItemSpacing.x * 2.0f);
 }
 
 void dualsense_draw_centered_value(const char* text) {
@@ -144,8 +146,9 @@ AccordionState dualsense_section_header(const char* label, ImGuiID exclusive_gro
     }
 
     const auto& style  = ImGui::GetStyle();
-    const float inset  = 4.0f;
-    const float width  = std::max(64.0f, ImGui::GetContentRegionAvail().x - inset);
+    const float s      = g_ui.ui_scale;
+    const float inset  = 4.0f * s;
+    const float width  = std::max(64.0f * s, ImGui::GetContentRegionAvail().x - inset);
     const float height = ImGui::GetFrameHeight();
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + inset * 0.5f);
     ImGui::InvisibleButton("##section", ImVec2(width, height));
@@ -177,18 +180,19 @@ AccordionState dualsense_section_header(const char* label, ImGuiID exclusive_gro
     auto* dl           = ImGui::GetWindowDrawList();
     dl->AddRectFilled(min, max, bg, style.FrameRounding, ImDrawFlags_RoundCornersAll);
 
-    const ImVec2 arrow_center(min.x + style.FramePadding.x + 8.0f, min.y + height * 0.5f);
-    const float arrow_size  = 5.5f;
+    const float ui_s2      = g_ui.ui_scale;
+    const ImVec2 arrow_center(min.x + style.FramePadding.x + 8.0f * ui_s2, min.y + height * 0.5f);
+    const float arrow_size  = 5.5f * ui_s2;
     const float angle       = amount * 1.57079632679f;
-    const float s           = std::sin(angle);
+    const float sn          = std::sin(angle);
     const float c           = std::cos(angle);
     const auto rotate_point = [&](ImVec2 p) {
-        return ImVec2(arrow_center.x + p.x * c - p.y * s, arrow_center.y + p.x * s + p.y * c);
+        return ImVec2(arrow_center.x + p.x * c - p.y * sn, arrow_center.y + p.x * sn + p.y * c);
     };
     dl->AddTriangleFilled(rotate_point(ImVec2(-arrow_size * 0.45f, -arrow_size)),
                           rotate_point(ImVec2(-arrow_size * 0.45f, arrow_size)),
                           rotate_point(ImVec2(arrow_size * 0.75f, 0.0f)), arrow);
-    dl->AddText(ImVec2(min.x + style.FramePadding.x + 18.0f, min.y + style.FramePadding.y), text,
+    dl->AddText(ImVec2(min.x + style.FramePadding.x + 18.0f * ui_s2, min.y + style.FramePadding.y), text,
                 label);
 
     AccordionState state;
@@ -225,7 +229,7 @@ bool dualsense_section_content_begin(AccordionState& state) {
         ImGui::BeginDisabled();
         state.disabled = true;
     }
-    ImGui::Indent(style.FramePadding.x + 6.0f);
+    ImGui::Indent(style.FramePadding.x + 6.0f * g_ui.ui_scale);
     return true;
 }
 
@@ -346,7 +350,7 @@ void draw_dualsense_controller_picker(const DualSenseConfig& ds) {
     const char* preview =
         selected == 0 ? "Auto (first found)"
                       : g_ui.dualsense_devices[static_cast<size_t>(selected - 1)].name.c_str();
-    const float label_w = 82.0f;
+    const float label_w = 82.0f * g_ui.ui_scale;
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Controller");
     ImGui::SameLine(label_w);
@@ -602,8 +606,8 @@ void draw_dualsense_controller_tab(const DualSenseConfig& ds) {
     std::snprintf(udp_buf, sizeof(udp_buf), "%d", ds.udp_port);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("UDP Port");
-    ImGui::SameLine(82.0f);
-    ImGui::SetNextItemWidth(68.0f);
+    ImGui::SameLine(82.0f * g_ui.ui_scale);
+    ImGui::SetNextItemWidth(68.0f * g_ui.ui_scale);
     if (ImGui::InputText("##udp_port", udp_buf, sizeof(udp_buf),
                          ImGuiInputTextFlags_CharsDecimal)) {
         if (udp_buf[0] != '\0') {
@@ -684,8 +688,9 @@ bool draw_dualsense_tab_strip() {
     const char* labels[kTabCount] = {"Triggers", "Settings", "Controller"};
 
     const float dt         = ImGui::GetIO().DeltaTime;
-    const float tab_h      = ImGui::GetFrameHeight() + 4.0f;
-    const float text_pad_x = 9.0f;
+    const float ui_s3      = g_ui.ui_scale;
+    const float tab_h      = ImGui::GetFrameHeight() + 4.0f * ui_s3;
+    const float text_pad_x = 9.0f * ui_s3;
     float tab_widths[kTabCount]{};
     float total_w = 0.0f;
     for (int i = 0; i < kTabCount; ++i) {
@@ -695,7 +700,7 @@ bool draw_dualsense_tab_strip() {
 
     const ImVec2 pos     = ImGui::GetCursorScreenPos();
     auto* dl             = ImGui::GetWindowDrawList();
-    const float rounding = 5.0f;
+    const float rounding = 5.0f * ui_s3;
     dl->AddRectFilled(pos, ImVec2(pos.x + total_w, pos.y + tab_h),
                       ImGui::GetColorU32(ImGuiCol_FrameBg, 0.54f), rounding,
                       ImDrawFlags_RoundCornersTop);
@@ -777,19 +782,20 @@ bool draw_dualsense_tab_strip() {
         x += tab_widths[i];
     }
 
-    const float indicator_y = pos.y + tab_h - 3.0f;
-    dl->AddRectFilled(ImVec2(indicator_x + 8.0f, indicator_y),
-                      ImVec2(indicator_x + indicator_w - 8.0f, indicator_y + 3.0f),
-                      ImGui::GetColorU32(ImGuiCol_SliderGrabActive), 2.0f);
+    const float indicator_y = pos.y + tab_h - 3.0f * ui_s3;
+    dl->AddRectFilled(ImVec2(indicator_x + 8.0f * ui_s3, indicator_y),
+                      ImVec2(indicator_x + indicator_w - 8.0f * ui_s3, indicator_y + 3.0f * ui_s3),
+                      ImGui::GetColorU32(ImGuiCol_SliderGrabActive), 2.0f * ui_s3);
     ImGui::PopID();
     return changed;
 }
 
 void draw_dualsense_tab_header(const DualSenseConfig& ds) {
+    const float ui_s    = g_ui.ui_scale;
     const float row_y    = ImGui::GetCursorPosY();
-    const float toggle_w = 132.0f;
-    const float tab_h    = ImGui::GetFrameHeight() + 4.0f;
-    const float toggle_h = ImGui::GetTextLineHeight() + 4.0f;
+    const float toggle_w = 132.0f * ui_s;
+    const float tab_h    = ImGui::GetFrameHeight() + 4.0f * ui_s;
+    const float toggle_h = ImGui::GetTextLineHeight() + 4.0f * ui_s;
 
     const bool tab_changed = draw_dualsense_tab_strip();
     if (tab_changed) g_ui.dualsense_tab_content_anim = 0.0f;
@@ -802,7 +808,7 @@ void draw_dualsense_tab_header(const DualSenseConfig& ds) {
     ImGui::SetCursorPos(ImVec2(toggle_x, toggle_y));
 
     bool enabled = ds.enabled;
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f * ui_s, 2.0f * ui_s));
     const bool enabled_changed = ImGui::Toggle("Enable Triggers", &enabled);
     ImGui::PopStyleVar();
     if (enabled_changed) {
