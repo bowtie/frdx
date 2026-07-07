@@ -87,9 +87,10 @@ void draw_console_window() {
     // so the bottom-right grip is the only resize handle.  Ceiling
     // stays loose (viewport minus 16 px margin on each side) so the
     // panel can still grow near-fullscreen during scan bursts.
-    ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f, 165.0f),
-                                         ImVec2(vp_size.x - 16.0f,
-                                                vp_size.y - 16.0f));
+    const float ui_s = g_ui.ui_scale;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f * ui_s, 165.0f * ui_s),
+                                         ImVec2(vp_size.x - 16.0f * ui_s,
+                                                vp_size.y - 16.0f * ui_s));
     ImGui::SetNextWindowBgAlpha(0.94f * eased);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |

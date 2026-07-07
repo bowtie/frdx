@@ -71,11 +71,12 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     auto* viewport      = ImGui::GetMainViewport();
     const float vp_w    = viewport->WorkSize.x;
     const ImVec2 vp_pos = viewport->WorkPos;
-    ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + 20.0f), ImGuiCond_Always,
+    const float ui_s = g_ui.ui_scale;
+    ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + 20.0f * ui_s), ImGuiCond_Always,
                             ImVec2(0.5f, 0));
     ImGui::SetNextWindowBgAlpha(0.96f * g_ui.interactive_draw_alpha);
 
-    const float rounding = 6.0f;
+    const float rounding = 6.0f * ui_s;
 
     // When blur is on, disable ImGui's built-in opaque window border —
     // draw_backdrop_blur() composites a translucent glass-edge border as
@@ -106,8 +107,8 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // is meaningful — otherwise the shoutcast stream buffers but the audio has
     // nowhere to go.  Disable transport until the radio channel is discovered.
     const bool fmod_ready = g_ctx.bridge && g_ctx.bridge->dsp_installed();
-    const float btn_w     = 27.0f;
-    const float btn_h     = 24.0f;
+    const float btn_w     = 27.0f * ui_s;
+    const float btn_h     = 24.0f * ui_s;
 
     // ── Station selector button ──
     auto* sc = (active && active->type() == SourceType::shoutcast)
@@ -186,7 +187,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
                 std::min(1.0f, g_ui.combo_switch_anim + ImGui::GetIO().DeltaTime / 0.28f);
             const float combo_t = iam_eval_preset(iam_ease_out_cubic, g_ui.combo_switch_anim);
             const int combo_dir = g_ui.combo_switch_dir >= 0 ? 1 : -1;
-            const ImVec2 combo_size(130.0f, btn_h);
+            const ImVec2 combo_size(130.0f * ui_s, btn_h);
             ImGui::InvisibleButton("##station_preview", combo_size);
             const bool preview_clicked = ImGui::IsItemClicked();
             const bool preview_hovered = ImGui::IsItemHovered();
@@ -376,7 +377,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         float gain_pct         = configured_gain * 100.0f;
         char label[16];
         std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
-        ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(100.0f, btn_h), label);
+        ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(100.0f * ui_s, btn_h), label);
 
         if (ImGui::IsItemHovered()) {
             float wheel = ImGui::GetIO().MouseWheel;
@@ -461,11 +462,12 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
                     : nullptr;
     if (!sc_st) return;
 
+    const float ui_s          = g_ui.ui_scale;
     const float st_tb         = ImGui::GetFrameHeight();
     const auto* vp            = ImGui::GetMainViewport();
     const float win_top       = layout.pos.y + layout.size.y - st_tb;
-    const float vp_room       = std::max(180.0f, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f);
-    const float target_w      = std::clamp(layout.size.x - 28.0f, 320.0f, 480.0f);
+    const float vp_room       = std::max(180.0f * ui_s, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f * ui_s);
+    const float target_w      = std::clamp(layout.size.x - 28.0f * ui_s, 320.0f * ui_s, 480.0f * ui_s);
     const float target_x      = layout.pos.x + (layout.size.x - target_w) * 0.5f;
     const float target_y      = win_top;
     const auto& st_style      = ImGui::GetStyle();
@@ -491,7 +493,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
         stFlags |= ImGuiWindowFlags_NoScrollbar;
     }
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * ui_s);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0, 0, 0, 0));
@@ -524,7 +526,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
                     const bool is_act = (st.id == active_st && str.id == active_str);
                     ImGui::PushID(stream_idx++);
 
-                    const float play_w = 30.0f;
+                    const float play_w = 30.0f * ui_s;
                     const float play_x = ImGui::GetWindowContentRegionMax().x - play_w -
                                          ImGui::GetStyle().FramePadding.x;
                     ImGui::AlignTextToFramePadding();

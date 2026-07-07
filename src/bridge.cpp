@@ -226,7 +226,6 @@ void run_bridge(HMODULE self) noexcept {
 
     // Own the sole audio source and hand a raw pointer to the manager.
     auto shoutcast = std::make_unique<sources::ShoutcastSource>(resolved_cfg.shoutcast);
-    shoutcast->set_volume_normalization(cfg.audio.volume_normalization);
     shoutcast->set_artwork_lookup_enabled(cfg.overlay.artwork_lookup_enabled);
     shoutcast->set_grace_period_ms(static_cast<int64_t>(cfg.overlay.metadata_grace_period * 1000.0f));
     TextureInjector::instance().set_cache_enabled(cfg.overlay.artwork_cache_enabled);

@@ -135,7 +135,33 @@ void ApplyTheme(int idx) {
         case 0: ApplyBessDark(); break;
         case 1: ApplyTokyoNight(); break;
         default: ApplyBessDark(); break;
-    }        
+    }
+    // Scale all pixel-based style values by the current UI scale factor.
+    // Theme functions set values for 1080p; this multiplies them so the
+    // UI looks correct at any resolution.
+    const float s = g_ui.ui_scale;
+    if (s != 1.0f) {
+        ImGuiStyle& st = ImGui::GetStyle();
+        st.WindowPadding   = ImVec2(st.WindowPadding.x * s, st.WindowPadding.y * s);
+        st.FramePadding    = ImVec2(st.FramePadding.x * s, st.FramePadding.y * s);
+        st.ItemSpacing     = ImVec2(st.ItemSpacing.x * s, st.ItemSpacing.y * s);
+        st.ItemInnerSpacing= ImVec2(st.ItemInnerSpacing.x * s, st.ItemInnerSpacing.y * s);
+        st.IndentSpacing   *= s;
+        st.ScrollbarSize   *= s;
+        st.GrabMinSize     *= s;
+        st.WindowBorderSize*= s;
+        st.ChildBorderSize *= s;
+        st.PopupBorderSize *= s;
+        st.FrameBorderSize *= s;
+        st.TabBorderSize   *= s;
+        st.WindowRounding  *= s;
+        st.ChildRounding   *= s;
+        st.FrameRounding   *= s;
+        st.PopupRounding   *= s;
+        st.ScrollbarRounding*= s;
+        st.GrabRounding    *= s;
+        st.TabRounding     *= s;
+    }
 }
 
 int theme_index(std::string_view value) noexcept {

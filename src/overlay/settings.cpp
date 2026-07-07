@@ -27,7 +27,7 @@ static void settings_label_row(const char* text) {
 
 static void begin_settings_table(const char* id) {
     ImGui::BeginTable(id, 2, ImGuiTableFlags_None);
-    ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 168.0f);
+    ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 168.0f * g_ui.ui_scale);
     ImGui::TableSetupColumn("widget", ImGuiTableColumnFlags_WidthStretch);
 }
 
@@ -45,19 +45,6 @@ void draw_audio_settings_tab() {
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
-    }
-
-    settings_label_row("Volume Normalization");
-    bool vol_norm = g_ctx.store->snapshot().audio.volume_normalization;
-    if (ImGui::Checkbox("##vol_norm", &vol_norm)) {
-        g_ctx.store->patch([&](Config& c) { c.audio.volume_normalization = vol_norm; });
-        if (g_ctx.mgr) {
-            auto* sc = dynamic_cast<frdx::sources::ShoutcastSource*>(g_ctx.mgr->active());
-            if (sc) sc->set_volume_normalization(vol_norm);
-        }
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Apply EBU R128 loudness normalization (ffmpeg loudnorm filter).\nTakes effect on the next stream reconnect.");
     }
 
     settings_label_row("Album Art Lookup");
@@ -397,9 +384,10 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     const float set_tb    = ImGui::GetFrameHeight();
     const auto* vp        = ImGui::GetMainViewport();
     const float win_top   = layout.pos.y + layout.size.y - set_tb;
-    const float vp_room   = std::max(220.0f, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f);
-    const float target_w  = std::clamp(layout.size.x - 28.0f, 360.0f, 480.0f);
-    const float target_h  = std::clamp(g_ui.settings_content_height, set_tb + 130.0f, vp_room);
+    const float ui_s      = g_ui.ui_scale;
+    const float vp_room   = std::max(220.0f * ui_s, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f * ui_s);
+    const float target_w  = std::clamp(layout.size.x - 28.0f * ui_s, 360.0f * ui_s, 480.0f * ui_s);
+    const float target_h  = std::clamp(g_ui.settings_content_height, set_tb + 130.0f * ui_s, vp_room);
     const float current_h = std::max(set_tb + 4.0f, target_h * eased);
     const float target_x  = layout.pos.x + (layout.size.x - target_w) * 0.5f;
     ImGui::SetNextWindowPos(ImVec2(target_x, win_top), ImGuiCond_Always);

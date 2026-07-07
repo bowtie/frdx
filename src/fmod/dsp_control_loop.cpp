@@ -124,11 +124,29 @@ void ControlLoop::run(const std::stop_token& tok) {
                 game_radio_off = gs.radio_off;
             }
             frdx::overlay::set_radio_active(game_radio_on);
+
+            // Edge detection: radio turning back on after being off.
+            // Force immediate rehook instead of waiting for the 5s discovery
+            // retry timer or the 2s FMOD callback freeze detection.
+            if (was_radio_off_ && !game_radio_off) {
+                log::info("[ctrl] radio turned back on; forcing immediate rehook");
+                next_discovery = now;
+                target_acquired = acquire_target().has_value();
+                if (target_acquired) {
+                    bridge_.retarget_if_needed();
+                    auto* active = bridge_.manager().active();
+                    if (active && active->playback_state() != PlaybackState::playing) {
+                        active->on_radio_audible(true);
+                    }
+                }
+            }
+            was_radio_off_ = game_radio_off;
+
             // When the user turns the radio off in-game, immediately signal
             // the source that the radio is inaudible instead of waiting for
             // the FMOD callback to freeze (which takes 2s and triggers
             // expensive discovery scans).  on_radio_audible(false) stops the
-            // pipe and restores the station placeholder; on resume,
+            // stream and restores the station placeholder; on resume,
             // drain_pending_ discards the stale buffer before replaying.
             if (game_radio_off) {
                 auto* active = bridge_.manager().active();

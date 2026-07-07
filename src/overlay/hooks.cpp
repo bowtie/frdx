@@ -296,6 +296,23 @@ void post_resize(IDXGISwapChain* swapChain) {
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
 
+    // Update UI scale if the resolution changed.
+    const float new_scale = static_cast<float>(desc.BufferDesc.Height) / 1080.0f;
+    if (desc.BufferDesc.Width != g_ui.display_width ||
+        desc.BufferDesc.Height != g_ui.display_height) {
+        g_ui.display_width  = desc.BufferDesc.Width;
+        g_ui.display_height = desc.BufferDesc.Height;
+        g_ui.ui_scale       = new_scale;
+        re_log::info("render resolution changed: {}x{} (ui_scale={:.2f})",
+                     desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
+        // Reload font at new scale.  Must invalidate the font atlas
+        // and recreate DX12 device objects for the new texture.
+        ImGui::GetIO().Fonts->Clear();
+        load_overlay_font(g_ui.ui_scale);
+        ImGui::GetIO().Fonts->Build();
+        ImGui_ImplDX12_InvalidateDeviceObjects();
+    }
+
     SIZE_T rtvDescriptorSize =
         g_dx.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_dx.rtv_heap.cpu_base;
@@ -369,6 +386,13 @@ hook_CreateSwapChainForHwnd(IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWn
 bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     DXGI_SWAP_CHAIN_DESC desc;
     pSwapChain->GetDesc(&desc);
+
+    // Calculate UI scale based on render resolution (1080p = 1.0).
+    g_ui.display_width  = desc.BufferDesc.Width;
+    g_ui.display_height = desc.BufferDesc.Height;
+    g_ui.ui_scale       = static_cast<float>(desc.BufferDesc.Height) / 1080.0f;
+    re_log::info("render resolution: {}x{} (ui_scale={:.2f})",
+                 desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
 
     if (!desc.OutputWindow) {
         re_log::error("SwapChain OutputWindow is NULL! Aborting ImGui initialization.");
@@ -473,7 +497,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // behaviour global and survives any future window that enables
     // resize by default.
     ImGui::GetIO().ConfigWindowsResizeFromEdges = false;
-    load_overlay_font();
+    load_overlay_font(g_ui.ui_scale);
     ImGui_ImplWin32_Init(desc.OutputWindow);
 
     ImGui_ImplDX12_InitInfo init_info;

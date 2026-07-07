@@ -180,6 +180,11 @@ struct UiState {
     std::atomic<bool> console_visible{false}, hud_visible{true};
     std::atomic<bool> mouse_capture{false};
     bool is_init = false, cursor_visible = true;
+    // UI scaling: all hardcoded pixel values are designed for 1080p and
+    // multiplied by ui_scale at use sites.  Updated from the swap chain
+    // resolution in init_imgui() and post_resize().
+    float ui_scale = 1.0f;
+    UINT display_width = 1920, display_height = 1080;
     std::chrono::steady_clock::time_point cursor_hidden_candidate_since{}, cursor_hidden_since{};
     float interactive_alpha = 1.0f, interactive_draw_alpha = 1.0f;
     bool cursor_child_close_elapsed = false, cursor_hide_delay_elapsed = false;
@@ -386,7 +391,7 @@ void start_action_worker();
 void stop_action_worker();
 void enqueue_station_switch(std::string station_id, std::string stream_id);
 bool wait_for_fence(UINT64 fence_value);
-void load_overlay_font();
+void load_overlay_font(float scale = 1.0f);
 void load_background_texture(ID3D12CommandQueue* queue);
 
 // ── Dual-Kawase backdrop blur (KWin-style) ──

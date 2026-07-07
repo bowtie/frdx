@@ -85,6 +85,7 @@ void draw_toasts() {
     auto* viewport       = ImGui::GetMainViewport();
     const ImVec2 vp_pos  = viewport->WorkPos;
     const ImVec2 vp_size = viewport->WorkSize;
+    const float ui_s     = g_ui.ui_scale;
     const int pos_idx    = std::clamp(g_ui.notification_position_idx, 0, 5);
     const bool top       = pos_idx <= 2;
     const bool left      = pos_idx == 0 || pos_idx == 3;
@@ -94,27 +95,27 @@ void draw_toasts() {
     ImVec2 pivot;
     switch (pos_idx) {
         case 1:
-            anchor = ImVec2(vp_pos.x + vp_size.x * 0.5f, vp_pos.y + 28.0f);
+            anchor = ImVec2(vp_pos.x + vp_size.x * 0.5f, vp_pos.y + 28.0f * ui_s);
             pivot  = ImVec2(0.5f, 0.0f);
             break;
         case 2:
-            anchor = ImVec2(vp_pos.x + vp_size.x - 18.0f, vp_pos.y + 28.0f);
+            anchor = ImVec2(vp_pos.x + vp_size.x - 18.0f * ui_s, vp_pos.y + 28.0f * ui_s);
             pivot  = ImVec2(1.0f, 0.0f);
             break;
         case 3:
-            anchor = ImVec2(vp_pos.x + 18.0f, vp_pos.y + vp_size.y - 28.0f);
+            anchor = ImVec2(vp_pos.x + 18.0f * ui_s, vp_pos.y + vp_size.y - 28.0f * ui_s);
             pivot  = ImVec2(0.0f, 1.0f);
             break;
         case 4:
-            anchor = ImVec2(vp_pos.x + vp_size.x * 0.5f, vp_pos.y + vp_size.y - 28.0f);
+            anchor = ImVec2(vp_pos.x + vp_size.x * 0.5f, vp_pos.y + vp_size.y - 28.0f * ui_s);
             pivot  = ImVec2(0.5f, 1.0f);
             break;
         case 5:
-            anchor = ImVec2(vp_pos.x + vp_size.x - 18.0f, vp_pos.y + vp_size.y - 28.0f);
+            anchor = ImVec2(vp_pos.x + vp_size.x - 18.0f * ui_s, vp_pos.y + vp_size.y - 28.0f * ui_s);
             pivot  = ImVec2(1.0f, 1.0f);
             break;
         default:
-            anchor = ImVec2(vp_pos.x + 18.0f, vp_pos.y + 28.0f);
+            anchor = ImVec2(vp_pos.x + 18.0f * ui_s, vp_pos.y + 28.0f * ui_s);
             pivot  = ImVec2(0.0f, 0.0f);
             break;
     }
@@ -132,36 +133,36 @@ void draw_toasts() {
 
         ImVec2 slide{};
         if (center) {
-            slide.y = (top ? -1.0f : 1.0f) * (1.0f - enter) * 44.0f;
+            slide.y = (top ? -1.0f : 1.0f) * (1.0f - enter) * 44.0f * ui_s;
         } else if (left) {
-            slide.x = -(1.0f - enter) * 72.0f;
+            slide.x = -(1.0f - enter) * 72.0f * ui_s;
         } else if (right) {
-            slide.x = (1.0f - enter) * 72.0f;
+            slide.x = (1.0f - enter) * 72.0f * ui_s;
         }
-        slide.y += (top ? 1.0f : -1.0f) * (1.0f - enter) * 6.0f * static_cast<float>(idx);
+        slide.y += (top ? 1.0f : -1.0f) * (1.0f - enter) * 6.0f * ui_s * static_cast<float>(idx);
 
         ImGui::SetNextWindowBgAlpha(0.88f * alpha);
         ImGui::SetNextWindowPos(ImVec2(anchor.x + slide.x, y + slide.y), ImGuiCond_Always, pivot);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(420.0f, 180.0f));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f * ui_s, 0.0f), ImVec2(420.0f * ui_s, 180.0f * ui_s));
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                  ImGuiWindowFlags_NoSavedSettings |
                                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
                                  ImGuiWindowFlags_NoMove;
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * ui_s);
         char window_name[32];
         std::snprintf(window_name, sizeof(window_name), "##frdx_toast_%d", idx);
         ImGui::Begin(window_name, nullptr, flags);
         // Backdrop blur, faded with the toast's enter/exit animation.
         draw_backdrop_blur(alpha);
         const int blur_widget_pushes = push_blur_widget_styles(alpha);
-        ImGui::PushTextWrapPos(390.0f);
+        ImGui::PushTextWrapPos(390.0f * ui_s);
         ImGui::TextColored(toast_color(it->kind), "%s", it->title.c_str());
         if (!it->detail.empty()) {
             ImGui::TextWrapped("%s", it->detail.c_str());
         }
         ImGui::PopTextWrapPos();
-        y += (top ? 1.0f : -1.0f) * (ImGui::GetWindowSize().y + 8.0f);
+        y += (top ? 1.0f : -1.0f) * (ImGui::GetWindowSize().y + 8.0f * ui_s);
         pop_blur_widget_styles(blur_widget_pushes);
         ImGui::End();
         ImGui::PopStyleVar(2);

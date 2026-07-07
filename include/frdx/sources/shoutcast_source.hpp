@@ -177,7 +177,6 @@ public:
     void pump(RingBuffer& ring) override FRDX_EXCLUDES(mu_);
     void on_radio_audible(bool audible) override FRDX_EXCLUDES(mu_);
 
-    void set_volume_normalization(bool on) noexcept { volume_norm_.store(on, std::memory_order_release); }
     void set_artwork_lookup_enabled(bool on) noexcept { artwork_lookup_enabled_.store(on, std::memory_order_release); }
     void set_grace_period_ms(int64_t ms) noexcept { grace_period_ms_.store(ms, std::memory_order_release); }
 
@@ -233,7 +232,6 @@ private:
     launch_stream(const std::string& url, void* winhttp_session);
 
     ShoutcastConfig cfg_;
-    std::atomic<bool> volume_norm_{false};
     std::atomic<bool> artwork_lookup_enabled_{true};
     std::atomic<int64_t> grace_period_ms_{2500};
     // Stall detection: tracks the last time the decoder produced audio data.

@@ -23,7 +23,7 @@
 namespace frdx::overlay {
 using namespace frdx;
 
-void load_overlay_font() {
+void load_overlay_font(float scale) {
     auto& io             = ImGui::GetIO();
     const auto font_path = module_directory() / "mods" / "frdx" / "fonts" / "FusionPixel12-ja.ttf";
     if (!std::filesystem::exists(font_path)) {
@@ -33,15 +33,18 @@ void load_overlay_font() {
         return;
     }
 
+    // Base font size is 16px at 1080p.  Scale proportionally to the
+    // render resolution so the UI is readable at 4K and not oversized at 720p.
+    const float font_size = 16.0f * scale;
     ImFontConfig cfg{};
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH  = true;
-    auto* font      = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg);
+    auto* font      = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), font_size, &cfg);
     if (font) {
         io.FontDefault = font;
-        log::info("[overlay] loaded Fusion Pixel 12px ImGui font at 16px from {}",
-                  font_path.string());
+        log::info("[overlay] loaded Fusion Pixel font at {:.1f}px (scale={:.2f}) from {}",
+                  font_size, scale, font_path.string());
     } else {
         log::warn("[overlay] failed to load {}; using ImGui default font", font_path.string());
         io.Fonts->AddFontDefault();

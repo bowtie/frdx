@@ -93,6 +93,7 @@ private:
     int idle_ticks_               = 0;
     bool audible_primed_          = false;
     bool radio_audible_           = true;
+    bool was_radio_off_           = false; // edge detection for radio_off → on
     // FMOD callback freeze/resume diagnostics
     bool callback_frozen_         = false;
     std::chrono::steady_clock::time_point freeze_start_{};
