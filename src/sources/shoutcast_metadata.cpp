@@ -293,10 +293,11 @@ void MetadataController::run_ws_poller(std::string url,
         ScopedWinHttp ws(hWebSocket);
         (void)conn.request.release();
 
-        // Set a longer receive timeout for the WebSocket — the session-level
-        // 5s timeout is too aggressive for WebSocket idle periods.  Use 60s
-        // so we don't spin on ERROR_WINHTTP_TIMEOUT between heartbeats.
-        DWORD ws_recv_timeout = 60000;
+        // Set a receive timeout shorter than the heartbeat interval so we
+        // wake up frequently enough to send heartbeats on time.  Using a
+        // fixed 10s timeout ensures we never miss a heartbeat deadline
+        // (typically 30-45s) even when the server is idle.
+        DWORD ws_recv_timeout = 10000;
         WinHttpSetOption(hWebSocket, WINHTTP_OPTION_RECEIVE_TIMEOUT,
                          &ws_recv_timeout, sizeof(ws_recv_timeout));
 
@@ -306,7 +307,9 @@ void MetadataController::run_ws_poller(std::string url,
         }
         log::info("[shoutcast] ws: connected to {}", url);
 
-        // Send subscribe message on connect (if configured).
+        // Send subscribe/IDENTIFY message on connect (if configured).
+        // For listen.moe this sends {"op": 0, "d": {"auth": ""}} which
+        // the server requires before it will send track updates.
         if (!sub.message.empty()) {
             DWORD err = WinHttpWebSocketSend(hWebSocket,
                                              WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
@@ -318,20 +321,16 @@ void MetadataController::run_ws_poller(std::string url,
 
         int heartbeat_ms    = hb.default_interval_ms;
         auto last_heartbeat = std::chrono::steady_clock::now();
-
-        if (!hb.message.empty()) {
-            DWORD err = WinHttpWebSocketSend(hWebSocket,
-                                             WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                                             const_cast<char*>(hb.message.data()),
-                                             static_cast<DWORD>(hb.message.size()));
-            if (err != ERROR_SUCCESS)
-                log::warn("[shoutcast] ws: heartbeat send failed ({})", err);
-            last_heartbeat = std::chrono::steady_clock::now();
-        }
+        // Don't send heartbeats until the server sends a HELLO message
+        // containing the heartbeat interval.  Sending heartbeats before
+        // the server is ready can cause it to disconnect us.
+        // If no interval_field is configured (e.g. J1 Radio uses a fixed
+        // interval), prime immediately.
+        bool heartbeat_primed = hb.interval_field.empty();
 
         // Receive loop
         while (!stop.stop_requested()) {
-            if (!hb.message.empty()) {
+            if (heartbeat_primed && !hb.message.empty()) {
                 auto now     = std::chrono::steady_clock::now();
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    now - last_heartbeat).count();
@@ -387,11 +386,28 @@ void MetadataController::run_ws_poller(std::string url,
                 msg = json::parse(recvBuf, recvBuf + bytesRead);
             } catch (...) { continue; }
 
+            // Check for heartbeat interval in the server response (e.g.
+            // listen.moe's HELLO message: {"op": 0, "d": {"heartbeat": 45000}}).
+            // When we receive it, prime the heartbeat timer and send an
+            // initial heartbeat immediately.
             if (!hb.interval_field.empty()) {
                 std::string ival = resolve_json_path(msg, hb.interval_field);
                 if (!ival.empty()) {
-                    if (auto new_interval = parse_positive_int(ival))
+                    if (auto new_interval = parse_positive_int(ival)) {
                         heartbeat_ms = *new_interval;
+                        if (!heartbeat_primed) {
+                            heartbeat_primed = true;
+                            log::info("[shoutcast] ws: heartbeat primed (interval={}ms)", heartbeat_ms);
+                            // Send initial heartbeat immediately.
+                            if (!hb.message.empty()) {
+                                WinHttpWebSocketSend(hWebSocket,
+                                    WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
+                                    const_cast<char*>(hb.message.data()),
+                                    static_cast<DWORD>(hb.message.size()));
+                            }
+                            last_heartbeat = std::chrono::steady_clock::now();
+                        }
+                    }
                 }
             }
 
