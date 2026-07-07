@@ -129,18 +129,18 @@ static bool record_screenshot_copy(ID3D12GraphicsCommandList* cmd, ID3D12Resourc
         &dst.PlacedFootprint, nullptr, nullptr, &g_screenshot_total_size);
     g_screenshot_row_pitch = static_cast<UINT>(dst.PlacedFootprint.Footprint.RowPitch);
 
-    // Backbuffer is in COMMON state.  Use explicit barriers:
-    // COMMON → COPY_SOURCE → copy → COMMON
-    // Then the overlay's existing COMMON → RENDER_TARGET transition works.
+    // Backbuffer is in RENDER_TARGET state (transitioned by the overlay
+    // before the blur code runs).  Use the same pattern as the blur code:
+    // RENDER_TARGET → COPY_SOURCE → copy → RENDER_TARGET.
     D3D12_RESOURCE_BARRIER to_copy = transition_barrier(
-        bb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     cmd->ResourceBarrier(1, &to_copy);
 
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
-    D3D12_RESOURCE_BARRIER back_to_common = transition_barrier(
-        bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-    cmd->ResourceBarrier(1, &back_to_common);
+    D3D12_RESOURCE_BARRIER back_to_rt = transition_barrier(
+        bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmd->ResourceBarrier(1, &back_to_rt);
 
     g_screenshot_pending = true;
     return true;
@@ -809,15 +809,6 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         ID3D12Resource* bb = g_dx.fb_bufs[backBufferIdx].get();
 
-        // Debug screenshot: record the backbuffer copy BEFORE transitioning
-        // to RENDER_TARGET.  The backbuffer is in COMMON state here, so
-        // implicit promotion to COPY_SOURCE applies.  The PNG is saved
-        // after the fence signals (below).
-        if (g_capture_backbuffer_requested.exchange(false,
-                std::memory_order_acq_rel)) {
-            record_screenshot_copy(g_dx.cmd_list.get(), bb);
-        }
-
         // Transition backbuffer to RENDER_TARGET for ImGui rendering.
         // Use COMMON as the source state — D3D12 swap-chain back buffers
         // decay to COMMON after Present, and COMMON can be implicitly
@@ -833,6 +824,16 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // (now in RENDER_TARGET) and run the down/up-sample passes into
         // blur_tex[0].  No-op when disabled.  Restores bb to RENDER_TARGET.
         capture_and_blur_backbuffer(g_dx.cmd_list.get(), bb);
+
+        // Debug screenshot: copy the backbuffer to a readback buffer.
+        // This runs AFTER the blur (which is after the RENDER_TARGET
+        // transition) but BEFORE ImGui draws, so the capture has the
+        // game's frame without overlay.  Uses the same state pattern as
+        // the blur code: RENDER_TARGET → COPY_SOURCE → copy → RENDER_TARGET.
+        if (g_capture_backbuffer_requested.exchange(false,
+                std::memory_order_acq_rel)) {
+            record_screenshot_copy(g_dx.cmd_list.get(), bb);
+        }
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
