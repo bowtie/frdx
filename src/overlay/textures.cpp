@@ -33,9 +33,13 @@ void load_overlay_font(float scale) {
         return;
     }
 
-    // Base font size is 16px at 1080p.  Scale proportionally to the
-    // render resolution so the UI is readable at 4K and not oversized at 720p.
-    const float font_size = 16.0f * scale;
+    // Base font size is 16px at 1080p.  Fusion Pixel is a pixel font, so
+    // fractional scaling causes uneven glyph scaling (shimmering).  Snap
+    // to the nearest integer multiple of the base size: 1x (16px), 2x
+    // (32px), 3x (48px).  Minimum 1x so the UI is always legible.
+    const int int_scale  = std::max(1, static_cast<int>(std::round(scale)));
+    const float font_size = 16.0f * static_cast<float>(int_scale);
+    const float effective_scale = static_cast<float>(int_scale);
     ImFontConfig cfg{};
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
@@ -43,8 +47,9 @@ void load_overlay_font(float scale) {
     auto* font      = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), font_size, &cfg);
     if (font) {
         io.FontDefault = font;
-        log::info("[overlay] loaded Fusion Pixel font at {:.1f}px (scale={:.2f}) from {}",
-                  font_size, scale, font_path.string());
+        g_ui.ui_scale = effective_scale;
+        log::info("[overlay] loaded Fusion Pixel font at {:.0f}px (int_scale={}x) from {}",
+                  font_size, int_scale, font_path.string());
     } else {
         log::warn("[overlay] failed to load {}; using ImGui default font", font_path.string());
         io.Fonts->AddFontDefault();
