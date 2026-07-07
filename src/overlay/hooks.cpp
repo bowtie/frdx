@@ -825,16 +825,6 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // blur_tex[0].  No-op when disabled.  Restores bb to RENDER_TARGET.
         capture_and_blur_backbuffer(g_dx.cmd_list.get(), bb);
 
-        // Debug screenshot: copy the backbuffer to a readback buffer.
-        // This runs AFTER the blur (which is after the RENDER_TARGET
-        // transition) but BEFORE ImGui draws, so the capture has the
-        // game's frame without overlay.  Uses the same state pattern as
-        // the blur code: RENDER_TARGET → COPY_SOURCE → copy → RENDER_TARGET.
-        if (g_capture_backbuffer_requested.exchange(false,
-                std::memory_order_acq_rel)) {
-            record_screenshot_copy(g_dx.cmd_list.get(), bb);
-        }
-
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
         // Render custom dashboard panel UI
@@ -864,6 +854,14 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
+
+        // Debug screenshot: copy the backbuffer (with overlay drawn on
+        // top) to a readback buffer.  Uses the same state pattern as the
+        // blur code: RENDER_TARGET → COPY_SOURCE → copy → RENDER_TARGET.
+        if (g_capture_backbuffer_requested.exchange(false,
+                std::memory_order_acq_rel)) {
+            record_screenshot_copy(g_dx.cmd_list.get(), bb);
+        }
 
         // Transition backbuffer back to COMMON — the safe decay state.
         // Present works from COMMON (the runtime handles the final
