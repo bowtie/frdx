@@ -289,6 +289,21 @@ void pre_resize() {
     re_log::info("released DX12 backbuffer RTV resources before resize");
 }
 
+// Compute UI scale from the monitor resolution (not the swap chain
+// resolution, which may differ due to dynamic resolution scaling).
+// 1080p monitor = 1.0x, 1440p = 1.33x, 4K = 2.0x.
+static float compute_monitor_ui_scale(HWND hwnd) {
+    if (!hwnd) return 1.0f;
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (!monitor) return 1.0f;
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoA(monitor, &info)) return 1.0f;
+    const int monitor_height = info.rcMonitor.bottom - info.rcMonitor.top;
+    if (monitor_height <= 0) return 1.0f;
+    return static_cast<float>(monitor_height) / 1080.0f;
+}
+
 // Re-creates the RTV descriptors and g_dx.fb_bufs immediately after ResizeBuffers
 void post_resize(IDXGISwapChain* swapChain) {
     if (!g_ui.is_init || !g_dx.device) return;
@@ -296,17 +311,14 @@ void post_resize(IDXGISwapChain* swapChain) {
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
 
-    // Update UI scale if the resolution changed.
-    const float new_scale = static_cast<float>(desc.BufferDesc.Height) / 1080.0f;
-    if (desc.BufferDesc.Width != g_ui.display_width ||
-        desc.BufferDesc.Height != g_ui.display_height) {
-        g_ui.display_width  = desc.BufferDesc.Width;
-        g_ui.display_height = desc.BufferDesc.Height;
-        g_ui.ui_scale       = new_scale;
-        re_log::info("render resolution changed: {}x{} (ui_scale={:.2f})",
-                     desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
-        // Reload font at new scale.  Must invalidate the font atlas
-        // and recreate DX12 device objects for the new texture.
+    // Recalculate UI scale from the monitor resolution (not the swap
+    // chain, which may differ due to dynamic resolution scaling).  Only
+    // reload the font if the monitor resolution actually changed (e.g.
+    // window moved to a different display).
+    const auto mon_scale = compute_monitor_ui_scale(desc.OutputWindow);
+    if (mon_scale != g_ui.ui_scale) {
+        g_ui.ui_scale = mon_scale;
+        re_log::info("monitor resolution changed (ui_scale={:.2f})", g_ui.ui_scale);
         ImGui::GetIO().Fonts->Clear();
         load_overlay_font(g_ui.ui_scale);
         ImGui::GetIO().Fonts->Build();
@@ -387,17 +399,19 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     DXGI_SWAP_CHAIN_DESC desc;
     pSwapChain->GetDesc(&desc);
 
-    // Calculate UI scale based on render resolution (1080p = 1.0).
-    g_ui.display_width  = desc.BufferDesc.Width;
-    g_ui.display_height = desc.BufferDesc.Height;
-    g_ui.ui_scale       = static_cast<float>(desc.BufferDesc.Height) / 1080.0f;
-    re_log::info("render resolution: {}x{} (ui_scale={:.2f})",
-                 desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
-
     if (!desc.OutputWindow) {
         re_log::error("SwapChain OutputWindow is NULL! Aborting ImGui initialization.");
         return false;
     }
+
+    // Calculate UI scale from the monitor resolution, not the swap chain
+    // resolution.  The game uses dynamic resolution scaling, so the swap
+    // chain may be smaller than the display (e.g. 720p on a 1080p monitor).
+    // Using the monitor resolution ensures the UI is always sized for the
+    // actual display, not the internal render resolution.
+    g_ui.ui_scale = compute_monitor_ui_scale(desc.OutputWindow);
+    re_log::info("swap chain: {}x{}, monitor ui_scale={:.2f}",
+                 desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
 
     original_wnd_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
         desc.OutputWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wnd_proc_hook)));
