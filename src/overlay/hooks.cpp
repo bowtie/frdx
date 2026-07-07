@@ -52,86 +52,164 @@ using namespace frdx;
 // Debug flag: set by the Debug tab to request a screenshot capture.
 std::atomic<bool> g_capture_backbuffer_requested{false};
 
-// ── Debug screenshot (CPU-side, no GPU touch) ──────────────────────────
-// Captures the game window via GDI BitBlt — a pure CPU-side operation
-// that doesn't touch any GPU resources the game owns, so it can't cause
-// TDR / video card crashes.  Saves to %TEMP%\frdx_capture_<ts>.png.
-static void capture_screenshot_to_png() {
-    HWND hwnd = GetForegroundWindow();
-    if (!hwnd) {
-        re_log::warn("[capture] no foreground window");
+// Forward declaration — defined later in the file.
+ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain);
+
+// ── Debug screenshot (GPU-side, captures backbuffer at native res) ──────
+// Copies the D3D12 backbuffer to a readback buffer and saves it as PNG.
+// Captures at the swap chain resolution (e.g. 4K with DSR), not the
+// monitor's physical resolution.  Saves to %TEMP%\frdx_capture_<ts>.png.
+static void capture_screenshot_to_png(IDXGISwapChain* pSwapChain, UINT backBufferIdx) {
+    if (!pSwapChain || !g_dx.device || backBufferIdx >= g_dx.fb_bufs.size() ||
+        !g_dx.fb_bufs[backBufferIdx]) {
+        re_log::warn("[capture] invalid backbuffer for screenshot");
         return;
     }
 
-    RECT rc{};
-    if (!GetClientRect(hwnd, &rc) || rc.right == 0 || rc.bottom == 0) {
-        re_log::warn("[capture] failed to get window rect");
-        return;
-    }
-    const int width  = rc.right;
-    const int height = rc.bottom;
+    // Get the backbuffer description to size the readback buffer.
+    auto* bb = g_dx.fb_bufs[backBufferIdx].get();
+    D3D12_RESOURCE_DESC desc = bb->GetDesc();
+    const UINT width  = static_cast<UINT>(desc.Width);
+    const UINT height = static_cast<UINT>(desc.Height);
 
-    HDC hdc_screen = GetDC(hwnd);
-    if (!hdc_screen) {
-        re_log::warn("[capture] GetDC failed");
-        return;
-    }
+    // Create a readback buffer (CPU-accessible) large enough for the
+    // backbuffer pixels.  Use RGBA8 layout to match the backbuffer.
+    D3D12_RESOURCE_DESC readback_desc = desc;
+    readback_desc.Dimension         = D3D12_RESOURCE_DIMENSION_BUFFER;
+    readback_desc.Layout            = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    readback_desc.Width             = static_cast<UINT64>(width) * height * 4;
+    readback_desc.Height            = 1;
+    readback_desc.DepthOrArraySize  = 1;
+    readback_desc.MipLevels         = 1;
+    readback_desc.Format            = DXGI_FORMAT_UNKNOWN;
+    readback_desc.SampleDesc.Count  = 1;
+    readback_desc.SampleDesc.Quality = 0;
 
-    HDC hdc_mem = CreateCompatibleDC(hdc_screen);
-    if (!hdc_mem) {
-        ReleaseDC(hwnd, hdc_screen);
-        re_log::warn("[capture] CreateCompatibleDC failed");
-        return;
-    }
+    D3D12_HEAP_PROPERTIES heap_props{};
+    heap_props.Type                 = D3D12_HEAP_TYPE_READBACK;
+    heap_props.CreationNodeMask     = 1;
+    heap_props.VisibleNodeMask      = 1;
 
-    HBITMAP hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
-    if (!hbitmap) {
-        DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
-        re_log::warn("[capture] CreateCompatibleBitmap failed");
-        return;
-    }
-
-    HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(hdc_mem, hbitmap));
-
-    // BitBlt the screen content into our bitmap
-    if (!BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY)) {
-        re_log::warn("[capture] BitBlt failed");
-        SelectObject(hdc_mem, old_bmp);
-        DeleteObject(hbitmap);
-        DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
+    wil::com_ptr<ID3D12Resource> readback_buf;
+    if (FAILED(g_dx.device->CreateCommittedResource(
+            &heap_props, D3D12_HEAP_FLAG_NONE, &readback_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(readback_buf.put())))) {
+        re_log::warn("[capture] failed to create readback buffer");
         return;
     }
 
-    // Extract pixel data
-    BITMAPINFOHEADER bi{};
-    bi.biSize        = sizeof(BITMAPINFOHEADER);
-    bi.biWidth       = width;
-    bi.biHeight      = -height;  // top-down
-    bi.biPlanes      = 1;
-    bi.biBitCount    = 32;
-    bi.biCompression = BI_RGB;
+    // Use a separate command allocator/list so we don't interfere with
+    // the overlay's own command list.
+    wil::com_ptr<ID3D12CommandAllocator> cap_alloc;
+    if (FAILED(g_dx.device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT,
+            IID_PPV_ARGS(cap_alloc.put())))) {
+        re_log::warn("[capture] failed to create command allocator");
+        return;
+    }
 
+    wil::com_ptr<ID3D12GraphicsCommandList> cap_cmd;
+    if (FAILED(g_dx.device->CreateCommandList(
+            0, D3D12_COMMAND_LIST_TYPE_DIRECT, cap_alloc.get(), nullptr,
+            IID_PPV_ARGS(cap_cmd.put())))) {
+        re_log::warn("[capture] failed to create command list");
+        return;
+    }
+
+    // Transition backbuffer to COPY_SOURCE, copy to readback buffer,
+    // then transition back to its original state (COMMON/PRESENT).
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+    barriers[0].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[0].Transition.pResource   = bb;
+    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    cap_cmd->ResourceBarrier(1, &barriers[0]);
+
+    // Compute layout for the copy.  The backbuffer is likely
+    // DXGI_FORMAT_R8G8B8A8_UNORM (or similar 32bpp).  Footprint tells
+    // us the row pitch the GPU expects.
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource       = bb;
+    src.Type            = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource       = readback_buf.get();
+    dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.SubresourceIndex = 0;
+
+    UINT64 total_size = 0;
+    g_dx.device->GetCopyableFootprints(
+        &desc, 1, 0, readback_desc.Width, &dst.PlacedFootprint, nullptr,
+        nullptr, &total_size);
+
+    cap_cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    barriers[1].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[1].Transition.pResource   = bb;
+    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+    barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    cap_cmd->ResourceBarrier(1, &barriers[1]);
+
+    cap_cmd->Close();
+
+    // Execute on the game's direct command queue.
+    ID3D12CommandList* lists[] = {cap_cmd.get()};
+    // Find the command queue for this swap chain.
+    ID3D12CommandQueue* queue = command_queue_for_swapchain(pSwapChain);
+    if (!queue) {
+        re_log::warn("[capture] no command queue for swap chain");
+        return;
+    }
+    queue->ExecuteCommandLists(1, lists);
+
+    // Wait for the GPU to finish the copy using a fence.
+    wil::com_ptr<ID3D12Fence> cap_fence;
+    if (FAILED(g_dx.device->CreateFence(
+            0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(cap_fence.put())))) {
+        re_log::warn("[capture] failed to create fence");
+        return;
+    }
+    HANDLE cap_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!cap_event) {
+        re_log::warn("[capture] failed to create event");
+        return;
+    }
+    queue->Signal(cap_fence.get(), 1);
+    if (cap_fence->GetCompletedValue() < 1) {
+        cap_fence->SetEventOnCompletion(1, cap_event);
+        WaitForSingleObject(cap_event, 5000);  // 5s timeout
+    }
+    CloseHandle(cap_event);
+
+    // Map the readback buffer and extract pixel data.
+    D3D12_RANGE read_range{0, static_cast<SIZE_T>(total_size)};
+    uint8_t* mapped = nullptr;
+    if (FAILED(readback_buf->Map(0, &read_range,
+                                  reinterpret_cast<void**>(&mapped)))) {
+        re_log::warn("[capture] failed to map readback buffer");
+        return;
+    }
+
+    const UINT row_pitch   = static_cast<UINT>(dst.PlacedFootprint.Footprint.RowPitch);
     std::vector<uint8_t> pixels(width * height * 4);
-    if (GetDIBits(hdc_mem, hbitmap, 0, height, pixels.data(),
-                  reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS) <= 0) {
-        re_log::warn("[capture] GetDIBits failed");
-        SelectObject(hdc_mem, old_bmp);
-        DeleteObject(hbitmap);
-        DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
-        return;
+    for (UINT y = 0; y < height; ++y) {
+        std::memcpy(pixels.data() + y * width * 4,
+                    mapped + y * row_pitch, width * 4);
     }
 
-    SelectObject(hdc_mem, old_bmp);
-    DeleteObject(hbitmap);
-    DeleteDC(hdc_mem);
-    ReleaseDC(hwnd, hdc_screen);
+    readback_buf->Unmap(0, nullptr);
 
-    // GetDIBits returns BGRA; convert to RGBA for stb_image_write
-    for (size_t i = 0; i < pixels.size(); i += 4) {
-        std::swap(pixels[i], pixels[i + 2]);  // B <-> R
+    // Backbuffer is RGBA8; stb_image_write expects RGBA.  If the format
+    // is BGRA (some swap chains), swap R and B.
+    if (desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+        desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+        for (size_t i = 0; i < pixels.size(); i += 4) {
+            std::swap(pixels[i], pixels[i + 2]);
+        }
     }
 
     // Save to %TEMP%\frdx_capture_<timestamp>.png
@@ -155,8 +233,9 @@ static void capture_screenshot_to_png() {
     stbi_write_png(out_path.string().c_str(), width, height, 4,
                    pixels.data(), width * 4);
 
-    re_log::info("[capture] saved screenshot {}x{} to {}",
-                 width, height, out_path.string());
+    re_log::info("[capture] saved screenshot {}x{} (fmt={}) to {}",
+                 width, height, static_cast<int>(desc.Format),
+                 out_path.string());
 }
 
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -705,14 +784,6 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             }
         }
 
-        // Debug: take a CPU-side screenshot when requested by the Debug
-        // tab.  Runs before any overlay work so the capture has the
-        // game's frame without our ImGui drawn on top.
-        if (g_capture_backbuffer_requested.exchange(false,
-                std::memory_order_acq_rel)) {
-            capture_screenshot_to_png();
-        }
-
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
         if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible &&
             !g_ui.console_visible && !g_ui.hud_visible && !has_visible_toasts()) {
@@ -738,6 +809,14 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
                           "buf_size={}",
                           backBufferIdx, g_dx.fb_bufs.size());
             return false;
+        }
+
+        // Debug: take a GPU-side screenshot when requested by the Debug
+        // tab.  Captures the backbuffer at swap chain resolution (e.g.
+        // 4K when using DSR) before any overlay is drawn on top.
+        if (g_capture_backbuffer_requested.exchange(false,
+                std::memory_order_acq_rel)) {
+            capture_screenshot_to_png(pSwapChain, backBufferIdx);
         }
 
         // Find a ready command allocator from the pool.  Instead of
