@@ -441,14 +441,6 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     re_log::info("swap chain: {}x{}, monitor ui_scale={:.2f}",
                  desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
 
-    // Set ImGui DisplaySize to the swap chain resolution, not the window
-    // size.  The Win32 backend uses WM_SIZE (window size) which may differ
-    // from the swap chain resolution when the game uses a non-native
-    // render resolution.
-    ImGui::GetIO().DisplaySize = ImVec2(
-        static_cast<float>(desc.BufferDesc.Width),
-        static_cast<float>(desc.BufferDesc.Height));
-
     original_wnd_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
         desc.OutputWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wnd_proc_hook)));
     if (!original_wnd_proc) {
@@ -535,6 +527,13 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
 
     // ImGui Win32 + DX12 contexts
     ImGui::CreateContext();
+    // Set DisplaySize to the swap chain resolution, not the window size.
+    // The Win32 backend uses WM_SIZE (window size) which may differ from
+    // the swap chain resolution when the game uses a non-native render
+    // resolution.  The per-frame render loop enforces this continuously.
+    ImGui::GetIO().DisplaySize = ImVec2(
+        static_cast<float>(g_sc_width),
+        static_cast<float>(g_sc_height));
     // Force the resize handle to a single bottom-right grip across the
     // whole overlay.  ImGui 1.86+ defaults ConfigResizeWindowsFromEdges
     // to true, which lets the user drag from any window edge to resize --
