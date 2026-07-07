@@ -129,8 +129,19 @@ static bool record_screenshot_copy(ID3D12GraphicsCommandList* cmd, ID3D12Resourc
         &dst.PlacedFootprint, nullptr, nullptr, &g_screenshot_total_size);
     g_screenshot_row_pitch = static_cast<UINT>(dst.PlacedFootprint.Footprint.RowPitch);
 
-    // Backbuffer is in COMMON state — implicit promotion to COPY_SOURCE.
+    // Backbuffer is in COMMON state.  Use explicit barriers:
+    // COMMON → COPY_SOURCE → copy → COMMON
+    // Then the overlay's existing COMMON → RENDER_TARGET transition works.
+    D3D12_RESOURCE_BARRIER to_copy = transition_barrier(
+        bb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmd->ResourceBarrier(1, &to_copy);
+
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER back_to_common = transition_barrier(
+        bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    cmd->ResourceBarrier(1, &back_to_common);
+
     g_screenshot_pending = true;
     return true;
 }
