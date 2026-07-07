@@ -22,7 +22,7 @@ namespace frdx::sources {
 class MetadataController;
 
 enum class ShoutcastError {
-    pipe_creation_failed,
+    stream_creation_failed,
     spawn_failed,
 };
 
@@ -116,7 +116,7 @@ struct StationPreset {
 
 // ---- ShoutcastSource ----
 //
-// Streams audio from a Shoutcast / Icecast URL via ffmpeg.
+// Streams audio from a Shoutcast / Icecast URL via in-process mpg123 decoding.
 // Supports station presets (JSON catalog) with REST metadata polling
 // for live track info, plus ICY metadata from the stream stderr.
 class ShoutcastSource final : public IAudioSource, public IAudioMetadataProvider {
@@ -212,10 +212,10 @@ public:
     }
 
 private:
-    struct Pipe;
+    struct Stream;
 
-    void start_pipe_locked() FRDX_REQUIRES(mu_);
-    void stop_pipe_locked() FRDX_REQUIRES(mu_);
+    void start_stream_locked() FRDX_REQUIRES(mu_);
+    void stop_stream_locked() FRDX_REQUIRES(mu_);
     void restore_station_display_locked() FRDX_REQUIRES(mu_);
     void cycle_preset(int direction = 1) FRDX_REQUIRES(mu_);
     void cycle_and_restart(int direction) FRDX_EXCLUDES(mu_);
@@ -229,21 +229,21 @@ private:
         FRDX_EXCLUDES(mu_);
 
     // Launches an mpg123 in-process decoder for the given URL.  Does NOT lock mu_.
-    static std::expected<std::unique_ptr<Pipe>, ShoutcastError>
-    launch_mpg123_pipe(const std::string& url, void* winhttp_session);
+    static std::expected<std::unique_ptr<Stream>, ShoutcastError>
+    launch_stream(const std::string& url, void* winhttp_session);
 
     ShoutcastConfig cfg_;
     std::atomic<bool> volume_norm_{false};
     std::atomic<bool> artwork_lookup_enabled_{true};
     std::atomic<int64_t> grace_period_ms_{2500};
-    // Stall detection: tracks the last time ffmpeg produced audio data.
-    // When the pipe is alive but not producing data for >kStallTimeoutMs,
+    // Stall detection: tracks the last time the decoder produced audio data.
+    // When the stream is alive but not producing data for >kStallTimeoutMs,
     // we kill and reconnect the stream.
     std::atomic<int64_t> last_data_ms_{0};
-    // Lock-free audio path: pump() loads via acquire, start_pipe_locked() stores
-    // via release.  Shared ownership ensures the Pipe stays alive until pump()
-    // releases its local reference, even if stop_pipe_locked() replaces pipe_.
-    std::atomic<std::shared_ptr<Pipe>> pipe_{};
+    // Lock-free audio path: pump() loads via acquire, start_stream_locked() stores
+    // via release.  Shared ownership ensures the Stream stays alive until pump()
+    // releases its local reference, even if stop_stream_locked() replaces stream_.
+    std::atomic<std::shared_ptr<Stream>> stream_{};
 
     mutable frdx::Mutex mu_;
     std::string target_url_          FRDX_GUARDED_BY(mu_);
@@ -297,7 +297,7 @@ private:
     std::atomic<uint64_t> metadata_epoch_{1};
 
     // Audible state: when the game pauses or enters a menu, the radio
-    // becomes inaudible.  We kill the ffmpeg pipe to prevent live stream
+    // becomes inaudible.  We kill the stream to prevent live stream
     // drift (buffered audio plays from the past when resumed, causing
     // metadata desync).  On resume, we reconnect and drain the ring buffer.
     bool audible_   FRDX_GUARDED_BY(mu_) = true;

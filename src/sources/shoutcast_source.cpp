@@ -2,7 +2,6 @@
 #include "frdx/sources/shoutcast_helpers.hpp"
 #include "frdx/sources/shoutcast_metadata.hpp"
 #include "frdx/log.hpp"
-#include "frdx/platform/windows/subprocess.hpp"
 #include "frdx/overlay/overlay_priv.hpp"
 
 #include <nlohmann/json.hpp>
@@ -60,25 +59,8 @@ std::string url_encode(std::string_view s) {
     return out;
 }
 
-// PCM contract written by ffmpeg: 48000 Hz * 2 ch * 2 bytes.
+// PCM contract: 48000 Hz * 2 ch * 2 bytes (decoded by mpg123).
 constexpr std::uint64_t kPcmBytesPerSec = 48000ull * 2ull * 2ull;
-
-// Resolve the ffmpeg binary path.  Checks the configured path first, then
-// a bundled <game>/mods/frdx/ffmpeg/ffmpeg.exe, then falls back to PATH lookup.
-std::wstring resolve_ffmpeg_path(const std::filesystem::path& configured) {
-    if (!configured.empty()) return configured.wstring();
-    // Try bundled ffmpeg.exe next to the game executable.
-    wchar_t game_path[MAX_PATH];
-    DWORD n = GetModuleFileNameW(nullptr, game_path, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        auto bundled = std::filesystem::path{game_path}.parent_path() / "mods" / "frdx" / "ffmpeg" /
-                       "ffmpeg.exe";
-        std::error_code ec;
-        if (std::filesystem::exists(bundled, ec)) return bundled.wstring();
-    }
-    // Fall back to PATH lookup.
-    return L"ffmpeg";
-}
 
 // Load station presets from a JSON file matching the schema the user provided.
 std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path) {
@@ -201,15 +183,15 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
 
 } // namespace
 
-// ---- Pipe ----
+// ---- Stream ----
 
-struct ShoutcastSource::Pipe {
+struct ShoutcastSource::Stream {
     std::unique_ptr<Mpg123Stream> stream;
     std::uint64_t bytes_written = 0;
     std::uint64_t metadata_epoch = 0;
     bool ended                  = false;
 
-    ~Pipe() = default;
+    ~Stream() = default;
 };
 
 // ---- ShoutcastSource ----
@@ -228,7 +210,7 @@ ShoutcastSource::ShoutcastSource(ShoutcastConfig cfg) : cfg_{std::move(cfg)} {
 }
 
 ShoutcastSource::~ShoutcastSource() {
-    stop_pipe_locked();
+    stop_stream_locked();
 }
 
 bool ShoutcastSource::initialize() {
@@ -262,7 +244,7 @@ void ShoutcastSource::shutdown() noexcept {
     metadata_controller_->stop();
     {
         frdx::ScopedLock lk{mu_};
-        stop_pipe_locked();
+        stop_stream_locked();
     }
     if (winhttp_session_) {
         ScopedWinHttp give_me_a_name(static_cast<HINTERNET>(winhttp_session_));
@@ -285,9 +267,9 @@ void ShoutcastSource::load_stations(const std::filesystem::path& path) {
 
 // ---- mpg123 in-process stream launcher (no mu_ held) ----
 
-std::expected<std::unique_ptr<ShoutcastSource::Pipe>, ShoutcastError>
-ShoutcastSource::launch_mpg123_pipe(const std::string& url, void* winhttp_session) {
-    auto pipe = std::make_unique<Pipe>();
+std::expected<std::unique_ptr<ShoutcastSource::Stream>, ShoutcastError>
+ShoutcastSource::launch_stream(const std::string& url, void* winhttp_session) {
+    auto s = std::make_unique<Stream>();
 
     auto result = Mpg123Stream::create(url, winhttp_session);
     if (!result) {
@@ -295,8 +277,8 @@ ShoutcastSource::launch_mpg123_pipe(const std::string& url, void* winhttp_sessio
         return std::unexpected{ShoutcastError::spawn_failed};
     }
 
-    pipe->stream = std::move(*result);
-    return pipe;
+    s->stream = std::move(*result);
+    return s;
 }
 
 // ---- select_station ----
@@ -307,7 +289,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     // station metadata.
     metadata_controller_->stop();
 
-    // Phase 1: configure under lock — fast path, no ffmpeg launch.
+    // Phase 1: configure under lock — fast path, no stream launch.
     std::string launch_url;
     std::string md_type;
     std::string station_name;
@@ -374,31 +356,31 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         if (static_info.artwork_url.empty())
             static_info.artwork_url = station->metadata.static_artwork_url;
 
-        // Stop old pipe (fast — no ffmpeg launch here).
-        stop_pipe_locked();
+        // Stop old stream (fast — no HTTP reconnect here).
+        stop_stream_locked();
         reset_metadata_sync_locked();
         metadata_controller_->notify_icy_metadata(0);
         metadata_controller_->notify_ffmpeg_icy_metadata(0);
-    } // mu_ released — ffmpeg launch happens outside the lock
+    } // mu_ released — stream launch happens outside the lock
 
     // Phase 2: launch mpg123 stream OUTSIDE the lock (HTTP handshake).
-    auto new_pipe_result = launch_url.empty()
-                               ? std::expected<std::unique_ptr<Pipe>, ShoutcastError>{nullptr}
-                               : launch_mpg123_pipe(launch_url, winhttp_session_);
-    auto new_pipe = new_pipe_result ? std::move(*new_pipe_result) : nullptr;
+    auto new_stream_result = launch_url.empty()
+                               ? std::expected<std::unique_ptr<Stream>, ShoutcastError>{nullptr}
+                               : launch_stream(launch_url, winhttp_session_);
+    auto new_stream = new_stream_result ? std::move(*new_stream_result) : nullptr;
 
-    // Phase 3: install pipe and set metadata under lock.
-    bool has_pipe = false;
+    // Phase 3: install stream and set metadata under lock.
+    bool has_stream = false;
     {
         frdx::ScopedLock lk{mu_};
         // Only install if we're still on the same station (not changed during launch).
         if (active_station_id_ == station_id && active_stream_id_ == stream_id) {
             const auto metadata_epoch = reset_metadata_sync_locked();
-            if (new_pipe) {
-                new_pipe->metadata_epoch = metadata_epoch;
-                pipe_.store(std::shared_ptr<Pipe>(std::move(new_pipe)),
+            if (new_stream) {
+                new_stream->metadata_epoch = metadata_epoch;
+                stream_.store(std::shared_ptr<Stream>(std::move(new_stream)),
                             std::memory_order_release);
-                has_pipe = true;
+                has_stream = true;
             }
 
             if (has_static) {
@@ -429,7 +411,7 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     // Start the appropriate new poller.
     restart_metadata_for_current();
 
-    if (has_pipe) {
+    if (has_stream) {
         state_.store(PlaybackState::playing, std::memory_order_release);
     }
 
@@ -482,8 +464,8 @@ void ShoutcastSource::cycle_preset(int direction) {
     target_url_ = cfg_.presets[preset_idx_];
 }
 
-void ShoutcastSource::start_pipe_locked() {
-    stop_pipe_locked();
+void ShoutcastSource::start_stream_locked() {
+    stop_stream_locked();
     last_data_ms_.store(0, std::memory_order_release);
     const auto metadata_epoch = reset_metadata_sync_locked();
     display_name_ = "Online Radio";
@@ -500,14 +482,14 @@ void ShoutcastSource::start_pipe_locked() {
     }
 
     // Delegate the stream creation to the mpg123 launcher.
-    auto pipe_result = launch_mpg123_pipe(target_url_, winhttp_session_);
-    if (!pipe_result) {
+    auto stream_result = launch_stream(target_url_, winhttp_session_);
+    if (!stream_result) {
         info_gen_.fetch_add(1, std::memory_order_release);
         return;
     }
 
-    (*pipe_result)->metadata_epoch = metadata_epoch;
-    pipe_.store(std::shared_ptr<Pipe>(std::move(*pipe_result)),
+    (*stream_result)->metadata_epoch = metadata_epoch;
+    stream_.store(std::shared_ptr<Stream>(std::move(*stream_result)),
                 std::memory_order_release);
 
     // restore_station_display_locked() overwrites info_ and bumps info_gen_
@@ -520,11 +502,11 @@ void ShoutcastSource::start_pipe_locked() {
     position_ms_.store(0, std::memory_order_release);
     state_.store(PlaybackState::buffering, std::memory_order_release);
 
-    log::info("[shoutcast] pipe started for {}", target_url_);
+    log::info("[shoutcast] stream started for {}", target_url_);
 }
 
-void ShoutcastSource::stop_pipe_locked() {
-    pipe_.store(nullptr, std::memory_order_release);
+void ShoutcastSource::stop_stream_locked() {
+    stream_.store(nullptr, std::memory_order_release);
     state_.store(PlaybackState::stopped, std::memory_order_release);
 }
 
@@ -562,27 +544,27 @@ void ShoutcastSource::restore_station_display_locked() {
 }
 
 void ShoutcastSource::play() {
-    bool started_pipe = false;
-    bool has_pipe = false;
+    bool started_stream = false;
+    bool has_stream = false;
     {
         frdx::ScopedLock lk{mu_};
         drain_pending_ = true;
-        if (!pipe_.load(std::memory_order_acquire)) {
-            start_pipe_locked();
-            started_pipe = true;
+        if (!stream_.load(std::memory_order_acquire)) {
+            start_stream_locked();
+            started_stream = true;
         }
-        // If start_pipe_locked() didn't run (pipe already existed) or failed to
+        // If start_stream_locked() didn't run (stream already existed) or failed to
         // set a station display (no active station), make sure the display is
-        // refreshed.  Avoid double-bumping info_gen_ when start_pipe_locked()
+        // refreshed.  Avoid double-bumping info_gen_ when start_stream_locked()
         // already called restore_station_display_locked().
-        if (!started_pipe) {
+        if (!started_stream) {
             restore_station_display_locked();
         }
-        has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
+        has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
     } // mu_ released before poller restart to avoid deadlock
     // Restart the metadata poller — pause() stops it, so unpausing needs to
     // bring it back to get live track info again.
-    if (has_pipe) {
+    if (has_stream) {
         restart_metadata_for_current();
         state_.store(PlaybackState::playing, std::memory_order_release);
     }
@@ -592,7 +574,7 @@ void ShoutcastSource::pause() {
     metadata_controller_->stop();
     {
         frdx::ScopedLock lk{mu_};
-        stop_pipe_locked();
+        stop_stream_locked();
         reset_metadata_sync_locked();
         // Reset to a station placeholder so the HUD shows the station
         // logo + name instead of the stale last track.  For multi-stream
@@ -621,16 +603,16 @@ void ShoutcastSource::on_radio_audible(bool audible) {
             // Reconnect to the live stream and drain stale buffered audio.
             log::info("[shoutcast] radio audible -- reconnecting to live stream");
             drain_pending_ = true;
-            start_pipe_locked();
+            start_stream_locked();
             should_restart_metadata = true;
         } else {
             // Radio became inaudible (pause menu, rewind, etc).
-            // Kill the ffmpeg pipe to stop buffering — otherwise the live
+            // Kill the stream to stop buffering — otherwise the live
             // stream keeps filling the ring buffer while paused, and when
             // resumed it plays from the stale buffer position, causing the
             // audio to drift behind the live feed and metadata to desync.
             log::info("[shoutcast] radio inaudible -- disconnecting stream");
-            stop_pipe_locked();
+            stop_stream_locked();
             // Reset the track info to a station placeholder so the HUD
             // shows the station logo + name instead of the stale last
             // track.  restore_station_display_locked() sets up the
@@ -648,15 +630,15 @@ void ShoutcastSource::on_radio_audible(bool audible) {
 void ShoutcastSource::cycle_and_restart(int direction) {
     metadata_controller_->stop();
 
-    bool has_pipe = false;
+    bool has_stream = false;
     {
         frdx::ScopedLock lk{mu_};
         cycle_preset(direction);
         if (audible_) {
-            start_pipe_locked();
+            start_stream_locked();
         } else {
             // Not audible: update the display info so the station name is
-            // ready when the UI comes back, but don't start the pipe yet.
+            // ready when the UI comes back, but don't start the stream yet.
             restore_station_display_locked();
         }
         // Always clear pending timed metadata on station swap — the
@@ -664,11 +646,11 @@ void ShoutcastSource::cycle_and_restart(int direction) {
         // never be applied to the new station.
         clear_pending_metadata_locked();
         metadata_epoch_has_track_ = false;
-        has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
+        has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
         station_selected_ms_ = steady_ms();
     } // mu_ released before poller stop/start
     restart_metadata_for_current();
-    if (has_pipe) {
+    if (has_stream) {
         state_.store(PlaybackState::playing, std::memory_order_release);
     }
 }
@@ -998,10 +980,10 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         if (st != PlaybackState::playing && st != PlaybackState::buffering) return;
     }
 
-    // Lock-free acquire of the current pipe.  Shared ownership ensures the Pipe
-    // stays alive for the entire call, even if a concurrent stop_pipe_locked()
-    // replaces pipe_ with nullptr.
-    auto p = pipe_.load(std::memory_order_acquire);
+    // Lock-free acquire of the current stream.  Shared ownership ensures the Stream
+    // stays alive for the entire call, even if a concurrent stop_stream_locked()
+    // replaces stream_ with nullptr.
+    auto p = stream_.load(std::memory_order_acquire);
     if (!p) return;
     bool ended = p->ended;
 
@@ -1036,11 +1018,11 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                     cycle_preset();
                 }
             }
-            // Save before start_pipe_locked resets it to "Online Radio".
+            // Save before start_stream_locked resets it to "Online Radio".
             std::string prev_name = display_name_;
-            start_pipe_locked();
-            bool has_pipe = (pipe_.load(std::memory_order_acquire) != nullptr);
-            if (!has_pipe) {
+            start_stream_locked();
+            bool has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
+            if (!has_stream) {
                 // Stream launch failed — restore unreachable status.
                 info_.title   = prev_name;
                 info_.artist  = "Unable to reach this station";
@@ -1048,7 +1030,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 info_gen_.fetch_add(1, std::memory_order_release);
             }
             lk.unlock();
-            if (has_pipe) {
+            if (has_stream) {
                 state_.store(PlaybackState::playing, std::memory_order_release);
             }
         }
@@ -1123,7 +1105,7 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         if (p->bytes_written == 0) {
             log::warn("[shoutcast] stream produced 0 bytes; stopping");
             frdx::UniqueLock lk{mu_};
-            stop_pipe_locked();
+            stop_stream_locked();
             return;
         }
         p->ended = true;
