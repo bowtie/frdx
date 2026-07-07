@@ -289,6 +289,12 @@ void pre_resize() {
     re_log::info("released DX12 backbuffer RTV resources before resize");
 }
 
+// Cached swap chain resolution — updated by init_imgui() and post_resize()
+// so the render loop doesn't need to call GetDesc every frame (which can
+// stall during loading screens).
+static UINT g_sc_width = 0;
+static UINT g_sc_height = 0;
+
 // Compute UI scale from the monitor resolution (not the swap chain
 // resolution, which may differ due to dynamic resolution scaling).
 // 1080p monitor = 1.0x, 1440p = 1.33x, 4K = 2.0x.
@@ -310,6 +316,10 @@ void post_resize(IDXGISwapChain* swapChain) {
 
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
+
+    // Cache the swap chain resolution for the render loop.
+    g_sc_width  = desc.BufferDesc.Width;
+    g_sc_height = desc.BufferDesc.Height;
 
     // The game can change the swap chain resolution without changing the
     // window size (e.g. lowering in-game resolution while in fullscreen).
@@ -426,6 +436,8 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // Using the monitor resolution ensures the UI is always sized for the
     // actual display, not the internal render resolution.
     g_ui.ui_scale = compute_monitor_ui_scale(desc.OutputWindow);
+    g_sc_width  = desc.BufferDesc.Width;
+    g_sc_height = desc.BufferDesc.Height;
     re_log::info("swap chain: {}x{}, monitor ui_scale={:.2f}",
                  desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
 
@@ -647,16 +659,15 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // Enforce DisplaySize matches the swap chain resolution every frame.
         // The Win32 backend may reset it from WM_SIZE (window size) which
         // can differ from the swap chain resolution when the game uses a
-        // non-native render resolution.
-        DXGI_SWAP_CHAIN_DESC sc_desc;
-        if (SUCCEEDED(pSwapChain->GetDesc(&sc_desc))) {
-            auto& io = ImGui::GetIO();
-            if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(sc_desc.BufferDesc.Width) ||
-                static_cast<int>(io.DisplaySize.y) != static_cast<int>(sc_desc.BufferDesc.Height)) {
-                io.DisplaySize = ImVec2(
-                    static_cast<float>(sc_desc.BufferDesc.Width),
-                    static_cast<float>(sc_desc.BufferDesc.Height));
-            }
+        // non-native render resolution.  Use cached values from
+        // init_imgui/post_resize to avoid calling GetDesc every frame
+        // (which can stall during loading screens).
+        auto& io = ImGui::GetIO();
+        if (static_cast<int>(io.DisplaySize.x) != g_sc_width ||
+            static_cast<int>(io.DisplaySize.y) != g_sc_height) {
+            io.DisplaySize = ImVec2(
+                static_cast<float>(g_sc_width),
+                static_cast<float>(g_sc_height));
         }
 
         // Debug: take a CPU-side screenshot when requested by the Debug
