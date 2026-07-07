@@ -149,17 +149,17 @@ static void capture_screenshot_to_png(IDXGISwapChain* pSwapChain, UINT backBuffe
 
     cap_cmd->Close();
 
-    // Execute on the game's direct command queue.
-    ID3D12CommandList* lists[] = {cap_cmd.get()};
     // Find the command queue for this swap chain.
     ID3D12CommandQueue* queue = command_queue_for_swapchain(pSwapChain);
     if (!queue) {
         re_log::warn("[capture] no command queue for swap chain");
         return;
     }
-    queue->ExecuteCommandLists(1, lists);
 
-    // Wait for the GPU to finish the copy using a fence.
+    // Create the fence BEFORE executing the command list so we can
+    // always wait for GPU completion.  If we execute first and fence
+    // creation fails, the GPU would be accessing resources that get
+    // destroyed when this function returns.
     wil::com_ptr<ID3D12Fence> cap_fence;
     if (FAILED(g_dx.device->CreateFence(
             0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(cap_fence.put())))) {
@@ -171,6 +171,12 @@ static void capture_screenshot_to_png(IDXGISwapChain* pSwapChain, UINT backBuffe
         re_log::warn("[capture] failed to create event");
         return;
     }
+
+    // Execute on the game's direct command queue.
+    ID3D12CommandList* lists[] = {cap_cmd.get()};
+    queue->ExecuteCommandLists(1, lists);
+
+    // Wait for the GPU to finish the copy.
     queue->Signal(cap_fence.get(), 1);
     if (cap_fence->GetCompletedValue() < 1) {
         cap_fence->SetEventOnCompletion(1, cap_event);
