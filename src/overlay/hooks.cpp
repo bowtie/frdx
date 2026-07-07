@@ -117,15 +117,11 @@ static void capture_screenshot_to_png(IDXGISwapChain* pSwapChain, UINT backBuffe
         return;
     }
 
-    // Transition backbuffer to COPY_SOURCE, copy to readback buffer,
-    // then transition back to its original state (COMMON/PRESENT).
-    D3D12_RESOURCE_BARRIER barriers[2]{};
-    barriers[0].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barriers[0].Transition.pResource   = bb;
-    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barriers[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    cap_cmd->ResourceBarrier(1, &barriers[0]);
+    // The backbuffer is in COMMON state when Present is called (the
+    // overlay code confirms this: it transitions COMMON→RENDER_TARGET
+    //→COMMON).  D3D12 allows implicit promotion from COMMON to
+    // COPY_SOURCE, so no explicit barrier is needed before the copy.
+    // After the copy, the resource decays back to COMMON automatically.
 
     // Compute layout for the copy.  The backbuffer is likely
     // DXGI_FORMAT_R8G8B8A8_UNORM (or similar 32bpp).  Footprint tells
@@ -146,13 +142,6 @@ static void capture_screenshot_to_png(IDXGISwapChain* pSwapChain, UINT backBuffe
         nullptr, &total_size);
 
     cap_cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    barriers[1].Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barriers[1].Transition.pResource   = bb;
-    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    barriers[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-    barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    cap_cmd->ResourceBarrier(1, &barriers[1]);
 
     cap_cmd->Close();
 
