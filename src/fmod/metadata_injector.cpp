@@ -118,6 +118,17 @@ void MetadataInjector::reset_cache() noexcept {
 std::expected<void, MetadataInjectorError> MetadataInjector::update(std::string_view title,
                                                std::string_view artist) noexcept {
     if (!body_) return std::unexpected{MetadataInjectorError::no_target};
+
+    // Truncate to the configured max length — the HUD has limited space
+    // and long strings cause unnecessary heap allocation in the game's
+    // std::string slots.
+    if (truncation_enabled_ && truncation_max_ > 0) {
+        if (title.size() > static_cast<std::size_t>(truncation_max_))
+            title = title.substr(0, truncation_max_);
+        if (artist.size() > static_cast<std::size_t>(truncation_max_))
+            artist = artist.substr(0, truncation_max_);
+    }
+
     if (title == last_title_ && artist == last_artist_) return {};
 
     bool ok = true;

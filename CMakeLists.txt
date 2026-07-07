@@ -55,6 +55,7 @@ add_library(version SHARED
     src/overlay/player_bar.cpp
     third_party/kiero2/kiero_intern.cpp
     third_party/kiero2/kiero_d3d12.cpp
+    third_party/bc7enc/bc7enc.c
     src/overlay/settings.cpp
     src/fmod/game_state_probe.cpp
     src/fmod/metadata_injector.cpp
@@ -93,6 +94,7 @@ target_include_directories(version PRIVATE
     third_party/minhook
     third_party/kiero2
     third_party/stb
+    third_party/bc7enc
     third_party/imgui-animated
     third_party/imanim
     third_party/hidapi
@@ -100,7 +102,7 @@ target_include_directories(version PRIVATE
 )
 
 target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi cfgmgr32
-                                      user32)
+                                      user32 dbghelp)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version

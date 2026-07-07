@@ -112,6 +112,19 @@ inline std::string sanitize_brackets(std::string s) {
         const auto c = static_cast<unsigned char>(*src);
         if (c == 0xE3 && src + 3 <= end) {
             const auto b2 = static_cast<unsigned char>(*(src + 1));
+            const auto b3 = static_cast<unsigned char>(*(src + 2));
+            // CJK brackets in U+3000 block: 0xE3 0x80 0x8x/0x9x
+            // 【 】 = U+3010/U+3011 = 0xE3 0x80 0x90/0x91
+            // 〖 〗 = U+3016/U+3017 = 0xE3 0x80 0x96/0x97
+            // 〔 〕 = U+3014/U+3015 = 0xE3 0x80 0x94/0x95
+            if (b2 == 0x80) {
+                if (b3 == 0x90) { *dst++ = '['; src += 3; continue; }
+                if (b3 == 0x91) { *dst++ = ']'; src += 3; continue; }
+                if (b3 == 0x94) { *dst++ = '['; src += 3; continue; }
+                if (b3 == 0x95) { *dst++ = ']'; src += 3; continue; }
+                if (b3 == 0x96) { *dst++ = '['; src += 3; continue; }
+                if (b3 == 0x97) { *dst++ = ']'; src += 3; continue; }
+            }
             const char r  = cjk_replace[b2];
             if (r != 0) { *dst++ = r; src += 3; continue; }
         }
@@ -131,6 +144,32 @@ inline std::string sanitize_brackets(std::string s) {
                 *dst++ = static_cast<char>(b3 - 0x80 + 0x60);
                 src += 3;
                 continue;
+            }
+        }
+        // Roman numerals (U+2160–U+216F) → ASCII equivalents.
+        // UTF-8: 0xE2 0x85 0xA0 … 0xE2 0x85 0xAF
+        // Ⅰ→I Ⅱ→II Ⅲ→III Ⅳ→IV Ⅴ→V Ⅵ→VI Ⅶ→VII Ⅷ→VIII Ⅸ→IX Ⅹ→X
+        // Ⅺ→XI Ⅻ→XII Ⅼ→L Ⅽ→C Ⅾ→D Ⅿ→M
+        if (c == 0xE2 && src + 3 <= end) {
+            const auto b2 = static_cast<unsigned char>(*(src + 1));
+            const auto b3 = static_cast<unsigned char>(*(src + 2));
+            if (b2 == 0x85 && b3 >= 0xA0 && b3 <= 0xAF) {
+                static constexpr const char* roman[] = {
+                    "I", "II", "III", "IV", "V", "VI", "VII", "VIII",
+                    "IX", "X", "XI", "XII", "L", "C", "D", "M"
+                };
+                const char* r = roman[b3 - 0xA0];
+                while (*r) { *dst++ = *r++; }
+                src += 3;
+                continue;
+            }
+            // Prime mark U+2032 (′) → ASCII apostrophe '
+            // UTF-8: 0xE2 0x80 0xB2
+            // Double prime U+2033 (″) → ASCII double quote "
+            // UTF-8: 0xE2 0x80 0xB3
+            if (b2 == 0x80) {
+                if (b3 == 0xB2) { *dst++ = '\''; src += 3; continue; }
+                if (b3 == 0xB3) { *dst++ = '"';  src += 3; continue; }
             }
         }
         *dst++ = *src++;

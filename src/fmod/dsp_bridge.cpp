@@ -176,6 +176,12 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
 }
 
 void DSPBridge::detach_current_handle_locked() noexcept {
+    // Cancel any pending deferred detach — we're detaching everything now.
+    if (pending_detach_handle_ && current_dsp_ && fns_.channel_control_rem_dsp) {
+        const uint32_t pending = pending_detach_handle_;
+        pending_detach_handle_ = 0;
+        seh_call([&] { fns_.channel_control_rem_dsp(pending, current_dsp_); });
+    }
     if (!current_dsp_ || !current_handle_) return;
     const uint32_t old_handle = current_handle_;
     current_handle_           = 0;
@@ -290,6 +296,18 @@ bool DSPBridge::current_handle_alive() const noexcept {
 void DSPBridge::retarget_if_needed() noexcept {
     if (mode() != DSPMode::pcm || !fmod_system_) return;
     std::scoped_lock lk{dsp_mu_};
+
+    // Process any pending deferred detach: if we retargeted recently and
+    // the grace period has elapsed, remove the DSP from the old channel.
+    if (pending_detach_handle_ && current_dsp_ && fns_.channel_control_rem_dsp) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - pending_detach_time_ >= std::chrono::milliseconds(200)) {
+            const uint32_t old = pending_detach_handle_;
+            pending_detach_handle_ = 0;
+            seh_call([&] { fns_.channel_control_rem_dsp(old, current_dsp_); });
+        }
+    }
+
     // Prefer the abstract provider (avoids touching game memory directly);
     // fall back to the raw pointer stored at set_target() time.
     //
@@ -306,8 +324,24 @@ void DSPBridge::retarget_if_needed() noexcept {
     }
 
     log::info("[dsp] retargeting -> handle 0x{:X}", handle);
-    detach_current_handle_locked();
+    // Install on the new channel immediately, but DEFER removing from the
+    // old channel by 200ms.  This gives the new FMOD channel time to ramp
+    // up and start calling our DSP callback before we cut the old one.
+    // FMOD allows a DSP on multiple channels simultaneously, so both
+    // channels receive audio during the grace period.  The old channel
+    // is likely dying anyway, but if it's still alive briefly during
+    // the game's channel rebuild, this prevents a hard cutoff.
+    const uint32_t old_handle = current_handle_;
+    current_handle_ = 0;  // clear so install_dsp_locked sets the new one
     install_dsp_locked(handle);
+    if (old_handle && current_dsp_) {
+        // Schedule deferred detach instead of removing immediately.
+        pending_detach_handle_ = old_handle;
+        pending_detach_time_   = std::chrono::steady_clock::now();
+    }
+    // If install failed, current_handle_ is still 0 — the DSP is now
+    // detached from everything.  The next retarget_if_needed() tick
+    // will try again.
 }
 
 void DSPBridge::detach() noexcept {
@@ -370,6 +404,31 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     // a scratch buffer before doing the S16 -> float conversion.
     constexpr uint32_t kChunkFrames = 1024;
     auto& ring = b->mgr_.ring();
+
+    // Drift correction: if the ring buffer has accumulated too much data
+    // (from FMOD callback micro-freezes while driving — each skip leaves
+    // ~20ms of unread audio that never gets caught up), drain the excess
+    // so the audio stays aligned with the live stream.  Without this,
+    // drift accumulates at ~120ms/min while driving, eventually causing
+    // metadata desync and buffer overflow.
+    //
+    // The threshold must be high enough that normal buffer levels (1-2s
+    // when a station starts, or during brief FMOD scheduling jitter) are
+    // NOT treated as drift.  Only fire when the buffer has grown to an
+    // abnormally high level that can only come from sustained drift.
+    //
+    // 48kHz * 2ch * 2bytes(s16) = 4 bytes/frame.
+    // Threshold: 5 seconds = 960000 bytes (drift takes ~40 min to reach this).
+    // Target: 1 second = 192000 bytes (safe buffer level after correction).
+    constexpr std::size_t kDriftTargetBytes   = 192000;
+    constexpr std::size_t kDriftThresholdBytes = 960000;
+    const std::size_t readable = ring.readable();
+    if (readable > kDriftThresholdBytes) {
+        const std::size_t excess = readable - kDriftTargetBytes;
+        ring.drop(excess);
+        log::info("[dsp] drift correction: dropped {} bytes ({}ms -> {}ms)",
+                  excess, readable / 192, kDriftTargetBytes / 192);
+    }
 
     uint32_t produced = 0;
     auto mix_bytes = [&](const std::byte* pcm, uint32_t frames) {

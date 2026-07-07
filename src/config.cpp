@@ -96,6 +96,8 @@ Config load_config(const std::filesystem::path& path) {
     cfg.overlay.theme = normalize_overlay_theme(pick<std::string>(ov, "theme", cfg.overlay.theme));
     cfg.overlay.music_notifications_enabled =
         pick<bool>(ov, "music_notifications_enabled", cfg.overlay.music_notifications_enabled);
+    cfg.overlay.station_notifications_enabled =
+        pick<bool>(ov, "station_notifications_enabled", cfg.overlay.station_notifications_enabled);
     cfg.overlay.notification_position = normalize_notification_position(
         pick<std::string>(ov, "notification_position", cfg.overlay.notification_position));
     cfg.overlay.player_bar_always_visible =
@@ -126,6 +128,12 @@ Config load_config(const std::filesystem::path& path) {
         pick<bool>(ov, "artwork_lookup_enabled", cfg.overlay.artwork_lookup_enabled);
     cfg.overlay.artwork_cache_enabled =
         pick<bool>(ov, "artwork_cache_enabled", cfg.overlay.artwork_cache_enabled);
+    cfg.overlay.metadata_truncation_enabled =
+        pick<bool>(ov, "metadata_truncation_enabled", cfg.overlay.metadata_truncation_enabled);
+    cfg.overlay.metadata_max_length =
+        static_cast<int>(pick<int64_t>(ov, "metadata_max_length", cfg.overlay.metadata_max_length));
+    cfg.overlay.metadata_grace_period =
+        static_cast<float>(pick<double>(ov, "metadata_grace_period", cfg.overlay.metadata_grace_period));
 
     const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -377,6 +385,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.header("overlay");
     e.kv("theme", normalize_overlay_theme(cfg.overlay.theme));
     e.kv("music_notifications_enabled", cfg.overlay.music_notifications_enabled);
+    e.kv("station_notifications_enabled", cfg.overlay.station_notifications_enabled);
     e.kv("notification_position",
          normalize_notification_position(cfg.overlay.notification_position));
     e.kv("player_bar_always_visible", cfg.overlay.player_bar_always_visible);
@@ -391,6 +400,9 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("texture_injection_enabled", cfg.overlay.texture_injection_enabled);
     e.kv("artwork_lookup_enabled", cfg.overlay.artwork_lookup_enabled);
     e.kv("artwork_cache_enabled", cfg.overlay.artwork_cache_enabled);
+    e.kv("metadata_truncation_enabled", cfg.overlay.metadata_truncation_enabled);
+    e.kv("metadata_max_length", static_cast<int64_t>(cfg.overlay.metadata_max_length));
+    e.kv("metadata_grace_period", static_cast<double>(cfg.overlay.metadata_grace_period));
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);

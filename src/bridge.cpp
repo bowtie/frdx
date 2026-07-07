@@ -207,7 +207,7 @@ void run_bridge(HMODULE self) noexcept {
         }
     }
 
-    // Dependency manager: auto-downloads ffmpeg/texconv if missing.
+    // Dependency manager: auto-downloads ffmpeg if missing.
     // The callback fires after each download completes; we use it to
     // re-resolve the ffmpeg path into the live shoutcast source.
     DependencyManager deps{data_dir / "bin", worker.is_running() ? &worker : nullptr};
@@ -228,28 +228,20 @@ void run_bridge(HMODULE self) noexcept {
     auto shoutcast = std::make_unique<sources::ShoutcastSource>(resolved_cfg.shoutcast);
     shoutcast->set_volume_normalization(cfg.audio.volume_normalization);
     shoutcast->set_artwork_lookup_enabled(cfg.overlay.artwork_lookup_enabled);
+    shoutcast->set_grace_period_ms(static_cast<int64_t>(cfg.overlay.metadata_grace_period * 1000.0f));
     TextureInjector::instance().set_cache_enabled(cfg.overlay.artwork_cache_enabled);
 
     // Now start the deps worker — the callback re-resolves ffmpeg and
-    // updates the source's config. Also updates the TextureInjector's
-    // texconv path once texconv is downloaded.
+    // updates the source's config.
     deps.start([&shoutcast, &deps, &store]() {
         auto c = store.snapshot();
         auto path = deps.resolve(Tool::ffmpeg, c.shoutcast.ffmpeg_path);
         if (shoutcast) shoutcast->update_ffmpeg_path(path);
-        auto texconv = deps.resolve(Tool::texconv, {});
-        if (!texconv.empty()) {
-            TextureInjector::instance().set_texconv_path(texconv);
-        }
     });
 
     // Initialize texture injector
     TextureInjector::instance().set_worker(worker.is_running() ? &worker : nullptr);
     TextureInjector::instance().set_data_dir(data_dir);
-    auto texconv_path = deps.resolve(Tool::texconv, {});
-    if (!texconv_path.empty()) {
-        TextureInjector::instance().set_texconv_path(texconv_path);
-    }
     if (shoutcast->initialize()) {
         mgr.set_source(shoutcast.get());
     } else {
@@ -294,12 +286,11 @@ void run_bridge(HMODULE self) noexcept {
 
     if (!mgr.active()) log::info("[bridge] shoutcast disabled — no active source");
 
-    // Pre-warm the BC7 cache for all station logos.  This runs texconv
+    // Pre-warm the BC7 cache for all station logos.  This runs bc7enc
     // on each logo at startup (in a background thread) so that station
-    // switches are instant instead of waiting ~2-3s for the first
-    // processing pass.  Logos that are already cached (matching file
-    // content hash) are skipped.
-    if (shoutcast && !texconv_path.empty()) {
+    // switches are instant instead of waiting for the first processing.
+    // Logos that are already cached (matching file content hash) are skipped.
+    if (shoutcast) {
         std::vector<std::string> logo_urls;
         for (const auto& st : shoutcast->stations()) {
             for (const auto& str : st.streams) {
@@ -320,8 +311,12 @@ void run_bridge(HMODULE self) noexcept {
     bridge.set_force_stereo_audio(cfg.audio.force_stereo_audio);
 
     std::unique_ptr<fmod_bridge::ControlLoop> ctrl;
-    if (fns.ready())
+    if (fns.ready()) {
         ctrl = std::make_unique<fmod_bridge::ControlLoop>(bridge, img, cfg.audio.output_gain);
+        ctrl->set_metadata_truncation(cfg.overlay.metadata_truncation_enabled,
+                                       cfg.overlay.metadata_max_length);
+        ctrl->set_metadata_grace_period(cfg.overlay.metadata_grace_period);
+    }
 
     store.on_change(
         [dir, &bridge, &mgr, &shoutcast, &dualsense, ctrl_ptr = ctrl.get()](const Config& c) mutable {
@@ -335,7 +330,16 @@ void run_bridge(HMODULE self) noexcept {
             // been stopped or crashed).  It hosts both the DualSense
             // service and the worker server.
             maybe_launch_external_helper(dir, c.dualsense);
-            if (ctrl_ptr) ctrl_ptr->set_configured_gain(c.audio.output_gain);
+            if (ctrl_ptr) {
+                ctrl_ptr->set_configured_gain(c.audio.output_gain);
+                ctrl_ptr->set_metadata_truncation(c.overlay.metadata_truncation_enabled,
+                                                   c.overlay.metadata_max_length);
+                ctrl_ptr->set_metadata_grace_period(c.overlay.metadata_grace_period);
+            }
+            if (shoutcast) {
+                shoutcast->set_grace_period_ms(
+                    static_cast<int64_t>(c.overlay.metadata_grace_period * 1000.0f));
+            }
         });
 
     // Start the Direct3D 12 ImGui overlay detours

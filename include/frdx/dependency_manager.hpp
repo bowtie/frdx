@@ -1,6 +1,6 @@
 #pragma once
 
-// Thread-safe auto-downloader for external tool binaries (ffmpeg, texconv).
+// Thread-safe auto-downloader for external tool binaries (ffmpeg).
 // Downloads are routed through the worker process (frdx-helper.exe) so the
 // game's multi-GB address space isn't forked for CreateProcess calls.
 //
@@ -21,7 +21,7 @@
 
 namespace frdx {
 
-enum class Tool { ffmpeg, texconv };
+enum class Tool { ffmpeg };
 
 struct DependencyStatus {
     std::string name;
@@ -75,7 +75,7 @@ private:
     };
 
     static const ToolSpec& spec(Tool t);
-    static constexpr size_t kToolCount = 2;
+    static constexpr size_t kToolCount = 1;
 
     void run_worker();
     bool download_tool(Tool t);

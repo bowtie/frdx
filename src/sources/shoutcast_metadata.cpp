@@ -43,6 +43,14 @@ bool recent_metadata_ms(int64_t timestamp_ms, int64_t now_ms) noexcept {
            now_ms - timestamp_ms <= kRecentWindowMs;
 }
 
+// Apply title_fallback: when title resolves empty, try the fallback
+// field (e.g. "results.0.metadata" which contains "Artist - Title").
+void apply_title_fallback(const StationMetadataMapping& mapping,
+                          const json& data_root, std::string& title) {
+    if (!title.empty() || mapping.title_fallback.empty()) return;
+    title = resolve_mapped_value(data_root, mapping.title_fallback, "", "");
+}
+
 // Apply split_separator: when artist is empty and split_separator is set,
 // split the combined title field ("Artist - Title") into separate values.
 void apply_split_separator(const StationMetadataMapping& mapping,
@@ -413,6 +421,7 @@ void MetadataController::run_ws_poller(std::string url,
                                                        mapping.artist_separator);
             std::string artwork = resolve_mapped_value(*data_root, mapping.artwork_url, "", "");
 
+            apply_title_fallback(mapping, *data_root, title);
             apply_split_separator(mapping, title, artist);
             apply_artwork_template(mapping, artwork);
 
@@ -616,6 +625,7 @@ void MetadataController::process_sse_event(
                                                mapping.artist_separator);
     std::string artwork = resolve_mapped_value(*data_root, mapping.artwork_url, "", "");
 
+    apply_title_fallback(mapping, *data_root, title);
     apply_split_separator(mapping, title, artist);
     apply_artwork_template(mapping, artwork);
 
@@ -732,6 +742,7 @@ void MetadataController::run_rest_poller(std::string url,
                                                    mapping.artist_separator);
         std::string artwork = resolve_mapped_value(*data_root, mapping.artwork_url, "", "");
 
+        apply_title_fallback(mapping, *data_root, title);
         apply_split_separator(mapping, title, artist);
         apply_artwork_template(mapping, artwork);
 

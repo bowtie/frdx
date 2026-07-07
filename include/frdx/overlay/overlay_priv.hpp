@@ -193,6 +193,7 @@ struct UiState {
     ImTextureID bg_texture_id = 0;
     UINT bg_texture_width = 0, bg_texture_height = 0;
     ImVec2 btn_min;
+    bool vol_dragging = false;  // volume bar click-drag state (persists across frames)
     StationComboCache combo_cache;
     int combo_sel = 0, combo_anim_sel = -1, combo_switch_dir = 1;
     bool combo_dirty        = true;
@@ -362,7 +363,8 @@ bool is_station_display_track(IAudioSource* active, std::string_view title,
 bool should_notify_song_change(IAudioSource* active, const TrackInfo& track, std::string_view title,
                                std::string_view artist);
 void draw_dualsense_settings(const struct DualSenseConfig& ds);
-void draw_general_settings_tab();
+void draw_audio_settings_tab();
+void draw_display_settings_tab();
 
 void close_player_children_except(bool keep_settings, bool keep_stations, bool reset_anim = true);
 void animate_station_combo_to(int next_idx, int dir);

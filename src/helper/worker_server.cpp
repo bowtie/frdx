@@ -150,27 +150,74 @@ bool http_download(std::string_view url, std::string_view dest_path) {
                             static_cast<int>(s.size()), ws.data(), len);
         return ws;
     };
+
+    // Percent-encode non-ASCII characters in the URL path.
+    // WinHttpOpenRequest doesn't auto-encode non-ASCII bytes, so raw
+    // UTF-8 in the path (e.g. Japanese characters from MusicBrainz/
+    // Cover Art Archive URLs) causes download failures.
+    auto percent_encode_path = [](const std::string& path) -> std::string {
+        std::string out;
+        out.reserve(path.size() * 3);
+        for (size_t i = 0; i < path.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(path[i]);
+            // Keep ASCII safe characters as-is (RFC 3986 unreserved + path chars)
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' || c == '_' || c == '.' || c == '~' ||
+                c == '/' || c == ':' || c == '@' || c == '!' ||
+                c == '$' || c == '&' || c == '\'' || c == '(' || c == ')' ||
+                c == '*' || c == '+' || c == ',' || c == ';' || c == '=' ||
+                c == '?' || c == '#' || c == '%') {
+                out.push_back(static_cast<char>(c));
+            } else {
+                // Percent-encode: %XX
+                char hex[4];
+                std::snprintf(hex, sizeof(hex), "%%%02X", c);
+                out.append(hex);
+            }
+        }
+        return out;
+    };
+
+    std::string encoded_path = percent_encode_path(path);
     std::wstring whost = to_wide(host);
-    std::wstring wpath = to_wide(path);
+    std::wstring wpath = to_wide(encoded_path);
     std::wstring wdest = to_wide(std::string(dest_path));
 
     HINTERNET session = WinHttpOpen(L"FRDX/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) return false;
+    if (!session) {
+        log::warn("[worker] WinHttpOpen failed (err={}): {}", GetLastError(), url);
+        return false;
+    }
     // Follow redirects (GitHub release URLs 302 to release-assets.githubusercontent.com)
     DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(session, WINHTTP_OPTION_REDIRECT_POLICY,
                      &redirect_policy, sizeof(redirect_policy));
     HINTERNET connect = WinHttpConnect(session, whost.c_str(), port, 0);
-    if (!connect) { WinHttpCloseHandle(session); return false; }
+    if (!connect) {
+        log::warn("[worker] WinHttpConnect failed (err={}): {}", GetLastError(), url);
+        WinHttpCloseHandle(session); return false;
+    }
     HINTERNET request = WinHttpOpenRequest(connect, L"GET", wpath.c_str(), nullptr,
                                            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                            https ? WINHTTP_FLAG_SECURE : 0);
-    if (!request) { WinHttpCloseHandle(connect); WinHttpCloseHandle(session); return false; }
+    if (!request) {
+        log::warn("[worker] WinHttpOpenRequest failed (err={}): {}", GetLastError(), url);
+        WinHttpCloseHandle(connect); WinHttpCloseHandle(session); return false;
+    }
 
     bool ok = WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                  WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    if (ok) ok = WinHttpReceiveResponse(request, nullptr);
+    if (!ok) {
+        log::warn("[worker] WinHttpSendRequest failed (err={}): {}", GetLastError(), url);
+    }
+    if (ok) {
+        ok = WinHttpReceiveResponse(request, nullptr);
+        if (!ok) {
+            log::warn("[worker] WinHttpReceiveResponse failed (err={}): {}", GetLastError(), url);
+        }
+    }
 
     // Verify we got a 200 OK (not a 302 redirect that wasn't followed, etc.)
     if (ok) {
@@ -201,6 +248,7 @@ bool http_download(std::string_view url, std::string_view dest_path) {
             }
             CloseHandle(file);
         } else {
+            log::warn("[worker] CreateFileW failed (err={}): {}", GetLastError(), dest_path);
             ok = false;
         }
     }

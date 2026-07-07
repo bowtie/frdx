@@ -6,6 +6,15 @@
 #include <frdx/fastboot.hpp>
 #include <frdx/log.hpp>
 
+#include <dbghelp.h>
+
+#include <array>
+#include <atomic>
+#include <cstdio>
+#include <string>
+
+#pragma comment(lib, "dbghelp.lib")
+
 // Forwarding to "version.dll" without a path resolves back to us; the
 // absolute system32 path is what breaks the basename collision.
 #define FWD(name) \
@@ -38,10 +47,62 @@ void stop_external_helper() noexcept;
 
 namespace {
 
+// Write a minidump to %TEMP%\frdx_crash_<timestamp>.dmp.
+// Returns the file path so it can be logged.
+static std::string write_minidump(PEXCEPTION_POINTERS ep) {
+    char temp_dir[MAX_PATH] = {};
+    GetTempPathA(MAX_PATH, temp_dir);
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char filename[MAX_PATH];
+    std::snprintf(filename, sizeof(filename),
+                  "%sfrdx_crash_%04d%02d%02d_%02d%02d%02d.dmp",
+                  temp_dir, st.wYear, st.wMonth, st.wDay,
+                  st.wHour, st.wMinute, st.wSecond);
+
+    HANDLE file = CreateFileA(filename, GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+
+    MINIDUMP_EXCEPTION_INFORMATION mei{};
+    mei.ThreadId          = GetCurrentThreadId();
+    mei.ExceptionPointers = ep;
+    mei.ClientPointers    = FALSE;
+
+    // MiniDumpNormal keeps it small (~100KB-1MB). We don't need full
+    // memory — the call stack + exception context is enough to diagnose.
+    MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(),
+                      file, MiniDumpNormal, &mei, nullptr, nullptr);
+    CloseHandle(file);
+    return filename;
+}
+
+// Capture and log a stack trace using CaptureStackBackTrace (lightweight,
+// no symbols needed — just return addresses we can resolve later with
+// the minidump or addr2line).
+static void log_stack_trace(PEXCEPTION_POINTERS /*ep*/) {
+    // Start from the exception address, then walk the stack.
+    void* frames[32] = {};
+    USHORT count = CaptureStackBackTrace(0, 32, frames, nullptr);
+
+    frdx::log::error("[crash] stack trace ({} frames):", count);
+    for (USHORT i = 0; i < count; ++i) {
+        frdx::log::error("[crash]   #{} 0x{:016X}", i,
+                      reinterpret_cast<uint64_t>(frames[i]));
+    }
+}
+
 // Vectored exception handler: catches crashes that happen outside our
 // __try guards (e.g. in the game's own code after we corrupt GPU state,
-// or in threads we don't control). Logs the crash info before the game
-// dies so we can diagnose it from the log.
+// or in threads we don't control). Logs the crash info + minidump before
+// the game dies so we can diagnose it.
+//
+// Uses a flag to ensure we only write one minidump per process lifetime —
+// the VEH fires for every exception including ones the game handles
+// internally, and we only want the dump for the first truly fatal one.
+static std::atomic<bool> g_crash_dumped{false};
+
 LONG WINAPI crash_handler(PEXCEPTION_POINTERS ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
 
@@ -59,6 +120,7 @@ LONG WINAPI crash_handler(PEXCEPTION_POINTERS ep) {
     if (!is_fatal)
         return EXCEPTION_CONTINUE_SEARCH;
 
+    // Log exception details.
     frdx::log::error("[crash] FATAL exception code=0x{:08X} addr=0x{:016X}",
                   code,
                   reinterpret_cast<uint64_t>(ep->ExceptionRecord->ExceptionAddress));
@@ -68,6 +130,19 @@ LONG WINAPI crash_handler(PEXCEPTION_POINTERS ep) {
                       ep->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : "execute",
                       ep->ExceptionRecord->ExceptionInformation[1]);
     }
+
+    // Write one minidump per process lifetime. The game may throw
+    // multiple fatal exceptions as it unwinds — we only need the first.
+    if (!g_crash_dumped.exchange(true, std::memory_order_acq_rel)) {
+        log_stack_trace(ep);
+        std::string dump_path = write_minidump(ep);
+        if (!dump_path.empty()) {
+            frdx::log::error("[crash] minidump written to: {}", dump_path);
+        } else {
+            frdx::log::error("[crash] failed to write minidump");
+        }
+    }
+
     return EXCEPTION_CONTINUE_SEARCH;
 }
 

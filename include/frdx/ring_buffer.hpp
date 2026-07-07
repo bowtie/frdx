@@ -48,6 +48,11 @@ public:
     // Discard everything currently in flight (advance read to write).
     void drain() noexcept;
 
+    // Discard up to `n` bytes from the read side (skip ahead without
+    // copying).  Used for drift correction when the buffer has grown
+    // too large from FMOD callback micro-freezes.
+    void drop(std::size_t n) noexcept;
+
     // Hold mode: when engaged, reads return 0 (as if empty). The producer
     // can continue writing to fill the buffer; when hold is released, the
     // accumulated data becomes readable all at once. Useful for prebuffering.

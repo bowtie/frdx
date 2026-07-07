@@ -350,30 +350,40 @@ void draw_imgui_ui_impl() {
                     s_cached_track.title.empty() ? mp->display_name() : s_cached_track.title;
                 const std::string artist =
                     s_cached_track.artist == "Select a station" ? std::string{} : s_cached_track.artist;
-                if (g_ui.hud_visible) {
-                    // Station change toast: a new placeholder track means the
-                    // user switched stations.  Show the station name + stream.
-                    // Compare both title and artist so switching between
-                    // streams within the same station (e.g. City Pop 1-4)
-                    // also triggers a toast.
-                    if (s_cached_track.is_placeholder &&
-                        !s_cached_hud_title.empty() &&
-                        (active != s_toast_source || s_cached_hud_title != s_toast_title ||
-                         artist != s_toast_artist)) {
-                        push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);
+                // Station change toast: a new placeholder track means the
+                // user switched stations.  Show the station name + stream.
+                // Compare both title and artist so switching between
+                // streams within the same station (e.g. City Pop 1-4)
+                // also triggers a toast.
+                const bool station_toasts_on = g_ctx.store
+                    ? g_ctx.store->snapshot().overlay.station_notifications_enabled
+                    : true;
+                if (station_toasts_on &&
+                    s_cached_track.is_placeholder &&
+                    !s_cached_hud_title.empty()) {
+                    // For multi-stream stations the HUD swaps title/artist
+                    // (stream name → title, station name → artist).  Mirror
+                    // that here so the toast matches what's on screen.
+                    const bool swap = s_cached_track.multi_stream && !artist.empty();
+                    const std::string& toast_title  = swap ? artist : s_cached_hud_title;
+                    const std::string& toast_artist = swap ? s_cached_hud_title : artist;
+                    if (active != s_toast_source || toast_title != s_toast_title ||
+                        toast_artist != s_toast_artist) {
+                        push_toast(ToastKind::info, toast_title, toast_artist, 4.5f);
                         s_toast_source = active;
-                        s_toast_title  = s_cached_hud_title;
-                        s_toast_artist = artist;
+                        s_toast_title  = toast_title;
+                        s_toast_artist = toast_artist;
                     }
-                    // Song change toast: only for real track metadata.
-                    else if (should_notify_song_change(active, s_cached_track, s_cached_hud_title, artist) &&
-                             (active != s_toast_source || s_cached_hud_title != s_toast_title ||
-                              artist != s_toast_artist)) {
-                        push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);
-                        s_toast_source = active;
-                        s_toast_title  = s_cached_hud_title;
-                        s_toast_artist = artist;
-                    }
+                }
+                // Song change toast: only for real track metadata.
+                else if (should_notify_song_change(active, s_cached_track, s_cached_hud_title, artist) &&
+                         (g_ctx.store ? g_ctx.store->snapshot().overlay.music_notifications_enabled : true) &&
+                         (active != s_toast_source || s_cached_hud_title != s_toast_title ||
+                          artist != s_toast_artist)) {
+                    push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);
+                    s_toast_source = active;
+                    s_toast_title  = s_cached_hud_title;
+                    s_toast_artist = artist;
                 }
             }
         } else {

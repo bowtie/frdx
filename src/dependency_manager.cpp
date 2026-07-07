@@ -9,7 +9,6 @@ namespace frdx {
 namespace {
 
 // We host ffmpeg ourselves (static build matching fh6-universal-radio's deps).
-// texconv comes from Microsoft's DirectXTex releases.
 struct ToolSpecData {
     const char* out_name;
     const char* url;
@@ -20,10 +19,6 @@ const ToolSpecData kSpecs[] = {
     // ffmpeg
     {"ffmpeg.exe",
      "https://github.com/g0ldyy/fh6-universal-radio/releases/download/deps/ffmpeg.exe",
-     ""},
-    // texconv
-    {"texconv.exe",
-     "https://github.com/microsoft/DirectXTex/releases/latest/download/texconv.exe",
      ""},
 };
 
@@ -49,7 +44,6 @@ DependencyManager::~DependencyManager() {
 const DependencyManager::ToolSpec& DependencyManager::spec(Tool t) {
     static const ToolSpec specs[] = {
         {kSpecs[0].out_name, kSpecs[0].url, kSpecs[0].sha256},
-        {kSpecs[1].out_name, kSpecs[1].url, kSpecs[1].sha256},
     };
     return specs[static_cast<std::size_t>(t)];
 }

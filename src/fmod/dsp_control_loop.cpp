@@ -22,10 +22,15 @@ constexpr int kStaleTickThreshold = 50;
 
 // Frozen-read ticks before we treat the station as genuinely silenced (pause
 // menu, radio off) and tell the active source to mirror it onto any live
-// player it wraps. Must clear the stall-retune rebuild window (~1s retune +
-// up to ~2s reacquire), so a rewind or race transition that briefly tears the
-// channel down and rebuilds it doesn't read as a pause. 3.5s @ 20ms.
-constexpr int kInaudibleTicks = 175;
+// player it wraps.  Must be long enough to ride through station transitions
+// and brief FMOD channel rebuilds (~200-500ms) without falsely disconnecting.
+// Loading screens and fast travel may exceed this, but the control loop
+// detects callback resumption and reconnects the stream automatically.
+// 2s @ 20ms.
+constexpr int kInaudibleTicks = 100;
+// Only log callback freezes that persist this long.  Sub-100ms blips
+// are normal FMOD scheduling jitter while driving.  500ms @ 20ms.
+constexpr int kFreezeLogTicks = 25;
 
 // Minimum gap between two off/on station toggles. The toggle blocks ~300ms
 // and the game needs a moment to reallocate the channel, so we leave it well
@@ -112,11 +117,26 @@ void ControlLoop::run(const std::stop_token& tok) {
             // should stop injecting textures to avoid overwriting the
             // radio-off icon or native station artwork.
             bool game_radio_on = true;
+            bool game_radio_off = false;
             if (game_state_.resolved()) {
                 const auto gs = game_state_.read();
                 game_radio_on = gs.on_target_station;
+                game_radio_off = gs.radio_off;
             }
             frdx::overlay::set_radio_active(game_radio_on);
+            // When the user turns the radio off in-game, immediately signal
+            // the source that the radio is inaudible instead of waiting for
+            // the FMOD callback to freeze (which takes 2s and triggers
+            // expensive discovery scans).  on_radio_audible(false) stops the
+            // pipe and restores the station placeholder; on resume,
+            // drain_pending_ discards the stale buffer before replaying.
+            if (game_radio_off) {
+                auto* active = bridge_.manager().active();
+                if (active && active->playback_state() == PlaybackState::playing) {
+                    log::info("[ctrl] radio turned off in-game; disconnecting stream");
+                    active->on_radio_audible(false);
+                }
+            }
         } else if (!has_source) {
             bridge_.detach();
             frdx::overlay::set_radio_active(false);
@@ -170,26 +190,77 @@ void ControlLoop::run(const std::stop_token& tok) {
         // source wrapping a live player pauses/resumes it.
         // Re-arm on every source change and only count once that source has
         // actually been read, so stale loop state can't fire a phantom edge.
-        // The threshold sits above the stall-retune rebuild window, so the
-        // channel churn from a rewind or race transition never trips it;
-        // only sustained silence does.
-        if (active && busy) {
+        // The 10s threshold rides through station transitions, loading screens,
+        // and FMOD channel rebuilds without falsely disconnecting.
+        if (active) {
             if (active != audible_source_) {
                 audible_source_ = active;
                 idle_ticks_     = 0;
                 audible_primed_ = false;
                 radio_audible_  = true;
+                callback_frozen_ = false;
             }
-            if (c != prev_calls_) {
-                idle_ticks_     = 0;
-                audible_primed_ = true;
-            } else if (audible_primed_) {
-                ++idle_ticks_;
-            }
-            const bool audible = idle_ticks_ < kInaudibleTicks;
-            if (audible != radio_audible_) {
-                radio_audible_ = audible;
-                active->on_radio_audible(audible);
+            if (busy) {
+                // Source is actively producing audio — track callback
+                // freezes to detect when the game silences our station.
+                if (c != prev_calls_) {
+                    // Callback is alive — log if we were frozen long
+                    // enough to be meaningful (>=500ms).  Sub-100ms
+                    // blips are normal FMOD scheduling jitter while
+                    // driving and happen every few seconds.
+                    if (callback_frozen_) {
+                        const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - freeze_start_).count();
+                        if (dur >= 500) {
+                            log::info("[ctrl] FMOD callback resumed after {}ms (was frozen)", dur);
+                        }
+                        callback_frozen_ = false;
+                    }
+                    idle_ticks_     = 0;
+                    audible_primed_ = true;
+                } else if (audible_primed_) {
+                    // Track freeze start, but don't log until we know
+                    // it's meaningful (>=500ms).  Short blips are normal.
+                    if (!callback_frozen_) {
+                        callback_frozen_ = true;
+                        freeze_start_    = now;
+                    }
+                    ++idle_ticks_;
+                    // Log only if the freeze has persisted >=500ms.
+                    if (callback_frozen_ && idle_ticks_ == kFreezeLogTicks) {
+                        log::info("[ctrl] FMOD callback frozen (source busy, no reads)");
+                    }
+                }
+                const bool audible = idle_ticks_ < kInaudibleTicks;
+                if (audible != radio_audible_) {
+                    radio_audible_ = audible;
+                    active->on_radio_audible(audible);
+                }
+            } else {
+                // Source exists but isn't producing (stopped/paused).
+                // This happens after on_radio_audible(false) killed the
+                // pipe.  Watch for FMOD callback resumption (game unpaused)
+                // and restart the stream.  Without this, the else-branch
+                // would silently reset radio_audible_=true without ever
+                // calling on_radio_audible(true), leaving the stream dead.
+                if (c != prev_calls_) {
+                    if (callback_frozen_) {
+                        const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - freeze_start_).count();
+                        log::info("[ctrl] FMOD callback resumed after {}ms (source stopped)", dur);
+                        callback_frozen_ = false;
+                    }
+                    if (!radio_audible_) {
+                        radio_audible_ = true;
+                        log::info("[ctrl] FMOD callback resumed while source stopped; restarting stream");
+                        active->on_radio_audible(true);
+                    }
+                    idle_ticks_     = 0;
+                    audible_primed_ = true;
+                } else {
+                    idle_ticks_     = 0;
+                    audible_primed_ = false;
+                }
             }
         } else {
             idle_ticks_     = 0;
@@ -305,6 +376,43 @@ void ControlLoop::push_metadata() noexcept {
         return;
     }
 
+    // When paused or stopped (stream disconnected by on_radio_audible),
+    // show the station logo + name instead of the last track.  The stream
+    // is disconnected, so the last track's art is stale.
+    const auto pb_state = a->playback_state();
+    if (pb_state == PlaybackState::paused || pb_state == PlaybackState::stopped) {
+        const std::string& name = mp->display_name();
+        const auto track = mp->current_track();
+        if (track.is_placeholder) {
+            // Build the display title:
+            //   Multi-stream: "Box Radio - Chillwave" / "Nothing playing"
+            //   Single-stream: "Box Radio" / "Nothing playing"
+            std::string title = name;
+            if (track.multi_stream && !track.artist.empty()) {
+                title = name + " - " + track.artist;
+            }
+            [[maybe_unused]] auto _meta = meta_.update(title, "Nothing playing");
+            // Re-inject the station logo only when the URL or stretch mode
+            // changes — not every tick (which would spam texture injections).
+            const bool artwork_changed =
+                track.artwork_url != current_artwork_url_ ||
+                track.artwork_stretch != current_artwork_stretch_;
+            if (artwork_changed) {
+                current_artwork_url_     = track.artwork_url;
+                current_artwork_stretch_ = track.artwork_stretch;
+                if (!current_artwork_url_.empty() &&
+                    overlay::is_tex_injection_enabled()) {
+                    TextureInjector::instance().update_artwork_url(
+                        current_artwork_url_, current_artwork_stretch_);
+                }
+            }
+            return;
+        }
+        // Not a placeholder (shouldn't happen when paused, but just in case)
+        [[maybe_unused]] auto _meta = meta_.update(name, "Nothing playing");
+        return;
+    }
+
     const uint64_t generation = mp->track_generation();
     if (a != metadata_source_ || generation == 0 || generation != metadata_generation_) {
         try {
@@ -323,9 +431,25 @@ void ControlLoop::push_metadata() noexcept {
             // re-inject the station logo even if the URL is the same.
             if (source_changed || metadata_track_.is_placeholder) {
                 current_artwork_url_.clear();
+                current_artwork_stretch_ = false;
+                // Reset the metadata cache on station switch so both fields
+                // are rewritten unconditionally.  The game may have written
+                // its own placeholder to the artist slot when the station
+                // changed, and our dedup (last_artist_) would skip writing
+                // if the new value matches our previous write — leaving the
+                // game's placeholder in place.
+                meta_.reset_cache();
             }
-            if (metadata_track_.artwork_url != current_artwork_url_) {
-                current_artwork_url_ = metadata_track_.artwork_url;
+            // Re-inject artwork when the URL changes OR when the stretch
+            // mode changes (e.g. station logo with stretch=true → album art
+            // with stretch=false, even if the URL is the same station logo
+            // that was used as a fallback for the previous track).
+            const bool artwork_changed =
+                metadata_track_.artwork_url != current_artwork_url_ ||
+                metadata_track_.artwork_stretch != current_artwork_stretch_;
+            if (artwork_changed) {
+                current_artwork_url_     = metadata_track_.artwork_url;
+                current_artwork_stretch_ = metadata_track_.artwork_stretch;
                 if (!current_artwork_url_.empty() &&
                     overlay::is_tex_injection_enabled()) {
                     // station_logo_only stations use stretch mode (raw=true)
@@ -344,6 +468,21 @@ void ControlLoop::push_metadata() noexcept {
     const std::string& title =
         !metadata_track_.title.empty() ? metadata_track_.title : metadata_display_name_;
     const std::string& artist = metadata_track_.artist;
+    if (metadata_track_.is_placeholder && !artist.empty()) {
+        // Station logo display.  For multi-stream stations, swap
+        // title/artist so the stream name (which changes on switch)
+        // goes in the title slot — the game's HUD only refreshes when
+        // the title changes.  For single-stream stations, don't swap:
+        // the station name should be the title and the stream
+        // description should be the artist.
+        const bool do_swap = metadata_track_.multi_stream;
+        if (do_swap) {
+            [[maybe_unused]] auto _meta = meta_.update(artist, title);
+        } else {
+            [[maybe_unused]] auto _meta = meta_.update(title, artist);
+        }
+        return;
+    }
     if (artist.empty()) {
         // No state labels — just show the title/station name.
         [[maybe_unused]] auto _meta = meta_.update(title, "");

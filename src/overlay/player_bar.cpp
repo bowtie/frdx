@@ -373,8 +373,6 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         const float configured_gain = g_ctx.store
             ? g_ctx.store->snapshot().audio.output_gain
             : 1.0f;
-        bool vol_active        = false;
-        float vol_pending_gain = configured_gain;
         float gain_pct         = configured_gain * 100.0f;
         char label[16];
         std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
@@ -388,21 +386,21 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
                 g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_gain; });
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                vol_active       = true;
-                vol_pending_gain = configured_gain;
+                g_ui.vol_dragging = true;
             }
         }
 
-        if (vol_active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            float bar_x      = ImGui::GetItemRectMin().x;
-            float bar_w      = ImGui::GetItemRectSize().x;
-            float mouse_x    = ImGui::GetMousePos().x;
-            float new_val    = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
-            vol_pending_gain = new_val;
-            if (g_ctx.bridge) g_ctx.bridge->set_gain(new_val);
-        } else if (vol_active) {
-            vol_active = false;
-            g_ctx.store->patch([&](Config& c) { c.audio.output_gain = vol_pending_gain; });
+        if (g_ui.vol_dragging) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                float bar_x      = ImGui::GetItemRectMin().x;
+                float bar_w      = ImGui::GetItemRectSize().x;
+                float mouse_x    = ImGui::GetMousePos().x;
+                float new_val    = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
+                if (g_ctx.bridge) g_ctx.bridge->set_gain(new_val);
+                g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_val; });
+            } else {
+                g_ui.vol_dragging = false;
+            }
         }
     }
     if (!active) ImGui::EndDisabled();

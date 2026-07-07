@@ -759,7 +759,8 @@ bool configure_overlay_runtime(AudioSourceManager& mgr, fmod_bridge::DSPBridge& 
     g_ctx.dualsense                = dualsense;
     const auto cfg                 = store.snapshot();
     g_ui.theme_idx                 = theme_index(cfg.overlay.theme);
-    g_ui.hud_visible               = cfg.overlay.music_notifications_enabled;
+    g_ui.hud_visible               = cfg.overlay.music_notifications_enabled ||
+                                    cfg.overlay.station_notifications_enabled;
     g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
     g_ui.console_visible           = cfg.overlay.console_visible;
     if (!g_runtime_started) {

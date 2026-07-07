@@ -27,6 +27,7 @@ struct AudioConfig {
 struct OverlayConfig {
     std::string theme                 = "bess_dark";
     bool music_notifications_enabled  = true;
+    bool station_notifications_enabled = true;
     std::string notification_position = "top_left";
     bool console_visible = false;
     // When true, the player bar fades out after the cursor is hidden for
@@ -75,6 +76,13 @@ struct OverlayConfig {
     // to avoid stale-cache issues.  Only applies to album art (not
     // station logos).
     bool artwork_cache_enabled = false;
+    // When true, long track/station names are truncated in the HUD to
+    // fit the display area.  The max length is configurable.
+    bool metadata_truncation_enabled = true;
+    int metadata_max_length = 30;
+    // Grace period (seconds) after station selection: hold the station
+    // logo + name on-screen before the first track metadata overwrites it.
+    float metadata_grace_period = 2.5f;
 };
 
 struct DualSenseConfig {

@@ -30,6 +30,7 @@ public:
         bool on_target_station = false;
         bool race_active       = false;
         bool race_restart      = false;
+        bool radio_off         = false;  // station name is "StationOff"
     };
     Snapshot read() const noexcept;
 

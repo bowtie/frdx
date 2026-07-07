@@ -4,7 +4,7 @@
 // album art texture with artwork downloaded from the current track's
 // artwork_url.
 //
-// Pipeline: download → STB load/resize/border → texconv BC7 compress →
+// Pipeline: download → STB load/resize/border → bc7enc BC7 compress →
 // GPU upload via DX12 hooks.
 //
 // The TextureInjector runs on its own thread (one job per artwork URL).
@@ -29,12 +29,6 @@ public:
 
     // Set the worker client for out-of-process downloads.
     void set_worker(helper::WorkerClient* w) noexcept { worker_ = w; }
-
-    // Set the texconv binary path (resolved by DependencyManager).
-    void set_texconv_path(const std::filesystem::path& p) noexcept {
-        std::lock_guard lk{mtx_};
-        texconv_path_ = p;
-    }
 
     // Set the data directory for temp files.
     void set_data_dir(const std::filesystem::path& p) noexcept {
@@ -131,7 +125,6 @@ private:
 
     std::mutex mtx_;
     helper::WorkerClient* worker_ = nullptr;
-    std::filesystem::path texconv_path_;
     std::filesystem::path data_dir_;
 
     // Pending BC7 pixels — one variant per target dimension (196x196,

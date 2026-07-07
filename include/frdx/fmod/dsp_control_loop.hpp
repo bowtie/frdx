@@ -43,6 +43,15 @@ public:
         configured_gain_.store(g, std::memory_order_release);
     }
 
+    void set_metadata_truncation(bool enabled, int max_len) noexcept {
+        meta_.set_truncation(enabled, max_len);
+    }
+
+    void set_metadata_grace_period(float seconds) noexcept {
+        grace_period_ms_.store(static_cast<int64_t>(seconds * 1000.0f),
+                               std::memory_order_release);
+    }
+
     // IRadioTargetProvider
     std::byte* radio_stream() const noexcept override { return radio_stream_; }
     std::byte* sample_props_body() const noexcept override { return sample_props_body_; }
@@ -65,6 +74,7 @@ private:
     DSPBridge& bridge_;
     const PEImage& img_;
     std::atomic<float> configured_gain_;
+    std::atomic<int64_t> grace_period_ms_{2500};
     MetadataInjector meta_;
     GameStateProbe game_state_;
     IAudioSource* metadata_source_     = nullptr;
@@ -72,6 +82,7 @@ private:
     TrackInfo metadata_track_;
     std::string metadata_display_name_;
     std::string current_artwork_url_;
+    bool current_artwork_stretch_ = false;
     std::byte* radio_stream_      = nullptr;  // current RadioStreamFmod
     std::byte* sample_props_body_ = nullptr;  // current SampleProperties body
     std::uint64_t prev_calls_     = 0;
@@ -82,6 +93,9 @@ private:
     int idle_ticks_               = 0;
     bool audible_primed_          = false;
     bool radio_audible_           = true;
+    // FMOD callback freeze/resume diagnostics
+    bool callback_frozen_         = false;
+    std::chrono::steady_clock::time_point freeze_start_{};
     std::jthread thread_;
 };
 

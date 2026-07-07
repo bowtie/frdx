@@ -98,4 +98,12 @@ void RingBuffer::drain() noexcept {
     read_pos_.store(write_pos_.load(std::memory_order_acquire), std::memory_order_release);
 }
 
+void RingBuffer::drop(std::size_t n) noexcept {
+    const auto r     = read_pos_.load(std::memory_order_relaxed);
+    const auto w     = write_pos_.load(std::memory_order_acquire);
+    const auto avail = w - r;
+    if (n > avail) n = avail;
+    read_pos_.store(r + n, std::memory_order_release);
+}
+
 } // namespace frdx

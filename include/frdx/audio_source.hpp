@@ -14,6 +14,7 @@ struct TrackInfo {
     uint64_t position_ms = 0;
     bool artwork_stretch = false;  // true = stretch to fill texture (station logos), false = cover-fit crop (album art)
     bool is_placeholder = false;   // true = station name placeholder (not real track metadata from poller)
+    bool multi_stream = false;     // true = station has multiple streams (swap fields for HUD refresh)
 };
 
 enum class PlaybackState { stopped, playing, paused, buffering };

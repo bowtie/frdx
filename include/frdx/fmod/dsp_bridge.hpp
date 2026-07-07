@@ -225,6 +225,11 @@ private:
     void* fmod_system_       = nullptr;
     void* current_dsp_       = nullptr;
     uint32_t current_handle_ = 0;
+    // Deferred detach: when retargeting, we install on the new channel
+    // immediately but keep the DSP on the old channel for a short grace
+    // period so the new channel has time to ramp up without a cutoff.
+    uint32_t pending_detach_handle_ = 0;
+    std::chrono::steady_clock::time_point pending_detach_time_;
     mutable uint32_t last_bad_handle_ =
         0; // suppress repeated rc=3 / SEH warnings for the same handle
     IRadioTargetProvider* radio_target_ = nullptr;  // abstract target provider

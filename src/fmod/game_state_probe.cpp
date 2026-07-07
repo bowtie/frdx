@@ -96,8 +96,10 @@ GameStateProbe::Snapshot GameStateProbe::read() const noexcept {
     const std::byte* chain2 = nullptr;
     if (safe_read(radio_state + kStationChain1Off, chain1) && chain1 &&
         safe_read(chain1 + kStationChain2Off, chain2) && chain2) {
-        if (auto name = safe_read_msvc_string(chain2 + kStationNameOff))
+        if (auto name = safe_read_msvc_string(chain2 + kStationNameOff)) {
             out.on_target_station = (*name == kTargetStation1);
+            out.radio_off = (*name == kStationOff);
+        }
     }
     return out;
 }

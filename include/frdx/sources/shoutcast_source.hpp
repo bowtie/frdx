@@ -31,6 +31,8 @@ struct StationMetadataMapping {
     std::string title;  // JSON dot-path, e.g. "data.track_title"
     std::string artist; // JSON dot-path, e.g. "data.track_artist"
     std::string
+        title_fallback; // JSON dot-path tried when title resolves empty (e.g. "results.0.metadata")
+    std::string
         artwork_url;   // JSON dot-path to per-track artwork, e.g. "results.0.img_large_url"
     std::string
         artwork_url_template; // when set, wraps resolved artwork value: "https://cdn/{value}"
@@ -99,12 +101,8 @@ struct StationMetadata {
     StationMetadataWebSocketHeartbeat ws_heartbeat;
     StationMetadataWebSocketSubscribe ws_subscribe;
 
-    // When true, ignore artwork_url from the metadata source and always
-    // use iTunes/MusicBrainz lookup for per-track art. Useful for stations
-    // whose WS provides a station logo instead of per-track artwork.
-    bool prefer_itunes_lookup = false;
     // When true, always use the station logo (static_artwork_url) and skip
-    // both poller-provided artwork and iTunes/MusicBrainz lookup.
+    // poller-provided artwork.
     bool station_logo_only = false;
 };
 
@@ -180,6 +178,7 @@ public:
 
     void set_volume_normalization(bool on) noexcept { volume_norm_.store(on, std::memory_order_release); }
     void set_artwork_lookup_enabled(bool on) noexcept { artwork_lookup_enabled_.store(on, std::memory_order_release); }
+    void set_grace_period_ms(int64_t ms) noexcept { grace_period_ms_.store(ms, std::memory_order_release); }
 
     // Update the ffmpeg binary path. Takes effect on the next stream
     // (re)connect. Used by DependencyManager after auto-downloading ffmpeg.
@@ -237,6 +236,11 @@ private:
     ShoutcastConfig cfg_;
     std::atomic<bool> volume_norm_{false};
     std::atomic<bool> artwork_lookup_enabled_{true};
+    std::atomic<int64_t> grace_period_ms_{2500};
+    // Stall detection: tracks the last time ffmpeg produced audio data.
+    // When the pipe is alive but not producing data for >kStallTimeoutMs,
+    // we kill and reconnect the stream.
+    std::atomic<int64_t> last_data_ms_{0};
     // Lock-free audio path: pump() loads via acquire, start_pipe_locked() stores
     // via release.  Shared ownership ensures the Pipe stays alive until pump()
     // releases its local reference, even if stop_pipe_locked() replaces pipe_.
@@ -292,11 +296,6 @@ private:
     // avoid calling current_track() (which locks mu_) every frame.
     std::atomic<uint64_t> info_gen_{0};
     std::atomic<uint64_t> metadata_epoch_{1};
-
-    // Artwork lookup cancellation: incremented each time a new track
-    // is applied, so stale lookup threads (iTunes + MusicBrainz) can
-    // detect they're outdated.
-    std::atomic<uint64_t> itunes_lookup_job_{0};
 
     // Audible state: when the game pauses or enters a menu, the radio
     // becomes inaudible.  We kill the ffmpeg pipe to prevent live stream

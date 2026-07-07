@@ -15,51 +15,29 @@
 namespace frdx::overlay {
 using namespace frdx;
 
-void draw_general_settings_tab() {
-    const auto cfg = g_ctx.store->snapshot();
+// ── Shared label-row helper for two-column settings forms ──
 
-    // Compact two-column form: label | control.
-    ImGui::BeginTable("##general_settings", 2, ImGuiTableFlags_None);
+static void settings_label_row(const char* text) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(text);
+    ImGui::TableSetColumnIndex(1);
+}
+
+static void begin_settings_table(const char* id) {
+    ImGui::BeginTable(id, 2, ImGuiTableFlags_None);
     ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 168.0f);
     ImGui::TableSetupColumn("widget", ImGuiTableColumnFlags_WidthStretch);
+}
 
-    auto label_row = [](const char* text) {
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(text);
-        ImGui::TableSetColumnIndex(1);
-    };
+// ── Audio tab: audio output + metadata/artwork behaviour ──
 
-    label_row("Theme");
-    g_ui.theme_idx = theme_index(cfg.overlay.theme);
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
-                     IM_ARRAYSIZE(g_ui.theme_names))) {
-        ApplyTheme(g_ui.theme_idx);
-        const char* theme = theme_value(g_ui.theme_idx);
-        g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
-    }
+void draw_audio_settings_tab() {
+    const auto cfg = g_ctx.store->snapshot();
+    begin_settings_table("##audio_settings");
 
-    label_row("Music Notifications");
-    g_ui.hud_visible = cfg.overlay.music_notifications_enabled;
-    bool hud         = g_ui.hud_visible;
-    if (ImGui::Checkbox("##hud", &hud)) {
-        g_ui.hud_visible = hud;
-        g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = hud; });
-    }
-
-    label_row("Notification Position");
-    g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::Combo("##notification_position", &g_ui.notification_position_idx,
-                     g_ui.notification_position_names,
-                     IM_ARRAYSIZE(g_ui.notification_position_names))) {
-        const char* position = notification_position_value(g_ui.notification_position_idx);
-        g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
-    }
-
-    label_row("Force Stereo Audio");
+    settings_label_row("Force Stereo Audio");
     bool stereo = g_ctx.bridge->force_stereo_audio();
     if (ImGui::Checkbox("##stereo", &stereo)) {
         g_ctx.bridge->set_force_stereo_audio(stereo);
@@ -69,7 +47,7 @@ void draw_general_settings_tab() {
         ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
     }
 
-    label_row("Volume Normalization");
+    settings_label_row("Volume Normalization");
     bool vol_norm = g_ctx.store->snapshot().audio.volume_normalization;
     if (ImGui::Checkbox("##vol_norm", &vol_norm)) {
         g_ctx.store->patch([&](Config& c) { c.audio.volume_normalization = vol_norm; });
@@ -82,7 +60,7 @@ void draw_general_settings_tab() {
         ImGui::SetTooltip("Apply EBU R128 loudness normalization (ffmpeg loudnorm filter).\nTakes effect on the next stream reconnect.");
     }
 
-    label_row("Album Art Lookup");
+    settings_label_row("Album Art Lookup");
     bool art_lookup = cfg.overlay.artwork_lookup_enabled;
     if (ImGui::Checkbox("##art_lookup", &art_lookup)) {
         g_ctx.store->patch([&](Config& c) { c.overlay.artwork_lookup_enabled = art_lookup; });
@@ -92,11 +70,11 @@ void draw_general_settings_tab() {
         }
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("ON = look up per-track album art via iTunes + MusicBrainz\n"
+        ImGui::SetTooltip("ON = use per-track artwork from station APIs\n"
                           "OFF = use station logos only");
     }
 
-    label_row("Artwork Cache");
+    settings_label_row("Artwork Cache");
     bool art_cache = cfg.overlay.artwork_cache_enabled;
     if (ImGui::Checkbox("##art_cache", &art_cache)) {
         g_ctx.store->patch([&](Config& c) { c.overlay.artwork_cache_enabled = art_cache; });
@@ -107,25 +85,59 @@ void draw_general_settings_tab() {
                           "OFF = re-process every time (default)");
     }
 
-    label_row("Prevent Focus Pause");
-    bool prevent_pause = cfg.overlay.prevent_focus_loss_pause;
-    if (ImGui::Checkbox("##prevent_focus_pause", &prevent_pause)) {
-        g_ctx.store->patch(
-            [&](Config& c) { c.overlay.prevent_focus_loss_pause = prevent_pause; });
+    settings_label_row("Metadata Truncation");
+    bool trunc = cfg.overlay.metadata_truncation_enabled;
+    if (ImGui::Checkbox("##meta_trunc", &trunc)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.metadata_truncation_enabled = trunc; });
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("ON = game won't pause when you alt-tab\n"
-                          "OFF = game auto-pauses on focus loss (default)");
+        ImGui::SetTooltip("ON = cut long track/station names to fit the HUD\n"
+                          "OFF = show full names (may overflow)");
     }
 
-    label_row("Log Window");
-    bool show_log = g_ui.console_visible;
-    if (ImGui::Checkbox("##log_window", &show_log)) {
-        g_ui.console_visible = show_log;
-        g_ctx.store->patch([&](Config& c) { c.overlay.console_visible = show_log; });
+    if (cfg.overlay.metadata_truncation_enabled) {
+        settings_label_row("Max Length");
+        int max_len = cfg.overlay.metadata_max_length;
+        if (ImGui::SliderInt("##meta_max_len", &max_len, 10, 60)) {
+            g_ctx.store->patch([&](Config& c) { c.overlay.metadata_max_length = max_len; });
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Maximum number of characters shown in the HUD\n"
+                              "for track titles and artist names.");
+        }
     }
 
-    label_row("Always Show Player Bar");
+    settings_label_row("Logo Grace Period");
+    float grace = cfg.overlay.metadata_grace_period;
+    if (ImGui::SliderFloat("##grace_period", &grace, 0.0f, 10.0f, "%.1fs")) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.metadata_grace_period = grace; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How long the station logo + name stays on-screen\n"
+                          "before the first track metadata overwrites it.\n"
+                          "0s = track metadata applies immediately.");
+    }
+
+    ImGui::EndTable();
+}
+
+// ── Display tab: visual/overlay behaviour + notifications ──
+
+void draw_display_settings_tab() {
+    const auto cfg = g_ctx.store->snapshot();
+    begin_settings_table("##display_settings");
+
+    settings_label_row("Theme");
+    g_ui.theme_idx = theme_index(cfg.overlay.theme);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
+                     IM_ARRAYSIZE(g_ui.theme_names))) {
+        ApplyTheme(g_ui.theme_idx);
+        const char* theme = theme_value(g_ui.theme_idx);
+        g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
+    }
+
+    settings_label_row("Always Show Player Bar");
     bool always_visible = cfg.overlay.player_bar_always_visible;
     if (ImGui::Checkbox("##always_visible", &always_visible)) {
         g_ctx.store->patch(
@@ -136,7 +148,7 @@ void draw_general_settings_tab() {
                           "OFF = player bar fades when the cursor hides");
     }
 
-    label_row("Backdrop Blur");
+    settings_label_row("Backdrop Blur");
     bool blur = cfg.overlay.blur_enabled;
     if (ImGui::Checkbox("##backdrop_blur", &blur)) {
         g_ctx.store->patch([&](Config& c) { c.overlay.blur_enabled = blur; });
@@ -146,7 +158,7 @@ void draw_general_settings_tab() {
     }
 
     if (blur) {
-        label_row("Blur Strength");
+        settings_label_row("Blur Strength");
         int strength = std::clamp(cfg.overlay.blur_strength, 1, 15);
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::SliderInt("##blur_strength", &strength, 1, 15)) {
@@ -154,7 +166,7 @@ void draw_general_settings_tab() {
             g_ctx.store->patch([&](Config& c) { c.overlay.blur_strength = strength; });
         }
 
-        label_row("Tint Color");
+        settings_label_row("Tint Color");
         float tint[3] = {cfg.overlay.blur_tint_r, cfg.overlay.blur_tint_g, cfg.overlay.blur_tint_b};
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::ColorEdit3("##blur_tint", tint,
@@ -169,7 +181,7 @@ void draw_general_settings_tab() {
             ImGui::SetTooltip("Frosted-glass tint colour drawn over the blur");
         }
 
-        label_row("Tint Opacity");
+        settings_label_row("Tint Opacity");
         float tint_opacity = std::clamp(cfg.overlay.blur_tint_opacity, 0.0f, 1.0f);
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::SliderFloat("##blur_tint_opacity", &tint_opacity, 0.0f, 1.0f, "%.2f")) {
@@ -180,7 +192,7 @@ void draw_general_settings_tab() {
             ImGui::SetTooltip("0 = pure blur, 1 = solid tint colour");
         }
 
-        label_row("Widget Opacity");
+        settings_label_row("Widget Opacity");
         float widget_opacity = std::clamp(cfg.overlay.blur_widget_opacity, 0.0f, 1.0f);
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::SliderFloat("##blur_widget_opacity", &widget_opacity, 0.0f, 1.0f, "%.2f")) {
@@ -191,6 +203,54 @@ void draw_general_settings_tab() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("1 = opaque widgets (blur only in gaps), 0 = invisible widgets");
         }
+    }
+
+    settings_label_row("Music Notifications");
+    bool music_toasts = cfg.overlay.music_notifications_enabled;
+    if (ImGui::Checkbox("##music_toasts", &music_toasts)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = music_toasts; });
+        g_ui.hud_visible = music_toasts || cfg.overlay.station_notifications_enabled;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show a toast when the song changes");
+    }
+
+    settings_label_row("Station Notifications");
+    bool station_toasts = cfg.overlay.station_notifications_enabled;
+    if (ImGui::Checkbox("##station_toasts", &station_toasts)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.station_notifications_enabled = station_toasts; });
+        g_ui.hud_visible = station_toasts || cfg.overlay.music_notifications_enabled;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show a toast when switching stations");
+    }
+
+    settings_label_row("Notification Position");
+    g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##notification_position", &g_ui.notification_position_idx,
+                     g_ui.notification_position_names,
+                     IM_ARRAYSIZE(g_ui.notification_position_names))) {
+        const char* position = notification_position_value(g_ui.notification_position_idx);
+        g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
+    }
+
+    settings_label_row("Prevent Focus Pause");
+    bool prevent_pause = cfg.overlay.prevent_focus_loss_pause;
+    if (ImGui::Checkbox("##prevent_focus_pause", &prevent_pause)) {
+        g_ctx.store->patch(
+            [&](Config& c) { c.overlay.prevent_focus_loss_pause = prevent_pause; });
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("ON = game won't pause when you alt-tab\n"
+                          "OFF = game auto-pauses on focus loss (default)");
+    }
+
+    settings_label_row("Log Window");
+    bool show_log = g_ui.console_visible;
+    if (ImGui::Checkbox("##log_window", &show_log)) {
+        g_ui.console_visible = show_log;
+        g_ctx.store->patch([&](Config& c) { c.overlay.console_visible = show_log; });
     }
 
     ImGui::EndTable();
@@ -375,8 +435,12 @@ void draw_settings_window(const PlayerBarLayout& layout) {
                     ImGui::PopItemWidth();
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Settings")) {
-                    draw_general_settings_tab();
+                if (ImGui::BeginTabItem("Audio")) {
+                    draw_audio_settings_tab();
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Display")) {
+                    draw_display_settings_tab();
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Debug")) {

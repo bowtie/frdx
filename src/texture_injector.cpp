@@ -1,12 +1,12 @@
 #include "frdx/texture_injector.hpp"
 #include "frdx/log.hpp"
-#include "frdx/platform/windows/subprocess.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <mutex>
 #include <thread>
 
 // STB_IMAGE_IMPLEMENTATION is defined in overlay/textures.cpp — just include the header.
@@ -18,7 +18,56 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include "bc7enc.h"
+
 namespace frdx {
+
+namespace {
+
+// Compress RGBA pixel data to BC7 in-memory using bc7enc.
+// No temp files, no subprocess — much faster than texconv.
+// Pre-multiplies alpha before compression (matches texconv -pmalpha).
+std::vector<uint8_t> compress_bc7(const unsigned char* rgba, int w, int h) {
+    static std::once_flag init_flag;
+    std::call_once(init_flag, bc7enc_compress_block_init);
+
+    bc7enc_compress_block_params params;
+    bc7enc_compress_block_params_init(&params);
+
+    const int blocks_x = w / 4;
+    const int blocks_y = h / 4;
+    std::vector<uint8_t> payload(blocks_x * blocks_y * 16);
+
+    for (int by = 0; by < blocks_y; ++by) {
+        for (int bx = 0; bx < blocks_x; ++bx) {
+            uint32_t pixels[16];
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    int src_idx = (((by * 4 + y) * w) + (bx * 4 + x)) * 4;
+                    uint8_t r = rgba[src_idx];
+                    uint8_t g = rgba[src_idx + 1];
+                    uint8_t b = rgba[src_idx + 2];
+                    uint8_t a = rgba[src_idx + 3];
+
+                    // Pre-multiply alpha
+                    if (a < 255) {
+                        r = static_cast<uint8_t>((r * a) / 255);
+                        g = static_cast<uint8_t>((g * a) / 255);
+                        b = static_cast<uint8_t>((b * a) / 255);
+                    }
+
+                    // Memory layout is R, G, B, A due to little-endian
+                    pixels[y * 4 + x] = (a << 24) | (b << 16) | (g << 8) | r;
+                }
+            }
+            bc7enc_compress_block(payload.data() + (by * blocks_x + bx) * 16,
+                                  pixels, &params);
+        }
+    }
+    return payload;
+}
+
+} // namespace
 
 TextureInjector& TextureInjector::instance() {
     static TextureInjector inst;
@@ -31,12 +80,17 @@ void TextureInjector::update_artwork_url(const std::string& url, bool raw, bool 
     processing_.store(true, std::memory_order_release);
     // Detached thread: one per artwork job. Job ID comparison cancels
     // stale jobs when the user skips tracks rapidly.
-    std::thread([this, url, job_id, raw, border] { process_artwork(url, job_id, raw, border); }).detach();
+    // Lower thread priority to prevent starving the game's render threads.
+    std::thread([this, url, job_id, raw, border] {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+        process_artwork(url, job_id, raw, border);
+    }).detach();
 }
 
 void TextureInjector::prewarm_logo_cache(const std::vector<std::string>& logo_urls) {
     if (logo_urls.empty()) return;
     std::thread([this, logo_urls] {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
         log::info("[texinject] prewarming {} station logo(s)", logo_urls.size());
         for (const auto& url : logo_urls) {
             // Deduplicate: skip if already cached with matching file hash.
@@ -68,10 +122,9 @@ void TextureInjector::prewarm_logo_cache(const std::vector<std::string>& logo_ur
             // Process with prewarm=true: runs the full pipeline but
             // doesn't inject into the GPU.  Uses a synthetic job_id
             // that won't interfere with real artwork jobs.
-            // All station logos use cover-fit mode (raw=false) — the
-            // logo is placed in a square on the left side of the canvas.
-            // border=true matches the runtime default — the pipeline
-            // auto-disables it for transparent PNGs.
+            // Logos use stretch mode (raw=false) — the logo is scaled
+            // to fill the art area.  border=true matches runtime; the
+            // alpha detection auto-disables it for transparent PNGs.
             log::info("[texinject] prewarm building: {}", url);
             process_artwork(url, 0, false, true, true);
         }
@@ -212,18 +265,10 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
             processing_.store(false, std::memory_order_release);
     };
 
-    std::filesystem::path texconv_path;
     std::filesystem::path data_dir;
     {
         std::lock_guard lk{mtx_};
-        texconv_path = texconv_path_;
         data_dir = data_dir_;
-    }
-
-    if (texconv_path.empty()) {
-        log::warn("[texinject] texconv path not set; skipping artwork processing");
-        cleanup();
-        return;
     }
 
     // ── Step 0: Check BC7 disk cache ──
@@ -280,24 +325,19 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     std::error_code ec;
     std::filesystem::create_directories(temp_dir, ec);
 
-    // Include job_id in temp file names to prevent concurrent
-    // process_artwork threads from corrupting each other's files when
-    // the user skips tracks rapidly.
+    // Include job_id in temp file name to prevent concurrent
+    // process_artwork threads from corrupting each other's files.
     const auto job_suffix = std::to_string(job_id);
     const auto raw_path = temp_dir / ("raw_" + job_suffix + ".jpg");
-    const auto png_path = temp_dir / ("artwork_" + job_suffix + ".png");
-    const auto dds_path = temp_dir / ("artwork_" + job_suffix + ".dds");
 
-    // Scope guard: always clean up temp files on any return path.
+    // Scope guard: always clean up temp file on any return path.
     struct FileCleanup {
-        std::filesystem::path raw_path_, png_path_, dds_path_;
+        std::filesystem::path raw_path_;
         std::error_code& ec_;
         ~FileCleanup() {
             std::filesystem::remove(raw_path_, ec_);
-            std::filesystem::remove(png_path_, ec_);
-            std::filesystem::remove(dds_path_, ec_);
         }
-    } file_guard{raw_path, png_path, dds_path, ec};
+    } file_guard{raw_path, ec};
 
     // ── Step 1: Download (or load from local disk) ──
     bool download_ok = false;
@@ -398,13 +438,6 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     const int kArtWidth  = static_cast<int>(target_h * 96 / 104);
     const int kArtHeight = target_h;
 
-    if (!std::filesystem::exists(texconv_path, ec)) {
-        log::warn("[texinject] texconv.exe not found at {}; skipping BC7 compression",
-                  texconv_path.string());
-        cleanup();
-        return;
-    }
-
     // Single variant at the actual target dimensions.
     struct TargetDim { int w, h; };
     const TargetDim targets[] = {
@@ -415,9 +448,6 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
 
     if (raw) {
         // ── Raw mode: stretch full image to each target dimension ──
-        // No cropping, no border — just resize the entire image to fit
-        // the target texture dimensions.  Used for debug injection of
-        // custom images that aren't album art.
         for (const auto& tgt : targets) {
             if (job_id != latest_job_id_.load(std::memory_order_acquire)) {
                 stbi_image_free(img_data);
@@ -429,197 +459,165 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
             stbir_resize_uint8_linear(img_data, width, height, 0,
                                       resized.data(), tgt.w, tgt.h, 0, STBIR_RGBA);
 
-            stbi_write_png(png_path.string().c_str(), tgt.w, tgt.h, 4,
-                           resized.data(), tgt.w * 4);
-
-            std::string texconv_cmd = "\"" + texconv_path.string() +
-                "\" -f BC7_UNORM -w " + std::to_string(tgt.w) +
-                " -h " + std::to_string(tgt.h) +
-                " -m 1 -pmalpha -gpu 0 -y -o \"" + temp_dir.string() + "\" \"" + png_path.string() + "\"";
-
-            STARTUPINFOA si{};
-            si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESHOWWINDOW;
-            si.wShowWindow = SW_HIDE;
-            PROCESS_INFORMATION pi{};
-
-            if (!CreateProcessA(nullptr, texconv_cmd.data(), nullptr, nullptr, FALSE,
-                                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-                log::warn("[texinject] failed to launch texconv for {}x{}", tgt.w, tgt.h);
-                continue;
-            }
-            DWORD wait_result = WaitForSingleObject(pi.hProcess, 30000);
-            if (wait_result == WAIT_TIMEOUT) {
-                TerminateProcess(pi.hProcess, 1);
-                log::warn("[texinject] texconv timed out for {}x{}, terminated", tgt.w, tgt.h);
-            }
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-
-            if (job_id != latest_job_id_.load(std::memory_order_acquire)) {
-                stbi_image_free(img_data);
-                cleanup();
-                return;
-            }
-
-            std::ifstream in_dds(dds_path, std::ios::binary | std::ios::ate);
-            if (!in_dds) continue;
-            auto dds_size = in_dds.tellg();
-            in_dds.seekg(0);
-            std::vector<uint8_t> dds_data(dds_size);
-            in_dds.read(reinterpret_cast<char*>(dds_data.data()), dds_size);
-
-            size_t header_size = 128;
-            if (dds_data.size() >= 88) {
-                uint32_t fourcc = 0;
-                std::memcpy(&fourcc, dds_data.data() + 84, 4);
-                if (fourcc == 0x30315844) header_size = 148;
-            }
-            if (dds_data.size() <= header_size) continue;
-
-            size_t payload_size = dds_data.size() - header_size;
-            std::vector<uint8_t> bc7_payload(payload_size);
-            std::memcpy(bc7_payload.data(), dds_data.data() + header_size, payload_size);
+            auto bc7_payload = compress_bc7(resized.data(), tgt.w, tgt.h);
 
             log::info("[texinject] raw image processed: {}x{} BC7 ({} bytes)",
-                      tgt.w, tgt.h, payload_size);
+                      tgt.w, tgt.h, bc7_payload.size());
             variants.push_back({std::move(bc7_payload), tgt.w, tgt.h});
         }
         stbi_image_free(img_data);
-    } else {
-        // ── Album art mode: cover-fit to kArtWidth × kArtHeight + center crop ──
-        // The art area is taller than wide (96×104 at 1080p) to compensate
-        // for the game's vertical squish — after squishing 104→96, the art
-        // appears as a 96×96 square on screen.
-    float scale = std::max(static_cast<float>(kArtWidth) / width,
-                           static_cast<float>(kArtHeight) / height);
-    int new_w = std::max(1, static_cast<int>(width * scale));
-    int new_h = std::max(1, static_cast<int>(height * scale));
+    } else if (is_local) {
+        // ── Station logo mode: fit inside border, no crop ──
+        // Logos are scaled to fit inside the border frame (so letters
+        // near the edge aren't clipped), then centered within the art
+        // area.  The border fills the gap between the logo and the
+        // art area edges.  For transparent logos (border disabled),
+        // the logo fills the full art area.
+        const int border_thickness = border ? std::max(1, kArtWidth / 26) : 0;
+        const int inner_w = kArtWidth - 2 * border_thickness;
+        const int inner_h = kArtHeight - 2 * border_thickness;
+        const int new_w = border ? inner_w : kArtWidth;
+        const int new_h = border ? inner_h : kArtHeight;
+        const int place_x = border ? border_thickness : 0;
+        const int place_y = border ? border_thickness : 0;
 
-    std::vector<unsigned char> resized_data(new_w * new_h * 4);
-    stbir_resize_uint8_linear(img_data, width, height, 0,
-                              resized_data.data(), new_w, new_h, 0, STBIR_RGBA);
-    stbi_image_free(img_data);
+        std::vector<unsigned char> resized_data(new_w * new_h * 4);
+        stbir_resize_uint8_linear(img_data, width, height, 0,
+                                  resized_data.data(), new_w, new_h, 0, STBIR_RGBA);
+        stbi_image_free(img_data);
 
-    if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
-
-    // Center-crop offsets
-    int src_offset_x = (new_w - kArtWidth) / 2;
-    int src_offset_y = (new_h - kArtHeight) / 2;
-    if (src_offset_x < 0) src_offset_x = 0;
-    if (src_offset_y < 0) src_offset_y = 0;
-
-    // Calculate average color of the cropped area (for border)
-    unsigned char b_r = 0, b_g = 0, b_b = 0;
-    if (border) {
-        uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
-        for (int y = 0; y < kArtHeight; ++y) {
-            for (int x = 0; x < kArtWidth; ++x) {
-                int src_idx = ((y + src_offset_y) * new_w + (x + src_offset_x)) * 4;
-                r_sum += resized_data[src_idx];
-                g_sum += resized_data[src_idx + 1];
-                b_sum += resized_data[src_idx + 2];
-            }
-        }
-        int pixel_count = kArtWidth * kArtHeight;
-        b_r = static_cast<unsigned char>(r_sum / pixel_count * 0.6f);
-        b_g = static_cast<unsigned char>(g_sum / pixel_count * 0.6f);
-        b_b = static_cast<unsigned char>(b_sum / pixel_count * 0.6f);
-    }
-    const int border_thickness = border ? std::max(1, kArtWidth / 26) : 0;
-
-    for (const auto& tgt : targets) {
         if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
-        // Build the canvas (tgt.w x tgt.h), transparent.
-        // Place the artwork at x=0..kArtWidth, y=0..kArtHeight.
-        // No stretching needed — kArtHeight == tgt.h.
-        std::vector<unsigned char> padded_data(tgt.w * tgt.h * 4, 0);
-
-        for (int y = 0; y < kArtHeight && y < tgt.h; ++y) {
-            for (int x = 0; x < kArtWidth; ++x) {
-                int dst_idx = (y * tgt.w + x) * 4;
-
-                if (border &&
-                    (x < border_thickness || x >= kArtWidth - border_thickness ||
-                     y < border_thickness || y >= kArtHeight - border_thickness)) {
-                    padded_data[dst_idx]     = b_r;
-                    padded_data[dst_idx + 1] = b_g;
-                    padded_data[dst_idx + 2] = b_b;
-                    padded_data[dst_idx + 3] = 255;
-                } else {
-                    int src_idx = ((y + src_offset_y) * new_w +
-                                   (x + src_offset_x)) * 4;
-                    padded_data[dst_idx]     = resized_data[src_idx];
-                    padded_data[dst_idx + 1] = resized_data[src_idx + 1];
-                    padded_data[dst_idx + 2] = resized_data[src_idx + 2];
-                    padded_data[dst_idx + 3] = resized_data[src_idx + 3];
+        // Calculate average color for border from the resized logo.
+        unsigned char b_r = 0, b_g = 0, b_b = 0;
+        if (border) {
+            uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
+            for (int y = 0; y < new_h; ++y) {
+                for (int x = 0; x < new_w; ++x) {
+                    int idx = (y * new_w + x) * 4;
+                    r_sum += resized_data[idx];
+                    g_sum += resized_data[idx + 1];
+                    b_sum += resized_data[idx + 2];
                 }
             }
+            int pixel_count = new_w * new_h;
+            b_r = static_cast<unsigned char>(r_sum / pixel_count * 0.6f);
+            b_g = static_cast<unsigned char>(g_sum / pixel_count * 0.6f);
+            b_b = static_cast<unsigned char>(b_sum / pixel_count * 0.6f);
         }
 
-        // Write PNG for this dimension
-        stbi_write_png(png_path.string().c_str(), tgt.w, tgt.h, 4,
-                       padded_data.data(), tgt.w * 4);
+        for (const auto& tgt : targets) {
+            if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
-        // BC7 compress via texconv
-        std::string texconv_cmd = "\"" + texconv_path.string() +
-            "\" -f BC7_UNORM -w " + std::to_string(tgt.w) +
-            " -h " + std::to_string(tgt.h) +
-            " -m 1 -pmalpha -gpu 0 -y -o \"" + temp_dir.string() + "\" \"" + png_path.string() + "\"";
+            // Build the canvas (tgt.w x tgt.h), transparent.
+            // Fill the art area with border color, then place the
+            // resized logo inside it.
+            std::vector<unsigned char> padded_data(tgt.w * tgt.h * 4, 0);
 
-        STARTUPINFOA si{};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION pi{};
+            for (int y = 0; y < kArtHeight && y < tgt.h; ++y) {
+                for (int x = 0; x < kArtWidth; ++x) {
+                    int dst_idx = (y * tgt.w + x) * 4;
 
-        if (!CreateProcessA(nullptr, texconv_cmd.data(), nullptr, nullptr, FALSE,
-                            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-            log::warn("[texinject] failed to launch texconv for {}x{}", tgt.w, tgt.h);
-            continue;
+                    int sx = x - place_x;
+                    int sy = y - place_y;
+                    if (sx >= 0 && sx < new_w && sy >= 0 && sy < new_h) {
+                        int src_idx = (sy * new_w + sx) * 4;
+                        padded_data[dst_idx]     = resized_data[src_idx];
+                        padded_data[dst_idx + 1] = resized_data[src_idx + 1];
+                        padded_data[dst_idx + 2] = resized_data[src_idx + 2];
+                        padded_data[dst_idx + 3] = resized_data[src_idx + 3];
+                    } else if (border) {
+                        // Border frame area
+                        padded_data[dst_idx]     = b_r;
+                        padded_data[dst_idx + 1] = b_g;
+                        padded_data[dst_idx + 2] = b_b;
+                        padded_data[dst_idx + 3] = 255;
+                    }
+                    // else: transparent (already zeroed)
+                }
+            }
+
+            auto bc7_payload = compress_bc7(padded_data.data(), tgt.w, tgt.h);
+
+            log::info("[texinject] logo processed: {}x{} -> {}x{} BC7 ({} bytes)",
+                      width, height, tgt.w, tgt.h, bc7_payload.size());
+            variants.push_back({std::move(bc7_payload), tgt.w, tgt.h});
         }
-        DWORD wait_result = WaitForSingleObject(pi.hProcess, 30000);
-        if (wait_result == WAIT_TIMEOUT) {
-            TerminateProcess(pi.hProcess, 1);
-            log::warn("[texinject] texconv timed out for {}x{}, terminated", tgt.w, tgt.h);
-        }
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
+    } else {
+        // ── Album art mode: stretch to fill art area (same as logos) ──
+        // The art area is kArtWidth × kArtHeight (96×104 at 1080p), which
+        // the game squishes vertically to ~96×96 on screen.  To appear
+        // square on screen, the art must FILL the entire 96×104 area.
+        // We stretch to fill (ignoring source aspect ratio) — the game's
+        // vertical squish un-distorts it, producing a square on screen.
+        // This is the same approach as logo mode, which is known to work.
+        const int border_thickness = border ? std::max(1, kArtWidth / 26) : 0;
+        const int inner_w = kArtWidth - 2 * border_thickness;
+        const int inner_h = kArtHeight - 2 * border_thickness;
+        const int new_w = border ? inner_w : kArtWidth;
+        const int new_h = border ? inner_h : kArtHeight;
+        const int place_x = border ? border_thickness : 0;
+        const int place_y = border ? border_thickness : 0;
+
+        std::vector<unsigned char> resized_data(new_w * new_h * 4);
+        stbir_resize_uint8_linear(img_data, width, height, 0,
+                                  resized_data.data(), new_w, new_h, 0, STBIR_RGBA);
+        stbi_image_free(img_data);
 
         if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
-        // Parse DDS and extract BC7 payload
-        std::ifstream in_dds(dds_path, std::ios::binary | std::ios::ate);
-        if (!in_dds) {
-            log::warn("[texinject] texconv didn't produce DDS for {}x{}", tgt.w, tgt.h);
-            continue;
-        }
-        auto dds_size = in_dds.tellg();
-        in_dds.seekg(0);
-        std::vector<uint8_t> dds_data(dds_size);
-        in_dds.read(reinterpret_cast<char*>(dds_data.data()), dds_size);
-
-        size_t header_size = 128;
-        if (dds_data.size() >= 88) {
-            uint32_t fourcc = 0;
-            std::memcpy(&fourcc, dds_data.data() + 84, 4);
-            if (fourcc == 0x30315844) header_size = 148; // "DX10"
-        }
-        if (dds_data.size() <= header_size) {
-            log::warn("[texinject] DDS too small for {}x{}: {} bytes", tgt.w, tgt.h, dds_data.size());
-            continue;
+        // Calculate average color for border from the resized image.
+        unsigned char b_r = 0, b_g = 0, b_b = 0;
+        if (border) {
+            uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
+            for (int y = 0; y < new_h; ++y) {
+                for (int x = 0; x < new_w; ++x) {
+                    int idx = (y * new_w + x) * 4;
+                    r_sum += resized_data[idx];
+                    g_sum += resized_data[idx + 1];
+                    b_sum += resized_data[idx + 2];
+                }
+            }
+            int pixel_count = new_w * new_h;
+            b_r = static_cast<unsigned char>(r_sum / pixel_count * 0.6f);
+            b_g = static_cast<unsigned char>(g_sum / pixel_count * 0.6f);
+            b_b = static_cast<unsigned char>(b_sum / pixel_count * 0.6f);
         }
 
-        size_t payload_size = dds_data.size() - header_size;
-        std::vector<uint8_t> bc7_payload(payload_size);
-        std::memcpy(bc7_payload.data(), dds_data.data() + header_size, payload_size);
+        for (const auto& tgt : targets) {
+            if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
 
-        log::info("[texinject] artwork processed: {}x{} BC7 ({} bytes)",
-                  tgt.w, tgt.h, payload_size);
+            std::vector<unsigned char> padded_data(tgt.w * tgt.h * 4, 0);
 
-        variants.push_back({std::move(bc7_payload), tgt.w, tgt.h});
-    }
+            for (int y = 0; y < kArtHeight && y < tgt.h; ++y) {
+                for (int x = 0; x < kArtWidth; ++x) {
+                    int dst_idx = (y * tgt.w + x) * 4;
+
+                    int sx = x - place_x;
+                    int sy = y - place_y;
+                    if (sx >= 0 && sx < new_w && sy >= 0 && sy < new_h) {
+                        int src_idx = (sy * new_w + sx) * 4;
+                        padded_data[dst_idx]     = resized_data[src_idx];
+                        padded_data[dst_idx + 1] = resized_data[src_idx + 1];
+                        padded_data[dst_idx + 2] = resized_data[src_idx + 2];
+                        padded_data[dst_idx + 3] = resized_data[src_idx + 3];
+                    } else if (border) {
+                        padded_data[dst_idx]     = b_r;
+                        padded_data[dst_idx + 1] = b_g;
+                        padded_data[dst_idx + 2] = b_b;
+                        padded_data[dst_idx + 3] = 255;
+                    }
+                    // else: transparent (already zeroed)
+                }
+            }
+
+            auto bc7_payload = compress_bc7(padded_data.data(), tgt.w, tgt.h);
+
+            log::info("[texinject] artwork processed: {}x{} -> {}x{} BC7 ({} bytes)",
+                      width, height, tgt.w, tgt.h, bc7_payload.size());
+
+            variants.push_back({std::move(bc7_payload), tgt.w, tgt.h});
+        }
     } // end if (raw) / else
 
     if (variants.empty()) {

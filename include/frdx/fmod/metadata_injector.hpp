@@ -43,6 +43,13 @@ public:
     // Drops the cached strings so the next call rewrites unconditionally.
     void reset_cache() noexcept;
 
+    // Configure truncation.  When enabled, strings longer than max_len
+    // are cut to max_len before writing to the HUD.
+    void set_truncation(bool enabled, int max_len) noexcept {
+        truncation_enabled_ = enabled;
+        truncation_max_ = max_len;
+    }
+
     // Idempotent: writes only when title/artist differ from the last
     // successful write.
     std::expected<void, MetadataInjectorError> update(std::string_view title,
@@ -52,6 +59,8 @@ private:
     std::byte* body_ = nullptr;
     std::string last_title_;
     std::string last_artist_;
+    bool truncation_enabled_ = true;
+    int truncation_max_ = 30;
 };
 
 } // namespace frdx::fmod_bridge
