@@ -311,6 +311,22 @@ void post_resize(IDXGISwapChain* swapChain) {
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
 
+    // The game can change the swap chain resolution without changing the
+    // window size (e.g. lowering in-game resolution while in fullscreen).
+    // The ImGui Win32 backend sets DisplaySize from WM_SIZE (window size),
+    // which would be stale.  Override it with the actual swap chain
+    // resolution so ImGui's coordinate system matches the render target.
+    auto& io = ImGui::GetIO();
+    if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(desc.BufferDesc.Width) ||
+        static_cast<int>(io.DisplaySize.y) != static_cast<int>(desc.BufferDesc.Height)) {
+        re_log::info("ImGui DisplaySize updated: {}x{} -> {}x{}",
+                     static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y),
+                     desc.BufferDesc.Width, desc.BufferDesc.Height);
+        io.DisplaySize = ImVec2(
+            static_cast<float>(desc.BufferDesc.Width),
+            static_cast<float>(desc.BufferDesc.Height));
+    }
+
     // Recalculate UI scale from the monitor resolution (not the swap
     // chain, which may differ due to dynamic resolution scaling).  Only
     // reload the font if the monitor resolution actually changed (e.g.
@@ -319,9 +335,9 @@ void post_resize(IDXGISwapChain* swapChain) {
     if (mon_scale != g_ui.ui_scale) {
         g_ui.ui_scale = mon_scale;
         re_log::info("monitor resolution changed (ui_scale={:.2f})", g_ui.ui_scale);
-        ImGui::GetIO().Fonts->Clear();
+        io.Fonts->Clear();
         load_overlay_font(g_ui.ui_scale);
-        ImGui::GetIO().Fonts->Build();
+        io.Fonts->Build();
         ImGui_ImplDX12_InvalidateDeviceObjects();
     }
 
@@ -412,6 +428,14 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     g_ui.ui_scale = compute_monitor_ui_scale(desc.OutputWindow);
     re_log::info("swap chain: {}x{}, monitor ui_scale={:.2f}",
                  desc.BufferDesc.Width, desc.BufferDesc.Height, g_ui.ui_scale);
+
+    // Set ImGui DisplaySize to the swap chain resolution, not the window
+    // size.  The Win32 backend uses WM_SIZE (window size) which may differ
+    // from the swap chain resolution when the game uses a non-native
+    // render resolution.
+    ImGui::GetIO().DisplaySize = ImVec2(
+        static_cast<float>(desc.BufferDesc.Width),
+        static_cast<float>(desc.BufferDesc.Height));
 
     original_wnd_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
         desc.OutputWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wnd_proc_hook)));
@@ -620,6 +644,21 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
     }
 
     if (g_ui.is_init) {
+        // Enforce DisplaySize matches the swap chain resolution every frame.
+        // The Win32 backend may reset it from WM_SIZE (window size) which
+        // can differ from the swap chain resolution when the game uses a
+        // non-native render resolution.
+        DXGI_SWAP_CHAIN_DESC sc_desc;
+        if (SUCCEEDED(pSwapChain->GetDesc(&sc_desc))) {
+            auto& io = ImGui::GetIO();
+            if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(sc_desc.BufferDesc.Width) ||
+                static_cast<int>(io.DisplaySize.y) != static_cast<int>(sc_desc.BufferDesc.Height)) {
+                io.DisplaySize = ImVec2(
+                    static_cast<float>(sc_desc.BufferDesc.Width),
+                    static_cast<float>(sc_desc.BufferDesc.Height));
+            }
+        }
+
         // Debug: take a CPU-side screenshot when requested by the Debug
         // tab.  Runs before any overlay work so the capture has the
         // game's frame without our ImGui drawn on top.
