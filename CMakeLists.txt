@@ -132,9 +132,9 @@ if(FRDX_AUTO_DEPLOY)
     add_custom_command(TARGET version POST_BUILD
         COMMAND ${CMAKE_COMMAND}
                 -DFROM="${CMAKE_SOURCE_DIR}/third_party/mpg123/lib/libmpg123-0.dll"
-                -DTO="${FRDX_GAME_DIR}/mods/frdx/libmpg123-0.dll"
+                -DTO="${FRDX_GAME_DIR}/libmpg123-0.dll"
                 -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
-        COMMENT "Deploying libmpg123-0.dll → ${FRDX_GAME_DIR}/mods/frdx"
+        COMMENT "Deploying libmpg123-0.dll → ${FRDX_GAME_DIR}"
     )
 endif()
 
