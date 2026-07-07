@@ -658,15 +658,22 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // Enforce DisplaySize matches the swap chain resolution every frame.
         // The Win32 backend may reset it from WM_SIZE (window size) which
         // can differ from the swap chain resolution when the game uses a
-        // non-native render resolution.  Use cached values from
-        // init_imgui/post_resize to avoid calling GetDesc every frame
-        // (which can stall during loading screens).
-        auto& io = ImGui::GetIO();
-        if (static_cast<int>(io.DisplaySize.x) != g_sc_width ||
-            static_cast<int>(io.DisplaySize.y) != g_sc_height) {
-            io.DisplaySize = ImVec2(
-                static_cast<float>(g_sc_width),
-                static_cast<float>(g_sc_height));
+        // non-native render resolution.  Query the swap chain directly to
+        // detect resolution changes that don't go through ResizeBuffers.
+        DXGI_SWAP_CHAIN_DESC sc_desc;
+        if (SUCCEEDED(pSwapChain->GetDesc(&sc_desc))) {
+            g_sc_width  = sc_desc.BufferDesc.Width;
+            g_sc_height = sc_desc.BufferDesc.Height;
+            auto& io = ImGui::GetIO();
+            if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(g_sc_width) ||
+                static_cast<int>(io.DisplaySize.y) != static_cast<int>(g_sc_height)) {
+                re_log::info("DisplaySize corrected: {}x{} -> {}x{}",
+                             static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y),
+                             g_sc_width, g_sc_height);
+                io.DisplaySize = ImVec2(
+                    static_cast<float>(g_sc_width),
+                    static_cast<float>(g_sc_height));
+            }
         }
 
         // Debug: take a CPU-side screenshot when requested by the Debug
