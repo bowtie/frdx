@@ -37,12 +37,6 @@ std::optional<int> parse_positive_int(std::string_view text) noexcept {
     return value;
 }
 
-bool recent_metadata_ms(int64_t timestamp_ms, int64_t now_ms) noexcept {
-    constexpr int64_t kRecentWindowMs = 12'000;
-    return timestamp_ms > 0 && now_ms >= timestamp_ms &&
-           now_ms - timestamp_ms <= kRecentWindowMs;
-}
-
 // Apply title_fallback: when title resolves empty, try the fallback
 // field (e.g. "results.0.metadata" which contains "Artist - Title").
 void apply_title_fallback(const StationMetadataMapping& mapping,
@@ -148,10 +142,6 @@ MetadataController::~MetadataController() {
     stop_unlocked();
 }
 
-void MetadataController::notify_ffmpeg_icy_metadata(int64_t now_ms) noexcept {
-    last_ffmpeg_icy_ms_.store(now_ms, std::memory_order_release);
-}
-
 void MetadataController::notify_icy_metadata(int64_t now_ms) noexcept {
     last_icy_ms_.store(now_ms, std::memory_order_release);
 }
@@ -174,7 +164,6 @@ void MetadataController::start(const std::string& stream_url,
 
     // Reset ICY timestamps so the first response fills title/artist.
     last_icy_ms_.store(0, std::memory_order_release);
-    last_ffmpeg_icy_ms_.store(0, std::memory_order_release);
 
     // 2. Start ICY poller for non-WS, non-SSE, non-static, non-rest stations.
     //    REST and icecast-json stations have their own JSON poller below.
@@ -442,8 +431,6 @@ void MetadataController::run_ws_poller(std::string url,
             apply_artwork_template(mapping, artwork);
 
             const auto now_ms = steady_ms();
-            const bool ffmpeg_icy_active = recent_metadata_ms(
-                last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
 
             if (!title.empty() || !artist.empty()) {
                 TrackInfo info;
@@ -451,7 +438,7 @@ void MetadataController::run_ws_poller(std::string url,
                 if (!artist.empty()) info.artist = sanitize_brackets(std::move(artist));
                 if (!artwork.empty()) info.artwork_url = std::move(artwork);
 
-                if (!ffmpeg_icy_active && on_metadata_) {
+                if (on_metadata_) {
                     // Capture artist/title before the move — reading from a
                     // moved-from std::string is valid but empty in practice.
                     std::string log_artist = info.artist;
@@ -461,9 +448,6 @@ void MetadataController::run_ws_poller(std::string url,
                         log::info("[shoutcast] ws metadata queued: {} - {}",
                                   log_artist, log_title);
                     }
-                } else if (ffmpeg_icy_active) {
-                    log::info("[shoutcast] ws metadata suppressed by recent ffmpeg ICY: {} - {}",
-                              info.artist, info.title);
                 }
             }
         }
@@ -668,8 +652,6 @@ void MetadataController::process_sse_event(
     apply_artwork_template(mapping, artwork);
 
     const auto now_ms = steady_ms();
-    const bool ffmpeg_icy_active = recent_metadata_ms(
-        last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
 
     if (!title.empty() || !artist.empty()) {
         TrackInfo info;
@@ -677,7 +659,7 @@ void MetadataController::process_sse_event(
         if (!artist.empty()) info.artist = sanitize_brackets(std::move(artist));
         if (!artwork.empty()) info.artwork_url = std::move(artwork);
 
-        if (!ffmpeg_icy_active && on_metadata_) {
+        if (on_metadata_) {
             std::string log_artist = info.artist;
             std::string log_title  = info.title;
             bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
@@ -787,8 +769,6 @@ void MetadataController::run_rest_poller(std::string url,
         apply_artwork_template(mapping, artwork);
 
         const auto now_ms = steady_ms();
-        const bool ffmpeg_icy_active = recent_metadata_ms(
-            last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
 
         if (!title.empty() || !artist.empty()) {
             TrackInfo info;
@@ -796,7 +776,7 @@ void MetadataController::run_rest_poller(std::string url,
             if (!artist.empty()) info.artist = sanitize_brackets(std::move(artist));
             if (!artwork.empty()) info.artwork_url = std::move(artwork);
 
-            if (!ffmpeg_icy_active && on_metadata_) {
+            if (on_metadata_) {
                 std::string log_artist = info.artist;
                 std::string log_title  = info.title;
                 bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
@@ -959,10 +939,8 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
 
             auto dash = val.find(" - ");
             const auto now_ms = steady_ms();
-            const bool ffmpeg_icy_active = recent_metadata_ms(
-                last_ffmpeg_icy_ms_.load(std::memory_order_acquire), now_ms);
 
-            if (!ffmpeg_icy_active && on_metadata_) {
+            if (on_metadata_) {
                 TrackInfo info;
                 if (dash != std::string::npos) {
                     info.artist = val.substr(0, dash);

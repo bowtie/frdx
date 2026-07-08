@@ -194,11 +194,6 @@ inline std::optional<std::string> extract_stream_title(std::string_view meta) {
             value.remove_suffix(1);
         return sanitize_brackets(std::string{value});
     };
-    constexpr std::string_view kFfmpegUpdate = "Metadata update for StreamTitle:";
-    if (auto pos = meta.find(kFfmpegUpdate); pos != std::string_view::npos) {
-        auto value = trim_copy(meta.substr(pos + kFfmpegUpdate.size()));
-        if (!value.empty()) return value;
-    }
     if (auto pos = meta.find("StreamTitle"); pos != std::string_view::npos) {
         auto colon = meta.find(':', pos);
         auto quote = meta.find_first_of("'\"", pos);

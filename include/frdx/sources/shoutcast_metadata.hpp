@@ -30,8 +30,7 @@ namespace frdx::sources {
 //
 // Threading:  on_metadata is called from the ICY/WS background threads.
 // The callee (ShoutcastSource) must acquire its own internal lock when
-// handling the callback.  notify_ffmpeg_icy_metadata() is called from
-// ShoutcastSource::pump() (the DSP mixer thread) and is lock-free.
+// handling the callback.
 class MetadataController {
 public:
     // Called when a background poller has new track metadata ready.
@@ -78,13 +77,7 @@ public:
 
     // ── Cross-thread notifications ───────────────────────────────────
 
-    // Called by ShoutcastSource::pump() when ffmpeg stderr has produced
-    // an ICY StreamTitle.  The WS poller uses this to suppress its own
-    // metadata when ffmpeg's same-connection ICY is actively delivering.
-    void notify_ffmpeg_icy_metadata(int64_t now_ms) noexcept;
-
-    // Called by ShoutcastSource::pump() when the separate direct-ICY
-    // connection has delivered metadata — same suppression logic as above.
+    // Called when the separate direct-ICY connection has delivered metadata.
     void notify_icy_metadata(int64_t now_ms) noexcept;
 
 private:
@@ -133,10 +126,8 @@ private:
     std::jthread metadata_thread_;   // WS/REST poller
     std::jthread icy_poller_thread_; // ICY poller
 
-    // Timestamps of the last ICY metadata delivery — used by both pollers
-    // to skip overwriting when a fresher source is active.
+    // Timestamp of the last direct-ICY metadata delivery.
     std::atomic<int64_t> last_icy_ms_{0};
-    std::atomic<int64_t> last_ffmpeg_icy_ms_{0};
 
     // ICY read buffer — reused across run_icy_poller() invocations.
     std::vector<char> icy_buf_;
