@@ -137,30 +137,11 @@ void ApplyTheme(int idx) {
         default: ApplyBessDark(); break;
     }
     // Scale all pixel-based style values by the current UI scale factor.
-    // Theme functions set values for 1080p; this multiplies them so the
-    // UI looks correct at any resolution.
+    // Theme functions set values for 1080p (1x); ScaleAllSizes handles
+    // every style value including ones we might miss manually.
     const float s = g_ui.ui_scale;
     if (s != 1.0f) {
-        ImGuiStyle& st = ImGui::GetStyle();
-        st.WindowPadding   = ImVec2(st.WindowPadding.x * s, st.WindowPadding.y * s);
-        st.FramePadding    = ImVec2(st.FramePadding.x * s, st.FramePadding.y * s);
-        st.ItemSpacing     = ImVec2(st.ItemSpacing.x * s, st.ItemSpacing.y * s);
-        st.ItemInnerSpacing= ImVec2(st.ItemInnerSpacing.x * s, st.ItemInnerSpacing.y * s);
-        st.IndentSpacing   *= s;
-        st.ScrollbarSize   *= s;
-        st.GrabMinSize     *= s;
-        st.WindowBorderSize*= s;
-        st.ChildBorderSize *= s;
-        st.PopupBorderSize *= s;
-        st.FrameBorderSize *= s;
-        st.TabBorderSize   *= s;
-        st.WindowRounding  *= s;
-        st.ChildRounding   *= s;
-        st.FrameRounding   *= s;
-        st.PopupRounding   *= s;
-        st.ScrollbarRounding*= s;
-        st.GrabRounding    *= s;
-        st.TabRounding     *= s;
+        ImGui::GetStyle().ScaleAllSizes(s);
     }
 }
 
