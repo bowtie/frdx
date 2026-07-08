@@ -35,9 +35,10 @@ void load_overlay_font(float scale) {
 
     // Base font size is 16px at 1080p.  Fusion Pixel is a pixel font, so
     // fractional scaling causes uneven glyph scaling (shimmering).  Snap
-    // to the nearest integer multiple of the base size: 1x (16px), 2x
-    // (32px), 3x (48px).  Minimum 1x so the UI is always legible.
-    const int int_scale  = std::max(1, static_cast<int>(std::round(scale)));
+    // up to the next integer multiple of the base size: 1x (16px), 2x
+    // (32px), 3x (48px).  Using ceil ensures 1440p (1.33x) gets 2x (32px)
+    // rather than 1x (16px) which would be too small.  Minimum 1x.
+    const int int_scale  = std::max(1, static_cast<int>(std::ceil(scale)));
     const float font_size = 16.0f * static_cast<float>(int_scale);
     const float effective_scale = static_cast<float>(int_scale);
     ImFontConfig cfg{};

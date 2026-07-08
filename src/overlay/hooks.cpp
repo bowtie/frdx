@@ -52,88 +52,7 @@ using namespace frdx;
 // Debug flag: set by the Debug tab to request a screenshot capture.
 std::atomic<bool> g_capture_backbuffer_requested{false};
 
-// ── Debug screenshot (GDI, captures at monitor resolution) ─────────────
-// Uses GetDC + BitBlt to capture the game window.  This is a pure CPU-side
-// operation that doesn't touch any GPU resources, so it can't cause device
-// removal or crashes.  The capture is at the monitor's physical resolution,
-// not the swap chain resolution (DSR renders at higher res but the display
-// is still at native res, so GDI captures at native res).
-static void capture_screenshot_to_png() {
-    HWND hwnd = GetForegroundWindow();
-    if (!hwnd) {
-        re_log::warn("[capture] no foreground window");
-        return;
-    }
-
-    RECT rc{};
-    if (!GetClientRect(hwnd, &rc) || rc.right == 0 || rc.bottom == 0) {
-        re_log::warn("[capture] failed to get window rect");
-        return;
-    }
-    const int width  = rc.right;
-    const int height = rc.bottom;
-
-    HDC hdc_screen = GetDC(hwnd);
-    if (!hdc_screen) {
-        re_log::warn("[capture] GetDC failed");
-        return;
-    }
-
-    HDC hdc_mem = CreateCompatibleDC(hdc_screen);
-    if (!hdc_mem) {
-        ReleaseDC(hwnd, hdc_screen);
-        re_log::warn("[capture] CreateCompatibleDC failed");
-        return;
-    }
-
-    HBITMAP hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
-    if (!hbitmap) {
-        DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
-        re_log::warn("[capture] CreateCompatibleBitmap failed");
-        return;
-    }
-
-    HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(hdc_mem, hbitmap));
-
-    if (!BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY)) {
-        re_log::warn("[capture] BitBlt failed");
-        SelectObject(hdc_mem, old_bmp);
-        DeleteObject(hbitmap);
-        DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
-        return;
-    }
-
-    BITMAPINFOHEADER bi{};
-    bi.biSize        = sizeof(BITMAPINFOHEADER);
-    bi.biWidth       = width;
-    bi.biHeight      = -height;  // top-down
-    bi.biPlanes      = 1;
-    bi.biBitCount    = 32;
-    bi.biCompression = BI_RGB;
-
-    std::vector<uint8_t> pixels(width * height * 4);
-    if (GetDIBits(hdc_mem, hbitmap, 0, height, pixels.data(),
-                  reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS) <= 0) {
-        re_log::warn("[capture] GetDIBits failed");
-        SelectObject(hdc_mem, old_bmp);
-        DeleteObject(hbitmap);
-        DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
-        return;
-    }
-
-    SelectObject(hdc_mem, old_bmp);
-    DeleteObject(hbitmap);
-    DeleteDC(hdc_mem);
-    ReleaseDC(hwnd, hdc_screen);
-
-    // GetDIBits returns BGRA; convert to RGBA for stb_image_write
-    for (size_t i = 0; i < pixels.size(); i += 4) {
-        std::swap(pixels[i], pixels[i + 2]);
-    }
-
+static std::filesystem::path make_capture_path() {
     wchar_t temp_path[MAX_PATH]{};
     GetTempPathW(MAX_PATH, temp_path);
     auto now = std::chrono::system_clock::now();
@@ -148,14 +67,151 @@ static void capture_screenshot_to_png() {
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                   tm.tm_hour, tm.tm_min, tm.tm_sec,
                   static_cast<int>(ms.count()));
-    std::filesystem::path out_path =
-        std::filesystem::path(temp_path) / filename;
+    return std::filesystem::path(temp_path) / filename;
+}
 
-    stbi_write_png(out_path.string().c_str(), width, height, 4,
-                   pixels.data(), width * 4);
+struct PendingBackbufferCapture {
+    wil::com_ptr<ID3D12Resource> readback;
+    UINT width = 0;
+    UINT height = 0;
+    UINT64 row_pitch = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    std::filesystem::path out_path;
+};
+
+static bool is_bgra_capture_format(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// ── Debug screenshot (GPU readback, captures at swapchain resolution) ───
+// Captures the rendered backbuffer after ImGui has drawn, before Present.
+// This preserves DSR/custom render resolutions (e.g. 3840x2160 on a 1080p
+// monitor) instead of flattening the image through the desktop compositor.
+static bool record_backbuffer_capture(ID3D12GraphicsCommandList* cmd,
+                                      ID3D12Resource* backbuffer,
+                                      PendingBackbufferCapture& out) {
+    if (!cmd || !backbuffer || !g_dx.device) return false;
+
+    const D3D12_RESOURCE_DESC desc = backbuffer->GetDesc();
+    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        desc.SampleDesc.Count != 1 ||
+        desc.Width == 0 || desc.Height == 0) {
+        re_log::warn("[capture] unsupported backbuffer for capture");
+        return false;
+    }
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT num_rows = 0;
+    UINT64 row_size = 0;
+    UINT64 total_bytes = 0;
+    g_dx.device->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, &num_rows,
+                                       &row_size, &total_bytes);
+    if (total_bytes == 0 || footprint.Footprint.RowPitch == 0) {
+        re_log::warn("[capture] failed to calculate readback footprint");
+        return false;
+    }
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+
+    D3D12_RESOURCE_DESC rb_desc{};
+    rb_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rb_desc.Width = total_bytes;
+    rb_desc.Height = 1;
+    rb_desc.DepthOrArraySize = 1;
+    rb_desc.MipLevels = 1;
+    rb_desc.SampleDesc.Count = 1;
+    rb_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    wil::com_ptr<ID3D12Resource> readback;
+    if (FAILED(g_dx.device->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_NONE, &rb_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(readback.put())))) {
+        re_log::warn("[capture] failed to create readback buffer");
+        return false;
+    }
+
+    auto to_copy = transition_barrier(backbuffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                      D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmd->ResourceBarrier(1, &to_copy);
+
+    D3D12_TEXTURE_COPY_LOCATION dst{};
+    dst.pResource = readback.get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = footprint;
+
+    D3D12_TEXTURE_COPY_LOCATION src{};
+    src.pResource = backbuffer;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+
+    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    auto to_render_target = transition_barrier(backbuffer, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmd->ResourceBarrier(1, &to_render_target);
+
+    out.readback = std::move(readback);
+    out.width = static_cast<UINT>(desc.Width);
+    out.height = desc.Height;
+    out.row_pitch = footprint.Footprint.RowPitch;
+    out.format = desc.Format;
+    out.out_path = make_capture_path();
+    return true;
+}
+
+static void finish_backbuffer_capture(PendingBackbufferCapture& capture, UINT64 fence_value) {
+    if (!capture.readback) return;
+
+    if (!wait_for_fence(fence_value)) {
+        re_log::warn("[capture] timed out waiting for backbuffer readback");
+        return;
+    }
+
+    uint8_t* mapped = nullptr;
+    D3D12_RANGE read_range{0, static_cast<SIZE_T>(capture.row_pitch) * capture.height};
+    if (FAILED(capture.readback->Map(0, &read_range, reinterpret_cast<void**>(&mapped))) ||
+        !mapped) {
+        re_log::warn("[capture] failed to map readback buffer");
+        return;
+    }
+
+    std::vector<uint8_t> pixels(static_cast<size_t>(capture.width) * capture.height * 4);
+    const bool bgra = is_bgra_capture_format(capture.format);
+    for (UINT y = 0; y < capture.height; ++y) {
+        const uint8_t* src = mapped + static_cast<size_t>(y) * capture.row_pitch;
+        uint8_t* dst = pixels.data() + static_cast<size_t>(y) * capture.width * 4;
+        for (UINT x = 0; x < capture.width; ++x) {
+            const uint8_t* px = src + static_cast<size_t>(x) * 4;
+            if (bgra) {
+                dst[x * 4 + 0] = px[2];
+                dst[x * 4 + 1] = px[1];
+                dst[x * 4 + 2] = px[0];
+                dst[x * 4 + 3] = px[3];
+            } else {
+                dst[x * 4 + 0] = px[0];
+                dst[x * 4 + 1] = px[1];
+                dst[x * 4 + 2] = px[2];
+                dst[x * 4 + 3] = px[3];
+            }
+        }
+    }
+    D3D12_RANGE written_range{0, 0};
+    capture.readback->Unmap(0, &written_range);
+
+    stbi_write_png(capture.out_path.string().c_str(), static_cast<int>(capture.width),
+                   static_cast<int>(capture.height), 4, pixels.data(),
+                   static_cast<int>(capture.width * 4));
 
     re_log::info("[capture] saved screenshot {}x{} to {}",
-                 width, height, out_path.string());
+                 capture.width, capture.height, capture.out_path.string());
 }
 
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -361,7 +417,7 @@ void post_resize(IDXGISwapChain* swapChain) {
     }
 
     // Recalculate UI scale from the swap chain (render) resolution.
-    // With integer snapping, 720p/1080p/1440p → 1x, 4K → 2x.
+    // With integer snapping, 720p/1080p/1440p -> 1x, 4K -> 2x.
     // Reload the font only if the scale actually changed.
     const auto new_scale = compute_ui_scale(desc.BufferDesc.Height);
     if (new_scale != g_ui.ui_scale) {
@@ -454,8 +510,8 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     }
 
     // Calculate UI scale from the swap chain (render) resolution.
-    // With integer snapping in load_overlay_font: 720p/1080p/1440p → 1x,
-    // 4K → 2x.
+    // With integer snapping in load_overlay_font: 720p/1080p/1440p -> 1x,
+    // 4K -> 2x.
     g_ui.ui_scale = compute_ui_scale(desc.BufferDesc.Height);
     g_sc_width  = desc.BufferDesc.Width;
     g_sc_height = desc.BufferDesc.Height;
@@ -809,6 +865,14 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
 
+        PendingBackbufferCapture capture{};
+        const bool capture_requested = g_capture_backbuffer_requested.exchange(
+            false, std::memory_order_acq_rel);
+        const bool capture_recorded =
+            capture_requested &&
+            record_backbuffer_capture(g_dx.cmd_list.get(), g_dx.fb_bufs[backBufferIdx].get(),
+                                      capture);
+
         // Transition backbuffer back to COMMON — the safe decay state.
         // Present works from COMMON (the runtime handles the final
         // transition), and this avoids assuming we know the exact state
@@ -828,6 +892,9 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         const UINT64 fence_value = ++g_dx.fence_value;
         if (SUCCEEDED(active_queue->Signal(g_dx.fence.get(), fence_value))) {
             g_dx.allocator_fence_values[alloc_idx] = fence_value;
+            if (capture_recorded) {
+                finish_backbuffer_capture(capture, fence_value);
+            }
         } else {
             re_log::warn("failed to signal ImGui GPU fence");
         }
@@ -864,15 +931,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     }
 
     render_overlay_frame(pSwapChain, active_queue);
-
-    // Debug screenshot: capture the window after Present so the overlay
-    // is visible in the screenshot.  Uses GDI (CPU-side, no GPU touch).
-    HRESULT hr = original_Present(pSwapChain, SyncInterval, Flags);
-    if (g_capture_backbuffer_requested.exchange(false,
-            std::memory_order_acq_rel)) {
-        capture_screenshot_to_png();
-    }
-    return hr;
+    return original_Present(pSwapChain, SyncInterval, Flags);
 }
 
 HRESULT __stdcall hook_ResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width,
