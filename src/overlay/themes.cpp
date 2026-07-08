@@ -63,21 +63,22 @@ void ApplyBessDark() {
 void ApplyBessDarkSpaced() {
     ApplyBessDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    // Slightly more generous padding/rounding than BessDark for a
-    // breathable, modern feel without going overboard.
-    style.WindowRounding    = 7.0f;
-    style.FrameRounding     = 7.0f;
-    style.GrabRounding      = 7.0f;
-    style.TabRounding       = 7.0f;
-    style.PopupRounding     = 7.0f;
-    style.ScrollbarRounding = 7.0f;
-    style.WindowPadding     = ImVec2(14.0f, 14.0f);
-    style.FramePadding      = ImVec2(9.0f, 6.0f);
-    style.ItemSpacing       = ImVec2(12.0f, 9.0f);
+    // A slightly more relaxed variant of BessDark for the compact media
+    // overlay.  Values are tuned for the actual widget sizes: 27x24
+    // transport buttons, 130px station combo, tabbed settings panel.
+    style.WindowRounding    = 6.0f;
+    style.FrameRounding     = 6.0f;
+    style.GrabRounding      = 6.0f;
+    style.TabRounding       = 6.0f;
+    style.PopupRounding     = 6.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.WindowPadding     = ImVec2(12.0f, 12.0f);
+    style.FramePadding      = ImVec2(7.0f, 5.0f);
+    style.ItemSpacing       = ImVec2(10.0f, 7.0f);
     style.ItemInnerSpacing  = ImVec2(8.0f, 6.0f);
-    style.IndentSpacing     = 24.0f;
-    style.ScrollbarSize     = 18.0f;
-    style.GrabMinSize       = 12.0f;
+    style.IndentSpacing     = 20.0f;
+    style.ScrollbarSize     = 16.0f;
+    style.GrabMinSize       = 11.0f;
 }
 
 void ApplyTokyoNight() {
