@@ -903,23 +903,13 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
-        // Apply a pending font scale reload from the Debug tab (requested
-        // mid-frame last frame).  Must happen before ImGui_ImplDX12_NewFrame
-        // so the DX12 backend rebuilds its font pipeline with the new atlas.
+        // Apply a pending font scale change from the Debug tab or a
+        // resolution change.  With FontGlobalScale, this is instant —
+        // no atlas rebuild or InvalidateDeviceObjects needed.
         if (g_ui.pending_ui_scale >= 0.0f) {
-            g_ui.ui_scale = g_ui.pending_ui_scale;
+            const float scale = g_ui.pending_ui_scale;
             g_ui.pending_ui_scale = -1.0f;
-            auto& io = ImGui::GetIO();
-            io.Fonts->Clear();
-            load_overlay_font(g_ui.ui_scale);
-            io.Fonts->Build();
-            // Re-apply the theme so ImGui style values (FramePadding,
-            // ItemSpacing, ScrollbarSize, etc.) are re-scaled to match
-            // the new ui_scale.  Without this, only the font and window
-            // sizes change but widget spacing/padding stays at 1x.
-            ApplyTheme(g_ui.theme_idx);
-            ImGui_ImplDX12_InvalidateDeviceObjects();
-            re_log::info("[overlay] applied pending font scale: {:.2f}", g_ui.ui_scale);
+            set_font_scale(scale);
         }
 
         // Render custom dashboard panel UI

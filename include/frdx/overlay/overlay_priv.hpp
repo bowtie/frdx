@@ -396,6 +396,7 @@ void stop_action_worker();
 void enqueue_station_switch(std::string station_id, std::string stream_id);
 bool wait_for_fence(UINT64 fence_value);
 void load_overlay_font(float scale = 1.0f);
+void set_font_scale(float scale);
 float compute_ui_scale_for_current_monitor();
 void load_background_texture(ID3D12CommandQueue* queue);
 

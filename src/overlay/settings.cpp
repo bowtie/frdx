@@ -384,8 +384,9 @@ void draw_debug_tab() {
         float scale = override_val > 0
                           ? static_cast<float>(override_val)
                           : compute_ui_scale_for_current_monitor();
-        // Defer to next frame — reloading mid-frame crashes ImGui.
-        g_ui.pending_ui_scale = scale;
+        // FontGlobalScale makes this instant and safe mid-frame —
+        // no atlas rebuild needed.
+        set_font_scale(scale);
     };
     if (ImGui::RadioButton("Auto", g_ui.ui_scale_override == 0)) {
         apply_scale(0);

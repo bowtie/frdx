@@ -33,28 +33,48 @@ void load_overlay_font(float scale) {
         return;
     }
 
-    // Base font size is 16px at 1080p.  Fusion Pixel is a pixel font, so
-    // fractional scaling causes uneven glyph scaling (shimmering).  Snap
-    // up to the next integer multiple of the base size: 1x (16px), 2x
-    // (32px), 3x (48px).  Using ceil ensures 1440p (1.33x) gets 2x (32px)
-    // rather than 1x (16px) which would be too small.  Minimum 1x.
+    // Always load the font at 32px (the 2x size).  Switching between 1x
+    // and 2x is done via io.FontGlobalScale (0.5 for 1x, 1.0 for 2x)
+    // rather than reloading the font atlas.  This avoids the expensive
+    // and crash-prone atlas rebuild + InvalidateDeviceObjects cycle.
+    //
+    // At 1x, FontGlobalScale=0.5 scales the 32px atlas down to 16px
+    // equivalent — a clean 2:1 downsample that stays crisp for the
+    // pixel font.  At 2x, FontGlobalScale=1.0 uses the full 32px atlas.
+    //
+    // Snap the scale to an integer multiple (ceil) so 1440p gets 2x.
     const int int_scale  = std::max(1, static_cast<int>(std::ceil(scale)));
-    const float font_size = 16.0f * static_cast<float>(int_scale);
     const float effective_scale = static_cast<float>(int_scale);
+    const float font_size = 16.0f * 2.0f;  // always 32px atlas
+    const float font_global_scale = effective_scale / 2.0f;  // 1x -> 0.5, 2x -> 1.0
+
     ImFontConfig cfg{};
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH  = true;
     auto* font      = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), font_size, &cfg);
     if (font) {
-        io.FontDefault = font;
-        g_ui.ui_scale = effective_scale;
-        log::info("[overlay] loaded Fusion Pixel font at {:.0f}px (int_scale={}x) from {}",
-                  font_size, int_scale, font_path.string());
+        io.FontDefault       = font;
+        io.FontGlobalScale   = font_global_scale;
+        g_ui.ui_scale        = effective_scale;
+        log::info("[overlay] loaded Fusion Pixel font at {:.0f}px (FontGlobalScale={:.2f}, int_scale={}x) from {}",
+                  font_size, font_global_scale, int_scale, font_path.string());
     } else {
         log::warn("[overlay] failed to load {}; using ImGui default font", font_path.string());
         io.Fonts->AddFontDefault();
     }
+}
+
+// Switch the font scale without reloading the font atlas.  Just sets
+// FontGlobalScale and re-applies the theme.  Safe to call mid-frame.
+void set_font_scale(float scale) {
+    const int int_scale = std::max(1, static_cast<int>(std::ceil(scale)));
+    const float effective_scale = static_cast<float>(int_scale);
+    g_ui.ui_scale = effective_scale;
+    ImGui::GetIO().FontGlobalScale = effective_scale / 2.0f;
+    ApplyTheme(g_ui.theme_idx);
+    log::info("[overlay] set font scale to {}x (FontGlobalScale={:.2f})",
+              int_scale, effective_scale / 2.0f);
 }
 
 void load_background_texture(ID3D12CommandQueue* queue) {

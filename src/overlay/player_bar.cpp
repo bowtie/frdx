@@ -301,7 +301,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         } else {
             gsz = ImGui::CalcTextSize(glyph);
         }
-        float gx = min.x + (btn_w - gsz.x) * 0.5f + 0.5f;
+        float gx = min.x + (btn_w - gsz.x) * 0.5f + 0.5f * ui_s;
         float gy = min.y + (btn_h - gsz.y) * 0.5f;
         dl->AddText(ImVec2(gx, gy), col_text, glyph);
         return pressed;
