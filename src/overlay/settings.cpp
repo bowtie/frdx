@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <imgui.h>
+#include <imgui_impl_dx12.h>
 #include <imfilebrowser.h>
 
 namespace frdx::overlay {
@@ -362,7 +363,7 @@ void draw_debug_tab() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextWrapped("Capture the game's rendered frame (before overlay) to a PNG in %%TEMP%%.");
+    ImGui::TextWrapped("Capture the game's rendered frame (with overlay) to a PNG in %%TEMP%%.");
     if (ImGui::Button("Capture Frame")) {
         g_capture_backbuffer_requested.store(true, std::memory_order_release);
     }
@@ -370,6 +371,40 @@ void draw_debug_tab() {
         ImGui::SetTooltip("Saves the next frame's backbuffer to\n"
                           "%%TEMP%%\\frdx_capture_<timestamp>.png\n"
                           "Check the log for the exact path.");
+    }
+
+    // ── UI scale override ──
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextWrapped("Font scale override (applies on next font reload):");
+    ImGui::Spacing();
+    if (ImGui::RadioButton("Auto", g_ui.ui_scale_override == 0)) {
+        g_ui.ui_scale_override = 0;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("1x", g_ui.ui_scale_override == 1)) {
+        g_ui.ui_scale_override = 1;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("2x", g_ui.ui_scale_override == 2)) {
+        g_ui.ui_scale_override = 2;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Forces the font scale regardless of monitor resolution.\n"
+                          "Auto uses the monitor-based scale (ceil-snapped).");
+    }
+    ImGui::Spacing();
+    if (ImGui::Button("Apply Scale")) {
+        float scale = g_ui.ui_scale_override > 0
+                          ? static_cast<float>(g_ui.ui_scale_override)
+                          : compute_ui_scale_for_current_monitor();
+        g_ui.ui_scale = scale;
+        auto& io = ImGui::GetIO();
+        io.Fonts->Clear();
+        load_overlay_font(scale);
+        io.Fonts->Build();
+        ImGui_ImplDX12_InvalidateDeviceObjects();
     }
 }
 

@@ -184,6 +184,8 @@ struct UiState {
     // multiplied by ui_scale at use sites.  Calculated from the monitor
     // resolution (not the swap chain, which may use DRS).
     float ui_scale = 1.0f;
+    // Debug override: 0 = auto (monitor-based), 1 = force 1x, 2 = force 2x.
+    int ui_scale_override = 0;
     std::chrono::steady_clock::time_point cursor_hidden_candidate_since{}, cursor_hidden_since{};
     float interactive_alpha = 1.0f, interactive_draw_alpha = 1.0f;
     bool cursor_child_close_elapsed = false, cursor_hide_delay_elapsed = false;
@@ -391,6 +393,7 @@ void stop_action_worker();
 void enqueue_station_switch(std::string station_id, std::string stream_id);
 bool wait_for_fence(UINT64 fence_value);
 void load_overlay_font(float scale = 1.0f);
+float compute_ui_scale_for_current_monitor();
 void load_background_texture(ID3D12CommandQueue* queue);
 
 // ── Dual-Kawase backdrop blur (KWin-style) ──
