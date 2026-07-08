@@ -136,8 +136,9 @@ void TextureInjector::prewarm_logo_cache(const std::vector<std::string>& logo_ur
 // FNV-1a hash of the URL + file content hash + dimensions.
 // For local files (station logos), the file content hash ensures that
 // when a bundled logo is updated (mod update), the cache is invalidated
-// and the logo is reprocessed.  For remote URLs (album art), file_hash
-// is 0 and only the URL hash is used.
+// and the logo is reprocessed.  For remote URLs (album art), the URL
+// hash avoids cross-host basename collisions.  Target dimensions are
+// always included so different BC7 sizes don't collide.
 // Each file is a simple binary blob:
 // [4-byte width][4-byte height][4-byte payload_size][payload].
 
@@ -168,9 +169,9 @@ static std::filesystem::path make_cache_file_path(
     const std::string& url, uint64_t file_hash,
     int target_w, int target_h, bool raw)
 {
-    // Human-readable name from the URL basename, with short hash suffix
-    // for cache invalidation on mod updates.
-    // e.g. boxradio_jpop_radio_a1b2c3d4_196x104_cover.bc7
+    // Human-readable name from the URL basename, with hash suffix for cache
+    // invalidation (local files) or collision avoidance (remote URLs).
+    // e.g. boxradio_jpop_a1b2c3d4_196x104.bc7
     auto slug = std::filesystem::path(url).filename().string();
     if (auto dot = slug.rfind('.'); dot != std::string::npos)
         slug = slug.substr(0, dot);
@@ -181,16 +182,27 @@ static std::filesystem::path make_cache_file_path(
     if (slug.empty()) slug = "artwork";
     if (slug.size() > 48) slug = slug.substr(0, 48);
 
+    // Use the content hash (local files, for mod-update invalidation) or
+    // the URL hash (remote URLs, to avoid cross-host basename collisions)
+    // — whichever is non-zero.
+    const uint64_t hash = (file_hash != 0) ? file_hash : url_hash_fnv1a(url);
+
     std::string name = slug;
-    if (file_hash != 0) {
-        // Use first 8 hex chars of the hash — enough for collision resistance
-        // across the ~30 bundled logos.
+    {
+        // Use first 8 hex chars of the upper 32 bits — enough for collision
+        // resistance across the ~30 bundled logos and remote album art.
         char hex[9];
         std::snprintf(hex, sizeof(hex), "%08X",
-                      static_cast<uint32_t>(file_hash >> 32));
+                      static_cast<uint32_t>(hash >> 32));
         name += "_";
         name += hex;
     }
+    // Include target dimensions so different BC7 sizes don't collide
+    // (e.g. 196x104 vs 196x196 for the same URL).
+    name += "_";
+    name += std::to_string(target_w);
+    name += "x";
+    name += std::to_string(target_h);
     if (raw) name += "_raw";  // cover is the default — no suffix needed
     name += ".bc7";
     return cache_dir / name;
@@ -221,7 +233,10 @@ bool TextureInjector::try_load_cache(const std::string& url, uint64_t file_hash,
     f.read(reinterpret_cast<char*>(&payload_size), 4);
 
     if (w == 0 || ht == 0 || payload_size == 0) return false;
-    if (static_cast<std::streamsize>(12 + payload_size) > size) return false;
+    // Cast operands to std::streamsize individually before adding —
+    // (12 + payload_size) in uint32_t can wrap near 0xFFFFFFFF, bypassing
+    // this check and causing a huge allocation below.
+    if (static_cast<std::streamsize>(12) + static_cast<std::streamsize>(payload_size) > size) return false;
 
     std::vector<uint8_t> payload(payload_size);
     f.read(reinterpret_cast<char*>(payload.data()), payload_size);

@@ -99,34 +99,39 @@ inline std::string resolve_mapped_value(const json& root, const std::string& pat
 // ── Text helpers ────────────────────────────────────────────────────
 
 inline std::string sanitize_brackets(std::string s) {
-    auto*       dst = s.data();
+    // Build the output into a new string rather than mutating in place.
+    // The old in-place approach could overflow when Roman-numeral expansion
+    // (e.g. Ⅲ→III, 3 bytes in, 4+ bytes out) pushed dst past
+    // s.size()/capacity.  Also fixes the CJK bracket lookup which used b2
+    // instead of b3, missing 《》 and 「」.
+    std::string out;
+    out.reserve(s.size());
     const auto* src = s.data();
     const auto* end = src + s.size();
-    static thread_local char cjk_replace[256] = {};
-    if (cjk_replace[0x8C] == 0) {
-        cjk_replace[0x8C] = '['; cjk_replace[0x8D] = ']';
-        cjk_replace[0x8A] = '['; cjk_replace[0x8B] = ']';
-        cjk_replace[0x90] = '['; cjk_replace[0x91] = ']';
-    }
     while (src < end) {
         const auto c = static_cast<unsigned char>(*src);
+        // CJK brackets in the U+3000 block (0xE3 0x80 0x8x/0x9x).
+        // The 3rd byte (b3) identifies the specific bracket.
+        //   《 》 = U+300A/U+300B = 0xE3 0x80 0x8A/0x8B
+        //   「 」 = U+300C/U+300D = 0xE3 0x80 0x8C/0x8D
+        //   【 】 = U+3010/U+3011 = 0xE3 0x80 0x90/0x91
+        //   〔 〕 = U+3014/U+3015 = 0xE3 0x80 0x94/0x95
+        //   〖 〗 = U+3016/U+3017 = 0xE3 0x80 0x96/0x97
         if (c == 0xE3 && src + 3 <= end) {
             const auto b2 = static_cast<unsigned char>(*(src + 1));
             const auto b3 = static_cast<unsigned char>(*(src + 2));
-            // CJK brackets in U+3000 block: 0xE3 0x80 0x8x/0x9x
-            // 【 】 = U+3010/U+3011 = 0xE3 0x80 0x90/0x91
-            // 〖 〗 = U+3016/U+3017 = 0xE3 0x80 0x96/0x97
-            // 〔 〕 = U+3014/U+3015 = 0xE3 0x80 0x94/0x95
             if (b2 == 0x80) {
-                if (b3 == 0x90) { *dst++ = '['; src += 3; continue; }
-                if (b3 == 0x91) { *dst++ = ']'; src += 3; continue; }
-                if (b3 == 0x94) { *dst++ = '['; src += 3; continue; }
-                if (b3 == 0x95) { *dst++ = ']'; src += 3; continue; }
-                if (b3 == 0x96) { *dst++ = '['; src += 3; continue; }
-                if (b3 == 0x97) { *dst++ = ']'; src += 3; continue; }
+                if (b3 == 0x8A) { out.push_back('['); src += 3; continue; }
+                if (b3 == 0x8B) { out.push_back(']'); src += 3; continue; }
+                if (b3 == 0x8C) { out.push_back('['); src += 3; continue; }
+                if (b3 == 0x8D) { out.push_back(']'); src += 3; continue; }
+                if (b3 == 0x90) { out.push_back('['); src += 3; continue; }
+                if (b3 == 0x91) { out.push_back(']'); src += 3; continue; }
+                if (b3 == 0x94) { out.push_back('['); src += 3; continue; }
+                if (b3 == 0x95) { out.push_back(']'); src += 3; continue; }
+                if (b3 == 0x96) { out.push_back('['); src += 3; continue; }
+                if (b3 == 0x97) { out.push_back(']'); src += 3; continue; }
             }
-            const char r  = cjk_replace[b2];
-            if (r != 0) { *dst++ = r; src += 3; continue; }
         }
         // Fullwidth → ASCII: U+FF01–U+FF5E maps to U+0021–U+007E.
         // UTF-8: 0xEF 0xBC 0x81 … 0xEF 0xBD 0x9E
@@ -136,12 +141,12 @@ inline std::string sanitize_brackets(std::string s) {
             const auto b2 = static_cast<unsigned char>(*(src + 1));
             const auto b3 = static_cast<unsigned char>(*(src + 2));
             if (b2 == 0xBC && b3 >= 0x81 && b3 <= 0xBF) {
-                *dst++ = static_cast<char>(b3 - 0x81 + 0x21);
+                out.push_back(static_cast<char>(b3 - 0x81 + 0x21));
                 src += 3;
                 continue;
             }
             if (b2 == 0xBD && b3 >= 0x80 && b3 <= 0x9E) {
-                *dst++ = static_cast<char>(b3 - 0x80 + 0x60);
+                out.push_back(static_cast<char>(b3 - 0x80 + 0x60));
                 src += 3;
                 continue;
             }
@@ -159,7 +164,7 @@ inline std::string sanitize_brackets(std::string s) {
                     "IX", "X", "XI", "XII", "L", "C", "D", "M"
                 };
                 const char* r = roman[b3 - 0xA0];
-                while (*r) { *dst++ = *r++; }
+                while (*r) out.push_back(*r++);
                 src += 3;
                 continue;
             }
@@ -168,14 +173,13 @@ inline std::string sanitize_brackets(std::string s) {
             // Double prime U+2033 (″) → ASCII double quote "
             // UTF-8: 0xE2 0x80 0xB3
             if (b2 == 0x80) {
-                if (b3 == 0xB2) { *dst++ = '\''; src += 3; continue; }
-                if (b3 == 0xB3) { *dst++ = '"';  src += 3; continue; }
+                if (b3 == 0xB2) { out.push_back('\''); src += 3; continue; }
+                if (b3 == 0xB3) { out.push_back('"');  src += 3; continue; }
             }
         }
-        *dst++ = *src++;
+        out.push_back(*src++);
     }
-    s.resize(static_cast<std::size_t>(dst - s.data()));
-    return s;
+    return out;
 }
 
 inline std::optional<std::string> extract_stream_title(std::string_view meta) {
