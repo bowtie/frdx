@@ -484,17 +484,15 @@ void post_resize(IDXGISwapChain* swapChain) {
     }
 
     // Recalculate UI scale from the swap chain resolution.  With ceil
-    // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Reload the font when the
-    // scale changes (e.g. switching to DSR 4K).
-    const auto new_scale = compute_ui_scale(desc.BufferDesc.Height);
-    if (new_scale != g_ui.ui_scale) {
-        g_ui.ui_scale = new_scale;
-        re_log::info("ui_scale changed to {:.2f} (swap chain {}x{})",
-                     g_ui.ui_scale, desc.BufferDesc.Width, desc.BufferDesc.Height);
-        io.Fonts->Clear();
-        load_overlay_font(g_ui.ui_scale);
-        io.Fonts->Build();
-        ImGui_ImplDX12_InvalidateDeviceObjects();
+    // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Defer the font reload to
+    // the next render frame (unless the user has a manual override).
+    if (g_ui.ui_scale_override == 0) {
+        const auto new_scale = compute_ui_scale(desc.BufferDesc.Height);
+        if (new_scale != g_ui.ui_scale) {
+            g_ui.pending_ui_scale = new_scale;
+            re_log::info("ui_scale pending: {:.2f} (swap chain {}x{})",
+                         new_scale, desc.BufferDesc.Width, desc.BufferDesc.Height);
+        }
     }
 
     SIZE_T rtvDescriptorSize =
@@ -811,7 +809,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
     if (g_ui.is_init) {
         // Query swap chain resolution to detect in-game resolution changes
         // that don't go through ResizeBuffers.  When the swap chain height
-        // changes, recalculate ui_scale and reload the font if needed.
+        // changes, recalculate ui_scale and defer the font reload to next
+        // frame (reloading mid-frame crashes ImGui).
         DXGI_SWAP_CHAIN_DESC sc_desc;
         if (SUCCEEDED(pSwapChain->GetDesc(&sc_desc))) {
             if (g_sc_width != sc_desc.BufferDesc.Width ||
@@ -819,15 +818,12 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
                 g_sc_width  = sc_desc.BufferDesc.Width;
                 g_sc_height = sc_desc.BufferDesc.Height;
                 re_log::info("swap chain resolution changed to {}x{}", g_sc_width, g_sc_height);
-                const auto new_scale = compute_ui_scale(g_sc_height);
-                if (new_scale != g_ui.ui_scale) {
-                    g_ui.ui_scale = new_scale;
-                    re_log::info("ui_scale changed to {:.2f}", g_ui.ui_scale);
-                    auto& io = ImGui::GetIO();
-                    io.Fonts->Clear();
-                    load_overlay_font(g_ui.ui_scale);
-                    io.Fonts->Build();
-                    ImGui_ImplDX12_InvalidateDeviceObjects();
+                // Don't override if the user set a manual scale override.
+                if (g_ui.ui_scale_override == 0) {
+                    const auto new_scale = compute_ui_scale(g_sc_height);
+                    if (new_scale != g_ui.ui_scale) {
+                        g_ui.pending_ui_scale = new_scale;
+                    }
                 }
             }
         }

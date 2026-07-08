@@ -377,32 +377,30 @@ void draw_debug_tab() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextWrapped("Font scale override (applies on next font reload):");
+    ImGui::TextWrapped("Font scale:");
     ImGui::Spacing();
+    auto apply_scale = [](int override_val) {
+        g_ui.ui_scale_override = override_val;
+        float scale = override_val > 0
+                          ? static_cast<float>(override_val)
+                          : compute_ui_scale_for_current_monitor();
+        // Defer to next frame — reloading mid-frame crashes ImGui.
+        g_ui.pending_ui_scale = scale;
+    };
     if (ImGui::RadioButton("Auto", g_ui.ui_scale_override == 0)) {
-        g_ui.ui_scale_override = 0;
+        apply_scale(0);
     }
     ImGui::SameLine();
     if (ImGui::RadioButton("1x", g_ui.ui_scale_override == 1)) {
-        g_ui.ui_scale_override = 1;
+        apply_scale(1);
     }
     ImGui::SameLine();
     if (ImGui::RadioButton("2x", g_ui.ui_scale_override == 2)) {
-        g_ui.ui_scale_override = 2;
+        apply_scale(2);
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Forces the font scale regardless of monitor resolution.\n"
-                          "Auto uses the monitor-based scale (ceil-snapped).");
-    }
-    ImGui::Spacing();
-    if (ImGui::Button("Apply Scale")) {
-        float scale = g_ui.ui_scale_override > 0
-                          ? static_cast<float>(g_ui.ui_scale_override)
-                          : compute_ui_scale_for_current_monitor();
-        // Don't reload the font mid-frame — ImGui is actively using it.
-        // Store the requested scale and let the render loop apply it
-        // next frame (before ImGui::NewFrame).
-        g_ui.pending_ui_scale = scale;
+        ImGui::SetTooltip("Auto: follows swap chain resolution (ceil-snapped).\n"
+                          "1x/2x: forces the scale regardless of resolution.");
     }
 }
 
