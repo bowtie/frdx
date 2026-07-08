@@ -213,7 +213,15 @@ public:
 private:
     struct Stream;
 
-    void start_stream_locked() FRDX_REQUIRES(mu_);
+    // Phase 1 of stream startup: stop old stream, reset metadata sync, set
+    // placeholder display.  Returns the URL to launch (empty = nothing to
+    // play).  MUST be called with mu_ held; launch_stream() runs OUTSIDE mu_.
+    std::string start_stream_locked() FRDX_REQUIRES(mu_);
+    // Phase 3: install a stream from launch_stream() (which ran outside mu_).
+    // Discards the result if target_url_ changed during the HTTP handshake.
+    void install_stream_locked(const std::string& launched_url,
+                               std::expected<std::unique_ptr<Stream>, ShoutcastError> stream_result)
+        FRDX_REQUIRES(mu_);
     void stop_stream_locked() FRDX_REQUIRES(mu_);
     void restore_station_display_locked() FRDX_REQUIRES(mu_);
     void cycle_preset(int direction = 1) FRDX_REQUIRES(mu_);
@@ -286,7 +294,10 @@ private:
 
     // Background reconnect thread: when the stream dies, we launch a new
     // connection on a separate thread so the remaining ring-buffer audio
-    // keeps playing without interruption.  Joined in the destructor.
+    // keeps playing without interruption.  In pump() the previous thread is
+    // detached (its lambda already returned — reconnect_in_progress_ is false)
+    // rather than joined, to avoid blocking the audio render thread.  The
+    // destructor and shutdown() join the final reconnect_thread_.
     std::atomic<bool> reconnect_in_progress_{false};
     std::thread reconnect_thread_;
 

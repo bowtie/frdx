@@ -459,10 +459,12 @@ void ShoutcastSource::cycle_preset(int direction) {
     target_url_ = cfg_.presets[preset_idx_];
 }
 
-void ShoutcastSource::start_stream_locked() {
+std::string ShoutcastSource::start_stream_locked() {
+    // Phase 1: pre-launch setup only.  The HTTP/MP3 handshake (launch_stream)
+    // happens OUTSIDE mu_ in the caller; install_stream_locked() is Phase 3.
     stop_stream_locked();
     last_data_ms_.store(0, std::memory_order_release);
-    const auto metadata_epoch = reset_metadata_sync_locked();
+    reset_metadata_sync_locked();
     display_name_ = "Online Radio";
     display_name_gen_.fetch_add(1, std::memory_order_release);
 
@@ -473,16 +475,32 @@ void ShoutcastSource::start_stream_locked() {
     if (target_url_.empty()) {
         // No stream to play — publish the cleared state.
         info_gen_.fetch_add(1, std::memory_order_release);
+        return {};
+    }
+    return target_url_;
+}
+
+void ShoutcastSource::install_stream_locked(
+    const std::string& launched_url,
+    std::expected<std::unique_ptr<Stream>, ShoutcastError> stream_result) {
+    // Phase 3: install the stream that was launched outside mu_.
+    // Guard against stale launches — if target_url_ changed during the HTTP
+    // handshake (another select_station/cycle_and_restart ran concurrently),
+    // discard this result; the new selection launches its own stream.
+    if (target_url_ != launched_url) {
+        log::info("[shoutcast] stream launch stale (target changed during handshake), discarding");
         return;
     }
 
-    // Delegate the stream creation to the mpg123 launcher.
-    auto stream_result = launch_stream(target_url_, winhttp_session_);
     if (!stream_result) {
         info_gen_.fetch_add(1, std::memory_order_release);
         return;
     }
 
+    // Compute a fresh metadata epoch at install time (matching select_station's
+    // Phase 3).  start_stream_locked() already reset metadata sync, but a
+    // concurrent change during the handshake warrants a new epoch here.
+    const auto metadata_epoch = reset_metadata_sync_locked();
     (*stream_result)->metadata_epoch = metadata_epoch;
     stream_.store(std::shared_ptr<Stream>(std::move(*stream_result)),
                 std::memory_order_release);
@@ -497,7 +515,7 @@ void ShoutcastSource::start_stream_locked() {
     position_ms_.store(0, std::memory_order_release);
     state_.store(PlaybackState::buffering, std::memory_order_release);
 
-    log::info("[shoutcast] stream started for {}", target_url_);
+    log::info("[shoutcast] stream started for {}", launched_url);
 }
 
 void ShoutcastSource::stop_stream_locked() {
@@ -541,11 +559,12 @@ void ShoutcastSource::restore_station_display_locked() {
 void ShoutcastSource::play() {
     bool started_stream = false;
     bool has_stream = false;
+    std::string launch_url;
     {
         frdx::ScopedLock lk{mu_};
         drain_pending_ = true;
         if (!stream_.load(std::memory_order_acquire)) {
-            start_stream_locked();
+            launch_url = start_stream_locked();
             started_stream = true;
         }
         // If start_stream_locked() didn't run (stream already existed) or failed to
@@ -556,7 +575,20 @@ void ShoutcastSource::play() {
             restore_station_display_locked();
         }
         has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
-    } // mu_ released before poller restart to avoid deadlock
+    } // mu_ released — HTTP handshake happens outside the lock
+
+    // Phase 2: launch the stream OUTSIDE mu_ (the WinHTTP/MP3 handshake can
+    // block for several seconds).  Mirrors select_station()'s three-phase
+    // pattern and prevents stalling the calling (UI/action) thread.
+    if (started_stream && !launch_url.empty()) {
+        auto stream_result = launch_stream(launch_url, winhttp_session_);
+        {
+            frdx::ScopedLock lk{mu_};
+            install_stream_locked(launch_url, std::move(stream_result));
+            has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
+        }
+    }
+
     // Restart the metadata poller — pause() stops it, so unpausing needs to
     // bring it back to get live track info again.
     if (has_stream) {
@@ -589,6 +621,7 @@ void ShoutcastSource::pause() {
 
 void ShoutcastSource::on_radio_audible(bool audible) {
     bool should_restart_metadata = false;
+    std::string launch_url;
     {
         frdx::ScopedLock lk{mu_};
         if (audible == audible_) return;
@@ -598,7 +631,7 @@ void ShoutcastSource::on_radio_audible(bool audible) {
             // Reconnect to the live stream and drain stale buffered audio.
             log::info("[shoutcast] radio audible -- reconnecting to live stream");
             drain_pending_ = true;
-            start_stream_locked();
+            launch_url = start_stream_locked();
             should_restart_metadata = true;
         } else {
             // Radio became inaudible (pause menu, rewind, etc).
@@ -615,7 +648,19 @@ void ShoutcastSource::on_radio_audible(bool audible) {
             // multi-stream stations), and station logo URL.
             restore_station_display_locked();
         }
+    } // mu_ released — HTTP handshake happens outside the lock
+
+    // Phase 2: launch the stream OUTSIDE mu_ (the WinHTTP/MP3 handshake can
+    // block for several seconds).  Mirrors select_station()'s three-phase
+    // pattern and prevents stalling the control loop thread.
+    if (should_restart_metadata && !launch_url.empty()) {
+        auto stream_result = launch_stream(launch_url, winhttp_session_);
+        {
+            frdx::ScopedLock lk{mu_};
+            install_stream_locked(launch_url, std::move(stream_result));
+        }
     }
+
     // restart_metadata_for_current() requires mu_ to be free (FRDX_EXCLUDES).
     if (should_restart_metadata) {
         restart_metadata_for_current();
@@ -626,11 +671,12 @@ void ShoutcastSource::cycle_and_restart(int direction) {
     metadata_controller_->stop();
 
     bool has_stream = false;
+    std::string launch_url;
     {
         frdx::ScopedLock lk{mu_};
         cycle_preset(direction);
         if (audible_) {
-            start_stream_locked();
+            launch_url = start_stream_locked();
         } else {
             // Not audible: update the display info so the station name is
             // ready when the UI comes back, but don't start the stream yet.
@@ -643,7 +689,20 @@ void ShoutcastSource::cycle_and_restart(int direction) {
         metadata_epoch_has_track_ = false;
         has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
         station_selected_ms_ = steady_ms();
-    } // mu_ released before poller stop/start
+    } // mu_ released — HTTP handshake happens outside the lock
+
+    // Phase 2: launch the stream OUTSIDE mu_ (the WinHTTP/MP3 handshake can
+    // block for several seconds).  Mirrors select_station()'s three-phase
+    // pattern and prevents stalling the action-worker thread.
+    if (!launch_url.empty()) {
+        auto stream_result = launch_stream(launch_url, winhttp_session_);
+        {
+            frdx::ScopedLock lk{mu_};
+            install_stream_locked(launch_url, std::move(stream_result));
+            has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
+        }
+    }
+
     restart_metadata_for_current();
     if (has_stream) {
         state_.store(PlaybackState::playing, std::memory_order_release);
@@ -1023,8 +1082,11 @@ void ShoutcastSource::pump(RingBuffer& ring) {
                 info_gen_.fetch_add(1, std::memory_order_release);
             }
         }
-        // Join any previous reconnect thread before starting a new one.
-        if (reconnect_thread_.joinable()) reconnect_thread_.join();
+        // The previous reconnect thread has finished its work (reconnect_in_progress_
+        // was false when we entered this branch, so its lambda already returned).
+        // Detach instead of joining — we're on the audio render thread and even a
+        // brief join is undesirable.  The destructor/shutdown() join the final thread.
+        if (reconnect_thread_.joinable()) reconnect_thread_.detach();
         reconnect_thread_ = std::thread([this, url, session, attempts] {
             auto stream_result = launch_stream(url, session);
             if (stream_result && *stream_result) {
