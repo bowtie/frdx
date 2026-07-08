@@ -322,6 +322,7 @@ struct ExternalCtx {
     ConfigStore* store                     = nullptr;
     dualsense::DualSenseService* dualsense = nullptr;
     std::function<void()> flush_audio;
+    bool is_sandbox                        = false;
 };
 extern ExternalCtx g_ctx;
 

@@ -807,6 +807,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     g_overlay_direct          = !hooked_overlay;
     frdx::log::info("[sandbox] overlay mode: {}",
                     g_overlay_direct ? "direct render" : "self-hooked Present");
+    frdx::overlay::set_sandbox_mode(true);
     const bool overlay_ok = g_overlay_direct
                               ? frdx::overlay::initialize_direct(mgr, bridge, store, &dualsense)
                               : frdx::overlay::initialize(mgr, bridge, store, &dualsense);

@@ -42,5 +42,11 @@ void shutdown() noexcept;
 // after draining the ring buffer.
 void set_flush_audio(std::function<void()> fn) noexcept;
 
+// Mark the overlay as running in sandbox mode (no FMOD, no game cursor
+// handling).  When true: the player bar stays visible (no cinematic fade),
+// transport controls are enabled without a live FMOD DSP, and auto-play
+// fires immediately on the first frame.
+void set_sandbox_mode(bool enabled) noexcept;
+
 } // namespace overlay
 } // namespace frdx

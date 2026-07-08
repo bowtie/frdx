@@ -102,8 +102,10 @@ float update_interactive_overlay_alpha() {
         !g_ui.cursor_visible && now - g_ui.cursor_hidden_since >= std::chrono::seconds(2);
     // When player_bar_always_visible is enabled, keep the overlay at full
     // alpha regardless of cursor visibility — no cinematic fade-out.
+    // Sandbox mode also forces always-visible (no game cursor to track).
     const bool always_visible =
-        g_ctx.store && g_ctx.store->snapshot().overlay.player_bar_always_visible;
+        g_ctx.is_sandbox ||
+        (g_ctx.store && g_ctx.store->snapshot().overlay.player_bar_always_visible);
     const float target = always_visible ? 1.0f
                                         : (g_ui.cursor_hide_delay_elapsed ? 0.0f : 1.0f);
     const float dt       = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
@@ -206,9 +208,11 @@ void run_station_switch(const PendingStationSwitch& request) {
 
     shoutcast->select_station(request.station_id, request.stream_id);
     g_ctx.mgr->ring().drain();
-    // Auto-play only if the FMOD DSP bridge is live.  Otherwise the station
-    // is just selected — the FMOD-ready transition will auto-play it.
-    const bool fmod_ready = g_ctx.bridge && g_ctx.bridge->dsp_installed();
+    // Auto-play only if the FMOD DSP bridge is live (or sandbox mode, where
+    // WASAPI handles output).  Otherwise the station is just selected — the
+    // FMOD-ready transition will auto-play it.
+    const bool fmod_ready = g_ctx.is_sandbox ||
+                            (g_ctx.bridge && g_ctx.bridge->dsp_installed());
     if (fmod_ready) {
         shoutcast->play();
     } else {
@@ -323,10 +327,12 @@ void draw_imgui_ui_impl() {
     // After the first auto-play, playback is entirely user-controlled —
     // retargets (handle changes) must NOT re-trigger auto-play.
     static bool s_auto_played = false;
-    const bool fmod_ready = g_ctx.bridge && g_ctx.bridge->dsp_installed();
+    const bool fmod_ready = g_ctx.is_sandbox ||
+                            (g_ctx.bridge && g_ctx.bridge->dsp_installed());
     if (fmod_ready && !s_auto_played && active) {
         s_auto_played = true;
-        log::info("[overlay] FMOD became ready — auto-playing selected station");
+        log::info("[overlay] {} — auto-playing selected station",
+                  g_ctx.is_sandbox ? "sandbox ready" : "FMOD became ready");
         enqueue_action([active] { active->play(); });
     }
 

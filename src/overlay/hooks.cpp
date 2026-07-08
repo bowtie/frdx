@@ -7,6 +7,7 @@
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/log.hpp"
 #include "frdx/re_log.hpp"
+#include "frdx/fastboot.hpp"
 #include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
@@ -1026,6 +1027,15 @@ HRESULT __stdcall hook_ResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCoun
 void set_flush_audio(std::function<void()> fn) noexcept {
     g_ctx.flush_audio = std::move(fn);
     log::info("[overlay] registered audio flush callback");
+}
+
+void set_sandbox_mode(bool enabled) noexcept {
+    g_ctx.is_sandbox = enabled;
+    if (enabled) {
+        // Bypass the fastboot intro gate — the sandbox has no intro video.
+        fastboot::mark_intro_done_for_sandbox();
+    }
+    log::info("[overlay] sandbox mode {}", enabled ? "enabled" : "disabled");
 }
 
 bool configure_overlay_runtime(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge,

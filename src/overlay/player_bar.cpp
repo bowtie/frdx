@@ -106,7 +106,9 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // The FMOD DSP bridge must be installed on a live channel before playback
     // is meaningful — otherwise the shoutcast stream buffers but the audio has
     // nowhere to go.  Disable transport until the radio channel is discovered.
-    const bool fmod_ready = g_ctx.bridge && g_ctx.bridge->dsp_installed();
+    // In sandbox mode there's no FMOD — WASAPI handles output directly.
+    const bool fmod_ready = g_ctx.is_sandbox ||
+                            (g_ctx.bridge && g_ctx.bridge->dsp_installed());
     const float btn_w     = 27.0f * ui_s;
     const float btn_h     = 24.0f * ui_s;
 

@@ -731,5 +731,9 @@ bool intro_done() noexcept {
     return g_intro_done.load(std::memory_order_acquire);
 }
 
+void mark_intro_done_for_sandbox() noexcept {
+    g_intro_done.store(true, std::memory_order_release);
+}
+
 } // namespace fastboot
 } // namespace frdx

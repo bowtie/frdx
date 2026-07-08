@@ -20,5 +20,9 @@ void start() noexcept;
 // the startup sequence.
 bool intro_done() noexcept;
 
+// Force intro_done() to return true without starting the fastboot worker.
+// Used by the sandbox to bypass the intro gate (no game intro to skip).
+void mark_intro_done_for_sandbox() noexcept;
+
 } // namespace fastboot
 } // namespace frdx
