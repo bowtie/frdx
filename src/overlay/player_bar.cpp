@@ -252,10 +252,13 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     static float s_glyph_font_scale = -1.0f;
     // Recompute glyph sizes when the font scale changes (e.g. 1x -> 2x).
     // The glyph strings are constants, but their rendered sizes depend on
-    // the active font, so stale cache values cause misaligned icons.
-    if (s_glyph_font_scale != g_ui.ui_scale) {
+    // the active font scale (FontGlobalScale), so stale cache values cause
+    // misaligned icons.  Track FontGlobalScale directly since font scaling
+    // is now independent of ui_scale.
+    const float cur_font_scale = ImGui::GetIO().FontGlobalScale;
+    if (s_glyph_font_scale != cur_font_scale) {
         for (int i = 0; i < 4; ++i) s_glyph_sz[i] = ImGui::CalcTextSize(s_glyph_strs[i]);
-        s_glyph_font_scale = g_ui.ui_scale;
+        s_glyph_font_scale = cur_font_scale;
     }
     // Helper: returns index into the glyph cache for a known glyph, or -1.
     auto glyph_idx = [&](const char* g) -> int {

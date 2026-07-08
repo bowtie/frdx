@@ -329,15 +329,19 @@ void draw_console_window() {
         static size_t       s_last_shown = static_cast<size_t>(-1);
         static size_t       s_last_total = static_cast<size_t>(-1);
         static const ImFont* s_last_font = nullptr;
+        static float        s_last_font_scale = -1.0f;
         static float        s_cached_w   = 0.0f;
         const ImFont*       cur_font     = ImGui::GetFont();
+        const float         cur_font_scale = ImGui::GetIO().FontGlobalScale;
         if (s_last_shown != shown_count ||
             s_last_total != total_lines ||
-            s_last_font  != cur_font) {
+            s_last_font  != cur_font ||
+            s_last_font_scale != cur_font_scale) {
             s_cached_w    = ImGui::CalcTextSize(counter_text).x;
             s_last_shown  = shown_count;
             s_last_total  = total_lines;
             s_last_font   = cur_font;
+            s_last_font_scale = cur_font_scale;
         }
         const float counter_w    = s_cached_w;
         const float clear_w      = ImGui::CalcTextSize("Clear").x +
