@@ -435,28 +435,19 @@ void pre_resize() {
     re_log::info("released DX12 backbuffer RTV resources before resize");
 }
 
-// Compute UI scale from the monitor's physical resolution.
-// This ensures the UI is sized for the actual display, not the internal
-// render resolution (which may differ due to DSR or dynamic resolution
-// scaling).  1080p = 1.0x, 1440p = 1.33x, 4K = 2.0x.
+// Compute UI scale from the swap chain (render) resolution.
 // With ceil-based integer snapping in load_overlay_font:
 //   1080p -> 1x (16px), 1440p -> 2x (32px), 4K -> 2x (32px).
-static float compute_ui_scale(HWND hwnd) {
-    if (!hwnd) return 1.0f;
-    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    if (!monitor) return 1.0f;
-    MONITORINFO info{};
-    info.cbSize = sizeof(info);
-    if (!GetMonitorInfoA(monitor, &info)) return 1.0f;
-    const int monitor_height = info.rcMonitor.bottom - info.rcMonitor.top;
-    if (monitor_height <= 0) return 1.0f;
-    return static_cast<float>(monitor_height) / 1080.0f;
+// Using the swap chain (not the monitor) means DSR to 4K on a 1080p
+// monitor correctly produces 2x UI for 4K screenshots.
+static float compute_ui_scale(UINT sc_height) {
+    if (sc_height <= 0) return 1.0f;
+    return static_cast<float>(sc_height) / 1080.0f;
 }
 
 // Public wrapper for the Debug tab's "Apply Scale" button.
 float compute_ui_scale_for_current_monitor() {
-    // Use the foreground window (the game window) to determine the monitor.
-    return compute_ui_scale(GetForegroundWindow());
+    return compute_ui_scale(g_sc_height);
 }
 
 // Re-creates the RTV descriptors and g_dx.fb_bufs immediately after ResizeBuffers
@@ -492,14 +483,14 @@ void post_resize(IDXGISwapChain* swapChain) {
             static_cast<float>(desc.BufferDesc.Height));
     }
 
-    // Recalculate UI scale from the monitor resolution.  The monitor
-    // resolution doesn't change with DSR or in-game resolution settings,
-    // so this is stable.  Only reload the font if the monitor actually
-    // changed (e.g. window moved to a different display).
-    const auto new_scale = compute_ui_scale(desc.OutputWindow);
+    // Recalculate UI scale from the swap chain resolution.  With ceil
+    // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Reload the font when the
+    // scale changes (e.g. switching to DSR 4K).
+    const auto new_scale = compute_ui_scale(desc.BufferDesc.Height);
     if (new_scale != g_ui.ui_scale) {
         g_ui.ui_scale = new_scale;
-        re_log::info("ui_scale changed to {:.2f} (monitor)", g_ui.ui_scale);
+        re_log::info("ui_scale changed to {:.2f} (swap chain {}x{})",
+                     g_ui.ui_scale, desc.BufferDesc.Width, desc.BufferDesc.Height);
         io.Fonts->Clear();
         load_overlay_font(g_ui.ui_scale);
         io.Fonts->Build();
@@ -585,10 +576,9 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         return false;
     }
 
-    // Calculate UI scale from the monitor's physical resolution.
-    // This ensures the UI is sized for the actual display, not the
-    // internal render resolution (which may differ with DSR).
-    g_ui.ui_scale = compute_ui_scale(desc.OutputWindow);
+    // Calculate UI scale from the swap chain (render) resolution.
+    // With ceil snapping: 1080p -> 1x, 1440p/4K -> 2x.
+    g_ui.ui_scale = compute_ui_scale(desc.BufferDesc.Height);
     g_sc_width  = desc.BufferDesc.Width;
     g_sc_height = desc.BufferDesc.Height;
     // Cache window client size for mouse coordinate scaling.
@@ -597,7 +587,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         g_win_width  = rc.right - rc.left;
         g_win_height = rc.bottom - rc.top;
     }
-    re_log::info("swap chain: {}x{}, window: {}x{}, monitor ui_scale={:.2f}",
+    re_log::info("swap chain: {}x{}, window: {}x{}, ui_scale={:.2f}",
                  desc.BufferDesc.Width, desc.BufferDesc.Height,
                  g_win_width, g_win_height, g_ui.ui_scale);
 
@@ -820,9 +810,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
     if (g_ui.is_init) {
         // Query swap chain resolution to detect in-game resolution changes
-        // that don't go through ResizeBuffers.  The ui_scale is based on
-        // the monitor resolution (not the swap chain), so we don't need to
-        // reload the font here — only update the cached swap chain size.
+        // that don't go through ResizeBuffers.  When the swap chain height
+        // changes, recalculate ui_scale and reload the font if needed.
         DXGI_SWAP_CHAIN_DESC sc_desc;
         if (SUCCEEDED(pSwapChain->GetDesc(&sc_desc))) {
             if (g_sc_width != sc_desc.BufferDesc.Width ||
@@ -830,6 +819,16 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
                 g_sc_width  = sc_desc.BufferDesc.Width;
                 g_sc_height = sc_desc.BufferDesc.Height;
                 re_log::info("swap chain resolution changed to {}x{}", g_sc_width, g_sc_height);
+                const auto new_scale = compute_ui_scale(g_sc_height);
+                if (new_scale != g_ui.ui_scale) {
+                    g_ui.ui_scale = new_scale;
+                    re_log::info("ui_scale changed to {:.2f}", g_ui.ui_scale);
+                    auto& io = ImGui::GetIO();
+                    io.Fonts->Clear();
+                    load_overlay_font(g_ui.ui_scale);
+                    io.Fonts->Build();
+                    ImGui_ImplDX12_InvalidateDeviceObjects();
+                }
             }
         }
 
