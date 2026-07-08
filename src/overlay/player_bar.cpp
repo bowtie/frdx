@@ -313,11 +313,12 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::SameLine(0, 20.0f * ui_s);
 
     // ── Transport buttons ──
-    // Dim and disable when FMOD isn't ready yet — clicking play would start a
-    // network stream that goes nowhere.
-    if (!fmod_ready) ImGui::BeginDisabled(true);
-
-    if (draw_icon_btn("##prev", "\u23EE") && active && fmod_ready) {
+    // Prev/next switch stations without starting playback (the source
+    // checks audible_ and won't start the stream if FMOD isn't ready).
+    // Play/pause is disabled until FMOD connects — clicking it would
+    // start a network stream that goes nowhere.
+    if (!active) ImGui::BeginDisabled(true);
+    if (draw_icon_btn("##prev", "\u23EE") && active) {
         g_ui.combo_switch_dir = -1;
         animate_station_combo_by(-1);
         enqueue_action([active] {
@@ -328,6 +329,9 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         });
     }
     ImGui::SameLine(0, 3.0f * ui_s);
+    if (!active) ImGui::EndDisabled();
+
+    if (!fmod_ready) ImGui::BeginDisabled(true);
     if (draw_icon_btn("##play", is_playing ? "\u23F8" : "\u23F5") && active && fmod_ready) {
         enqueue_action([active, is_playing] {
             if (is_playing) {
@@ -339,8 +343,11 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             }
         });
     }
+    if (!fmod_ready) ImGui::EndDisabled();
     ImGui::SameLine(0, 3.0f * ui_s);
-    if (draw_icon_btn("##next", "\u23ED") && active && fmod_ready) {
+
+    if (!active) ImGui::BeginDisabled(true);
+    if (draw_icon_btn("##next", "\u23ED") && active) {
         g_ui.combo_switch_dir = 1;
         animate_station_combo_by(1);
         enqueue_action([active] {
@@ -350,8 +357,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             g_ctx.mgr->ring().drain();
         });
     }
-
-    if (!fmod_ready) ImGui::EndDisabled();
+    if (!active) ImGui::EndDisabled();
 
     ImGui::SameLine(0, 20.0f * ui_s);
 
