@@ -75,14 +75,29 @@ void draw_console_window() {
     const ImVec2 vp_size = viewport->WorkSize;
     const ImVec2 size(std::min(760.0f * ui_s, vp_size.x - 32.0f * ui_s),
                       std::min(360.0f * ui_s, vp_size.y - 80.0f * ui_s));
-    // Always reposition the console to the bottom-right corner.  The
-    // console is anchored, not user-draggable, so there's no reason to
-    // preserve position across frames.  This also ensures it repositions
-    // correctly after resolution changes.
-    ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f * ui_s,
-                                   vp_pos.y + vp_size.y - 16.0f * ui_s),
-                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+
+    // Only reposition/resize the console when the viewport size or UI scale
+    // changes (resolution change, window resize, DPI scale).  Between changes
+    // the user is free to drag and resize the window; ImGui persists the
+    // last position/size via its .ini file.
+    static ImVec2 s_last_vp_size{};
+    static float  s_last_ui_s   = -1.0f;
+    const bool viewport_changed =
+        s_last_vp_size.x != vp_size.x || s_last_vp_size.y != vp_size.y ||
+        s_last_ui_s != ui_s;
+    if (viewport_changed) {
+        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f * ui_s,
+                                       vp_pos.y + vp_size.y - 16.0f * ui_s),
+                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+        ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+        s_last_vp_size = vp_size;
+        s_last_ui_s    = ui_s;
+    } else {
+        ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f * ui_s,
+                                       vp_pos.y + vp_size.y - 16.0f * ui_s),
+                                ImGuiCond_FirstUseEver, ImVec2(1.0f, 1.0f));
+        ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+    }
     // Size floor so the panel can't be collapsed past legibility.
     // 480 px is the WRAP-THRESHOLD width: above it the filter row stays
     // single-line for short Subsystems labels; below it ImGui wraps to
@@ -99,7 +114,7 @@ void draw_console_window() {
                                                 vp_size.y - 16.0f * ui_s));
     ImGui::SetNextWindowBgAlpha(0.94f * eased);
 
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse |
                              ImGuiWindowFlags_NoScrollbar;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f * ui_s);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f * ui_s);
