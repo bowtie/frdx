@@ -60,25 +60,74 @@ void ApplyBessDark() {
     style.PopupBorderSize            = 0.0f;
 }
 
-void ApplyBessDarkSpaced() {
-    ApplyBessDark();
+// Gruvbox Dark — warm retro palette with orange/yellow accents on dark
+// brown.  Adapted from https://gist.github.com/Eiyeron/61c2ba9fc22d241c5327dc0ba0092fd5
+// with rounding/padding tuned for the compact media overlay.
+void ApplyGruvboxDark() {
+    ImGui::GetStyle() = ImGuiStyle();
+    ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    // A slightly more relaxed variant of BessDark for the compact media
-    // overlay.  Values are tuned for the actual widget sizes: 27x24
-    // transport buttons, 130px station combo, tabbed settings panel.
-    style.WindowRounding    = 6.0f;
-    style.FrameRounding     = 6.0f;
-    style.GrabRounding      = 6.0f;
-    style.TabRounding       = 6.0f;
-    style.PopupRounding     = 6.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.WindowPadding     = ImVec2(12.0f, 12.0f);
-    style.FramePadding      = ImVec2(7.0f, 5.0f);
-    style.ItemSpacing       = ImVec2(10.0f, 7.0f);
-    style.ItemInnerSpacing  = ImVec2(8.0f, 6.0f);
-    style.IndentSpacing     = 20.0f;
-    style.ScrollbarSize     = 16.0f;
-    style.GrabMinSize       = 11.0f;
+    ImVec4* c         = style.Colors;
+    // Gruvbox dark palette
+    c[ImGuiCol_Text]                 = ImVec4(0.922f, 0.859f, 0.698f, 1.00f); // ebdbb2
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.573f, 0.514f, 0.455f, 1.00f); // 928374
+    c[ImGuiCol_WindowBg]             = ImVec4(0.114f, 0.125f, 0.129f, 0.94f); // 1d2021 (slightly transparent for overlay)
+    c[ImGuiCol_ChildBg]              = ImVec4(0.114f, 0.125f, 0.129f, 1.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.114f, 0.125f, 0.129f, 0.94f);
+    c[ImGuiCol_Border]               = ImVec4(0.235f, 0.224f, 0.208f, 0.50f); // 3c3836
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.235f, 0.224f, 0.208f, 0.56f); // 3c3836
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.314f, 0.286f, 0.271f, 1.00f); // 504945
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.400f, 0.361f, 0.329f, 0.66f); // 665c54
+    c[ImGuiCol_TitleBg]              = ImVec4(0.839f, 0.365f, 0.055f, 1.00f); // d65d0e
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.996f, 0.502f, 0.098f, 1.00f); // fe8019
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.839f, 0.365f, 0.055f, 0.61f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.157f, 0.157f, 0.157f, 0.94f); // 282828
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.00f, 0.00f, 0.00f, 0.16f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.235f, 0.224f, 0.208f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.314f, 0.286f, 0.271f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.400f, 0.361f, 0.329f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.839f, 0.365f, 0.055f, 0.62f); // d65d0e
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.839f, 0.365f, 0.055f, 0.44f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.996f, 0.502f, 0.098f, 1.00f); // fe8019
+    c[ImGuiCol_Button]               = ImVec4(0.839f, 0.365f, 0.055f, 0.40f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.996f, 0.502f, 0.098f, 0.62f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.996f, 0.502f, 0.098f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.839f, 0.365f, 0.055f, 0.25f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.996f, 0.502f, 0.098f, 0.80f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.996f, 0.502f, 0.098f, 1.00f);
+    c[ImGuiCol_Separator]            = ImVec4(0.400f, 0.361f, 0.329f, 0.50f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.314f, 0.286f, 0.271f, 0.78f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.400f, 0.361f, 0.329f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.839f, 0.365f, 0.055f, 0.25f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.996f, 0.502f, 0.098f, 0.67f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.996f, 0.502f, 0.098f, 0.95f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.839f, 0.365f, 0.055f, 0.85f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.996f, 0.502f, 0.098f, 0.80f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.996f, 0.502f, 0.098f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.114f, 0.125f, 0.129f, 0.97f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.114f, 0.125f, 0.129f, 1.00f);
+    c[ImGuiCol_PlotLines]            = ImVec4(0.839f, 0.365f, 0.055f, 1.00f);
+    c[ImGuiCol_PlotLinesHovered]     = ImVec4(0.996f, 0.502f, 0.098f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.596f, 0.592f, 0.102f, 1.00f); // 98971a
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.722f, 0.733f, 0.149f, 1.00f); // b8bb26
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(0.271f, 0.522f, 0.533f, 0.35f); // 458588
+    c[ImGuiCol_DragDropTarget]       = ImVec4(0.596f, 0.592f, 0.102f, 0.90f);
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.514f, 0.647f, 0.596f, 1.00f); // 83a598
+    c[ImGuiCol_NavWindowingHighlight]= ImVec4(0.984f, 0.945f, 0.780f, 0.70f); // fbf1c7
+    c[ImGuiCol_NavWindowingDimBg]    = ImVec4(0.486f, 0.435f, 0.392f, 0.20f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.114f, 0.125f, 0.129f, 0.35f);
+    // Rounding/padding tuned for the overlay's compact widgets
+    style.WindowRounding             = 5.0f;
+    style.FrameRounding              = 5.0f;
+    style.GrabRounding               = 5.0f;
+    style.TabRounding                = 5.0f;
+    style.PopupRounding              = 5.0f;
+    style.ScrollbarRounding          = 5.0f;
+    style.WindowPadding              = ImVec2(10.0f, 10.0f);
+    style.FramePadding               = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing                = ImVec2(8.0f, 6.0f);
+    style.PopupBorderSize            = 0.0f;
 }
 
 void ApplyTokyoNight() {
@@ -155,7 +204,7 @@ void ApplyTheme(int idx) {
     switch (idx) {
         case 0: ApplyBessDark(); break;
         case 1: ApplyTokyoNight(); break;
-        case 2: ApplyBessDarkSpaced(); break;
+        case 2: ApplyGruvboxDark(); break;
         default: ApplyBessDark(); break;
     }
     // Scale all pixel-based style values by the current UI scale factor.
@@ -169,14 +218,14 @@ void ApplyTheme(int idx) {
 
 int theme_index(std::string_view value) noexcept {
     if (value == "tokyo_night") return 1;
-    if (value == "bess_dark_spaced") return 2;
+    if (value == "gruvbox_dark") return 2;
     return 0;
 }
 
 const char* theme_value(int idx) noexcept {
     switch (idx) {
         case 1:  return "tokyo_night";
-        case 2:  return "bess_dark_spaced";
+        case 2:  return "gruvbox_dark";
         default: return "bess_dark";
     }
 }
