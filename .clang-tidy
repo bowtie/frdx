@@ -11,6 +11,7 @@ Checks: >
   -bugprone-implicit-widening-of-multiplication-result,
   -bugprone-throwing-static-initialization,
   -bugprone-invalid-enum-default-initialization,
+  -bugprone-unchecked-optional-access,
   cert-*,
   -cert-err58-cpp,
   -cert-err33-c,
@@ -59,6 +60,10 @@ Checks: >
 #                                                      in try/noexcept adds churn for zero safety gain
 # bugprone-invalid-enum-default-initialization:        D3D12 descriptor structs zero-init'd with {} -- the
 #                                                      idiomatic D3D12 pattern; these enums have no zero member
+# bugprone-unchecked-optional-access:                  path-sensitive dataflow check that path-explodes on
+#                                                      config.cpp's load_config (~50 sequential toml::find
+#                                                      calls), hanging clang-tidy on that TU; it has never
+#                                                      fired a real finding across the codebase
 # clang-analyzer-optin.core.EnumCastOutOfRange:        fires inside MSVC/Windows SDK headers (xfilesystem_abi,
 #                                                      d3d12.h), not our code -- HeaderFilterRegex can't exclude
 #                                                      them once the optin analyzer descends
