@@ -194,7 +194,7 @@ struct UiState {
     float interactive_alpha = 1.0f, interactive_draw_alpha = 1.0f;
     bool cursor_child_close_elapsed = false, cursor_hide_delay_elapsed = false;
     bool cursor_hide_closed_children           = false;
-    const char* theme_names[3]                 = {"Bess Dark", "Tokyo Night", "Gruvbox Dark"};
+    const char* theme_names[5]                 = {"Bess Dark", "Tokyo Night", "Gruvbox Dark", "Dracula", "Deus Ex Gold"};
     int theme_idx                              = 0;
     const char* notification_position_names[6] = {"Top Left",    "Top Center",    "Top Right",
                                                   "Bottom Left", "Bottom Center", "Bottom Right"};
