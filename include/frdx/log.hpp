@@ -34,15 +34,21 @@ inline void error(std::string_view message) noexcept {
 
 template <class... Args>
 inline void info(std::format_string<Args...> fmt, Args&&... args) noexcept {
-    emit(Level::info, std::format(fmt, std::forward<Args>(args)...));
+    try {
+        emit(Level::info, std::format(fmt, std::forward<Args>(args)...));
+    } catch (...) {}
 }
 template <class... Args>
 inline void warn(std::format_string<Args...> fmt, Args&&... args) noexcept {
-    emit(Level::warn, std::format(fmt, std::forward<Args>(args)...));
+    try {
+        emit(Level::warn, std::format(fmt, std::forward<Args>(args)...));
+    } catch (...) {}
 }
 template <class... Args>
 inline void error(std::format_string<Args...> fmt, Args&&... args) noexcept {
-    emit(Level::error, std::format(fmt, std::forward<Args>(args)...));
+    try {
+        emit(Level::error, std::format(fmt, std::forward<Args>(args)...));
+    } catch (...) {}
 }
 
 } // namespace frdx::log

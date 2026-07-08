@@ -7,6 +7,7 @@
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/log.hpp"
 #include "frdx/re_log.hpp"
+#include "frdx/d3d12_debug.hpp"
 #include "frdx/fastboot.hpp"
 #include "frdx/platform/windows/subprocess.hpp"
 
@@ -767,6 +768,10 @@ void cleanup_imgui_resources() {
 static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     if (!pSwapChain || !active_queue) return false;
 
+    // Cached IDXGISwapChain3 pointer — avoids a mutex lock + map lookup
+    // every frame.  Cleared on swap chain change (below).
+    static IDXGISwapChain3* s_cached_sc3 = nullptr;
+
     // Detect swap chain change: the game may create a new swap chain
     // when changing resolution (e.g. DLDSR) instead of calling
     // ResizeBuffers.  When this happens, our fb_bufs/fb_rtvs still
@@ -779,6 +784,9 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         cleanup_imgui_resources();
         g_ui.is_init = false;
         s_current_swapchain = nullptr;
+        // Clear the cached sc3 pointer so the backbuffer lookup re-queries
+        // the new swap chain.
+        s_cached_sc3 = nullptr;
     }
 
     if (!g_ui.is_init) {
@@ -836,16 +844,22 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         }
         UINT backBufferIdx = 0;
         {
-            frdx::ScopedLock lk{g_sc.mutex};
-            auto it = g_sc.cache3_ref().find(pSwapChain);
-            if (it == g_sc.cache3_ref().end()) {
-                IDXGISwapChain3* sc3 = nullptr;
-                if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
-                    g_sc.cache3_ref()[pSwapChain] = sc3;
-                    backBufferIdx                 = sc3->GetCurrentBackBufferIndex();
-                }
+            if (s_cached_sc3) {
+                backBufferIdx = s_cached_sc3->GetCurrentBackBufferIndex();
             } else {
-                backBufferIdx = it->second->GetCurrentBackBufferIndex();
+                frdx::ScopedLock lk{g_sc.mutex};
+                auto it = g_sc.cache3_ref().find(pSwapChain);
+                if (it == g_sc.cache3_ref().end()) {
+                    IDXGISwapChain3* sc3 = nullptr;
+                    if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
+                        g_sc.cache3_ref()[pSwapChain] = sc3;
+                        s_cached_sc3                  = sc3;
+                        backBufferIdx                 = sc3->GetCurrentBackBufferIndex();
+                    }
+                } else {
+                    s_cached_sc3  = it->second;
+                    backBufferIdx = it->second->GetCurrentBackBufferIndex();
+                }
             }
         }
 
@@ -878,8 +892,12 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         ID3D12CommandAllocator* allocator = g_dx.allocators[alloc_idx].get();
 
-        allocator->Reset();
-        g_dx.cmd_list->Reset(allocator, nullptr);
+        if (FAILED(allocator->Reset())) {
+            return false; // allocator still in use by GPU — skip this frame
+        }
+        if (FAILED(g_dx.cmd_list->Reset(allocator, nullptr))) {
+            return false;
+        }
 
         ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
         g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
@@ -896,6 +914,15 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             transition_barrier(bb, D3D12_RESOURCE_STATE_COMMON,
                                D3D12_RESOURCE_STATE_RENDER_TARGET);
         g_dx.cmd_list->ResourceBarrier(1, &to_render_target);
+
+        // Refresh the per-frame config cache once — all hot-path callers
+        // (blur, toasts, track info, volume bar) read from the frame_*_cfg
+        // fields instead of taking repeated lock+copy snapshots.
+        if (g_ctx.store) {
+            auto snap = g_ctx.store->snapshot();
+            g_ctx.frame_overlay_cfg = std::move(snap.overlay);
+            g_ctx.frame_audio_cfg   = std::move(snap.audio);
+        }
 
         // Dual-Kawase backdrop blur: capture the freshly-rendered backbuffer
         // (now in RENDER_TARGET) and run the down/up-sample passes into
@@ -1012,7 +1039,13 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     }
 
     render_overlay_frame(pSwapChain, active_queue);
-    return original_Present(pSwapChain, SyncInterval, Flags);
+    HRESULT hr = original_Present(pSwapChain, SyncInterval, Flags);
+    if (FAILED(hr) && g_dx.device) {
+        // DXGI_ERROR_DEVICE_REMOVED / DEVICE_HUNG / DEVICE_RESET — dump
+        // DRED breadcrumbs if the debug layer was enabled.
+        d3d12_debug::log_device_removed_if_debug(g_dx.device.get());
+    }
+    return hr;
 }
 
 HRESULT __stdcall hook_ResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width,

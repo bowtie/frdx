@@ -3,7 +3,6 @@
 #include "frdx/audio_source.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include <algorithm>
-#include <cstring>
 
 namespace frdx::overlay {
 using namespace frdx;

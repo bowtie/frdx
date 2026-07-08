@@ -724,7 +724,8 @@ DWORD WINAPI worker(LPVOID) {
 } // namespace
 
 void start() noexcept {
-    CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
+    HANDLE h = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
+    if (h) CloseHandle(h);
 }
 
 bool intro_done() noexcept {

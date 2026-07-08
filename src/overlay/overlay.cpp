@@ -20,9 +20,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <condition_variable>
-#include <cstring>
 #include <deque>
-#include <fstream>
 #include <functional>
 #include <thread>
 #include <atomic>
@@ -105,7 +103,7 @@ float update_interactive_overlay_alpha() {
     // Sandbox mode also forces always-visible (no game cursor to track).
     const bool always_visible =
         g_ctx.is_sandbox ||
-        (g_ctx.store && g_ctx.store->snapshot().overlay.player_bar_always_visible);
+        (g_ctx.store && g_ctx.frame_overlay_cfg.player_bar_always_visible);
     const float target = always_visible ? 1.0f
                                         : (g_ui.cursor_hide_delay_elapsed ? 0.0f : 1.0f);
     const float dt       = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
@@ -348,7 +346,10 @@ void draw_imgui_ui_impl() {
         auto* mp = active->metadata_provider();
         if (mp) {
             uint64_t gen = mp->track_generation();
-            if (active != s_track_source || gen == 0 || gen != s_track_gen) {
+            // Re-fetch when the source changes or the generation advances.
+            // The old `gen == 0` condition caused a re-fetch every frame
+            // when the source had no track generation (e.g. not playing).
+            if (active != s_track_source || (gen != 0 && gen != s_track_gen)) {
                 s_track_source = active;
                 s_track_gen    = gen;
                 s_cached_track = mp->current_track();
@@ -362,7 +363,7 @@ void draw_imgui_ui_impl() {
                 // streams within the same station (e.g. City Pop 1-4)
                 // also triggers a toast.
                 const bool station_toasts_on = g_ctx.store
-                    ? g_ctx.store->snapshot().overlay.station_notifications_enabled
+                    ? g_ctx.frame_overlay_cfg.station_notifications_enabled
                     : true;
                 if (station_toasts_on &&
                     s_cached_track.is_placeholder &&
@@ -383,7 +384,7 @@ void draw_imgui_ui_impl() {
                 }
                 // Song change toast: only for real track metadata.
                 else if (should_notify_song_change(active, s_cached_track, s_cached_hud_title, artist) &&
-                         (g_ctx.store ? g_ctx.store->snapshot().overlay.music_notifications_enabled : true) &&
+                         (g_ctx.store ? g_ctx.frame_overlay_cfg.music_notifications_enabled : true) &&
                          (active != s_toast_source || s_cached_hud_title != s_toast_title ||
                           artist != s_toast_artist)) {
                     push_toast(ToastKind::info, s_cached_hud_title, artist, 4.5f);

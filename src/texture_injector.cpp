@@ -2,7 +2,6 @@
 #include "frdx/log.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -501,9 +500,9 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
                 }
             }
             int pixel_count = new_w * new_h;
-            b_r = static_cast<unsigned char>(r_sum / pixel_count * 0.6f);
-            b_g = static_cast<unsigned char>(g_sum / pixel_count * 0.6f);
-            b_b = static_cast<unsigned char>(b_sum / pixel_count * 0.6f);
+            b_r = static_cast<unsigned char>(static_cast<float>(r_sum) / pixel_count * 0.6f);
+            b_g = static_cast<unsigned char>(static_cast<float>(g_sum) / pixel_count * 0.6f);
+            b_b = static_cast<unsigned char>(static_cast<float>(b_sum) / pixel_count * 0.6f);
         }
 
         for (const auto& tgt : targets) {
@@ -579,9 +578,9 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
                 }
             }
             int pixel_count = new_w * new_h;
-            b_r = static_cast<unsigned char>(r_sum / pixel_count * 0.6f);
-            b_g = static_cast<unsigned char>(g_sum / pixel_count * 0.6f);
-            b_b = static_cast<unsigned char>(b_sum / pixel_count * 0.6f);
+            b_r = static_cast<unsigned char>(static_cast<float>(r_sum) / pixel_count * 0.6f);
+            b_g = static_cast<unsigned char>(static_cast<float>(g_sum) / pixel_count * 0.6f);
+            b_b = static_cast<unsigned char>(static_cast<float>(b_sum) / pixel_count * 0.6f);
         }
 
         for (const auto& tgt : targets) {

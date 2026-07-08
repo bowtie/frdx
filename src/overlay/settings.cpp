@@ -7,11 +7,13 @@
 #include "frdx/texture_injector.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <imgui.h>
 #include <imgui_impl_dx12.h>
 #include <imfilebrowser.h>
+#include <mutex>
 
 namespace frdx::overlay {
 using namespace frdx;
@@ -248,8 +250,9 @@ void draw_display_settings_tab() {
 
 static char s_custom_image_path[1024] = {};
 static char s_custom_image_url[2048] = {};
-static bool s_custom_injecting = false;
+static std::atomic<bool> s_custom_injecting{false};
 static std::string s_custom_inject_status;
+static std::mutex s_custom_inject_mu;
 static ImGui::FileBrowser s_file_browser(
     ImGuiFileBrowserFlags_CloseOnEsc | ImGuiFileBrowserFlags_NoModal);
 
@@ -301,18 +304,24 @@ void draw_debug_tab() {
     }
 
     if (ImGui::Button("Inject File")) {
-        if (s_custom_image_path[0] != '\0' && !s_custom_injecting) {
-            s_custom_injecting = true;
-            s_custom_inject_status = "Processing local file...";
+        if (s_custom_image_path[0] != '\0' && !s_custom_injecting.load()) {
+            s_custom_injecting.store(true);
+            {
+                std::lock_guard lk(s_custom_inject_mu);
+                s_custom_inject_status = "Processing local file...";
+            }
             const bool raw = s_inject_mode == 0;
             const bool border = s_inject_border;
-            std::thread([raw, border] {
-                std::string path(s_custom_image_path);
+            std::string path(s_custom_image_path);
+            std::thread([raw, border, path] {
                 std::string url = "file:///" + path;
                 std::replace(url.begin(), url.end(), '\\', '/');
                 TextureInjector::instance().update_artwork_url(url, raw, border);
-                s_custom_inject_status = "Injected — check HUD";
-                s_custom_injecting = false;
+                {
+                    std::lock_guard lk(s_custom_inject_mu);
+                    s_custom_inject_status = "Injected — check HUD";
+                }
+                s_custom_injecting.store(false);
             }).detach();
         }
     }
@@ -330,25 +339,36 @@ void draw_debug_tab() {
     ImGui::PopItemWidth();
 
     if (ImGui::Button("Inject URL")) {
-        if (s_custom_image_url[0] != '\0' && !s_custom_injecting) {
-            s_custom_injecting = true;
-            s_custom_inject_status = "Downloading from URL...";
+        if (s_custom_image_url[0] != '\0' && !s_custom_injecting.load()) {
+            s_custom_injecting.store(true);
+            {
+                std::lock_guard lk(s_custom_inject_mu);
+                s_custom_inject_status = "Downloading from URL...";
+            }
             const bool raw = s_inject_mode == 0;
             const bool border = s_inject_border;
-            std::thread([raw, border] {
-                std::string url(s_custom_image_url);
+            std::string url(s_custom_image_url);
+            std::thread([raw, border, url] {
                 TextureInjector::instance().update_artwork_url(url, raw, border);
-                s_custom_inject_status = "Injected — check HUD";
-                s_custom_injecting = false;
+                {
+                    std::lock_guard lk(s_custom_inject_mu);
+                    s_custom_inject_status = "Injected — check HUD";
+                }
+                s_custom_injecting.store(false);
             }).detach();
         }
     }
 
     // Status line
-    if (!s_custom_inject_status.empty()) {
+    std::string status_copy;
+    {
+        std::lock_guard lk(s_custom_inject_mu);
+        status_copy = s_custom_inject_status;
+    }
+    if (!status_copy.empty()) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s",
-                           s_custom_inject_status.c_str());
+                           status_copy.c_str());
     }
 
     // Show current target dimensions

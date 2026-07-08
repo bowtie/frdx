@@ -548,6 +548,14 @@ void MetadataController::run_sse_poller(std::string url,
             recvBuf[bytesRead] = '\0';
             line_buf.append(recvBuf, bytesRead);
 
+            // Guard against malicious servers that send data without
+            // newlines — cap line_buf at 1 MB to prevent OOM.
+            constexpr size_t kMaxLineBuf = 1 * 1024 * 1024;
+            if (line_buf.size() > kMaxLineBuf) {
+                log::warn("[shoutcast] sse: line buffer exceeded {} bytes, disconnecting", kMaxLineBuf);
+                break;
+            }
+
             // Process complete lines (terminated by \n).
             for (;;) {
                 auto nl = line_buf.find('\n');
@@ -578,6 +586,16 @@ void MetadataController::run_sse_poller(std::string url,
                     if (!val.empty() && val[0] == ' ') val.erase(0, 1);
                     if (!event_data.empty()) event_data += '\n';
                     event_data += val;
+
+                    // Guard against malicious servers that send thousands
+                    // of data: lines without a blank-line delimiter.
+                    constexpr size_t kMaxEventData = 1 * 1024 * 1024;
+                    if (event_data.size() > kMaxEventData) {
+                        log::warn("[shoutcast] sse: event data exceeded {} bytes, dispatching partial", kMaxEventData);
+                        process_sse_event(event_data, mapping, filter,
+                                          metadata_epoch, stop);
+                        event_data.clear();
+                    }
                 }
                 // event:, id:, retry: — ignored for now.
             }
@@ -834,24 +852,27 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
                                 WINHTTP_NO_HEADER_INDEX);
             if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && header_size > 0) {
                 std::wstring raw_headers(header_size / sizeof(wchar_t) + 1, L'\0');
-                WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_RAW_HEADERS_CRLF,
-                                    WINHTTP_HEADER_NAME_BY_INDEX, raw_headers.data(),
-                                    &header_size, WINHTTP_NO_HEADER_INDEX);
-                std::wstring lowered = raw_headers;
-                for (auto& c : lowered)
-                    if (c >= L'A' && c <= L'Z') c = c - L'A' + L'a';
-                auto ipos = lowered.find(L"icy-metaint:");
-                if (ipos != std::wstring::npos) {
-                    auto vs = ipos + 12;
-                    while (vs < raw_headers.size() &&
-                           (raw_headers[vs] == L' ' || raw_headers[vs] == L'\t')) vs++;
-                    auto ve = vs;
-                    while (ve < raw_headers.size() && raw_headers[ve] != L'\r' &&
-                           raw_headers[ve] != L'\n') ve++;
-                    if (ve > vs) {
-                        metaint = static_cast<int>(
-                            std::wcstol(raw_headers.substr(vs, ve - vs).c_str(), nullptr, 10));
+                if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                                        WINHTTP_HEADER_NAME_BY_INDEX, raw_headers.data(),
+                                        &header_size, WINHTTP_NO_HEADER_INDEX)) {
+                    std::wstring lowered = raw_headers;
+                    for (auto& c : lowered)
+                        if (c >= L'A' && c <= L'Z') c = c - L'A' + L'a';
+                    auto ipos = lowered.find(L"icy-metaint:");
+                    if (ipos != std::wstring::npos) {
+                        auto vs = ipos + 12;
+                        while (vs < raw_headers.size() &&
+                               (raw_headers[vs] == L' ' || raw_headers[vs] == L'\t')) vs++;
+                        auto ve = vs;
+                        while (ve < raw_headers.size() && raw_headers[ve] != L'\r' &&
+                               raw_headers[ve] != L'\n') ve++;
+                        if (ve > vs) {
+                            metaint = static_cast<int>(
+                                std::wcstol(raw_headers.substr(vs, ve - vs).c_str(), nullptr, 10));
+                        }
                     }
+                } else {
+                    log::warn("[shoutcast] icy: WinHttpQueryHeaders fallback failed ({})", GetLastError());
                 }
             }
         }

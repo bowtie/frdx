@@ -21,10 +21,6 @@ enum class PlaybackState { stopped, playing, paused, buffering };
 
 enum class SourceType : uint8_t { generic, shoutcast };
 
-// Manager-level lifecycle state for an audio source.
-// Distinct from PlaybackState (which describes the stream itself).
-enum class SourceState { active, draining, inactive };
-
 // ── IAudioMetadataProvider ─────────────────────────────────────────────
 //
 // Separated from IAudioSource so sources that don't carry metadata

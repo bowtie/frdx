@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -22,7 +23,6 @@ namespace frdx::sources {
 class MetadataController;
 
 enum class ShoutcastError {
-    stream_creation_failed,
     spawn_failed,
 };
 
@@ -283,6 +283,12 @@ private:
 
     // Retry counter to preserve active station during brief network dropouts.
     std::atomic<int> reconnect_attempts_{0};
+
+    // Background reconnect thread: when the stream dies, we launch a new
+    // connection on a separate thread so the remaining ring-buffer audio
+    // keeps playing without interruption.  Joined in the destructor.
+    std::atomic<bool> reconnect_in_progress_{false};
+    std::thread reconnect_thread_;
 
     // Background metadata poller (ICY + WebSocket). Allocated on heap so
     // shoutcast_source.hpp only needs a forward declaration (avoids circular

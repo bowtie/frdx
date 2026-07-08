@@ -6,7 +6,6 @@
 #include "frdx/log.hpp"
 
 #include <chrono>
-#include <cstring>
 
 namespace frdx::fmod_bridge {
 

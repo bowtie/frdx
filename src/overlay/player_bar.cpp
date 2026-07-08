@@ -83,7 +83,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // part of the backdrop instead.
     bool blur_border = false;
     if (g_ctx.store) {
-        auto cfg = g_ctx.store->snapshot().overlay;
+        const auto& cfg = g_ctx.frame_overlay_cfg;
         if (cfg.blur_enabled && g_ui.interactive_draw_alpha > 0.0f) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
             blur_border = true;
@@ -315,35 +315,35 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::SameLine(0, 20.0f * ui_s);
 
     // ── Transport buttons ──
-    // Prev/next switch stations without starting playback (the source
-    // checks audible_ and won't start the stream if FMOD isn't ready).
-    // Play/pause is disabled until FMOD connects — clicking it would
-    // start a network stream that goes nowhere.
+    // Play/pause is disabled until FMOD connects — without the DSP bridge
+    // installed, audio goes nowhere.  Prev/next and the station browser
+    // remain enabled: they select the station via enqueue_station_switch,
+    // which defers playback until FMOD is ready.  The overlay loop auto-plays
+    // the selected station once FMOD connects (overlay.cpp auto-play hook).
     if (!active) ImGui::BeginDisabled(true);
     if (draw_icon_btn("##prev", "\u23EE") && active) {
         g_ui.combo_switch_dir = -1;
         animate_station_combo_by(-1);
-        enqueue_action([active] {
-            TextureInjector::instance().reinject_last();
-            active->previous();
-            save_active_shoutcast_station(active);
-            g_ctx.mgr->ring().drain();
-        });
+        const int sel = g_ui.combo_sel;
+        if (sel >= 0 && sel < static_cast<int>(g_ui.combo_cache.sids.size())) {
+            enqueue_station_switch(g_ui.combo_cache.sids[sel],
+                                   g_ui.combo_cache.strids[sel]);
+        }
     }
     ImGui::SameLine(0, 3.0f * ui_s);
     if (!active) ImGui::EndDisabled();
 
     if (!fmod_ready) ImGui::BeginDisabled(true);
     if (draw_icon_btn("##play", is_playing ? "\u23F8" : "\u23F5") && active && fmod_ready) {
-        enqueue_action([active, is_playing] {
-            if (is_playing) {
-                active->pause();
-                if (g_ctx.mgr) g_ctx.mgr->ring().drain();
-                if (g_ctx.flush_audio) g_ctx.flush_audio();
-            } else {
-                active->play();
-            }
-        });
+        if (is_playing) {
+            // Pause immediately on the UI thread for instant button feedback.
+            // pause() just sets state + stops the stream — no blocking I/O.
+            active->pause();
+            if (g_ctx.mgr) g_ctx.mgr->ring().drain();
+            if (g_ctx.flush_audio) g_ctx.flush_audio();
+        } else {
+            enqueue_action([active] { active->play(); });
+        }
     }
     if (!fmod_ready) ImGui::EndDisabled();
     ImGui::SameLine(0, 3.0f * ui_s);
@@ -352,12 +352,11 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     if (draw_icon_btn("##next", "\u23ED") && active) {
         g_ui.combo_switch_dir = 1;
         animate_station_combo_by(1);
-        enqueue_action([active] {
-            TextureInjector::instance().reinject_last();
-            active->next();
-            save_active_shoutcast_station(active);
-            g_ctx.mgr->ring().drain();
-        });
+        const int sel = g_ui.combo_sel;
+        if (sel >= 0 && sel < static_cast<int>(g_ui.combo_cache.sids.size())) {
+            enqueue_station_switch(g_ui.combo_cache.sids[sel],
+                                   g_ui.combo_cache.strids[sel]);
+        }
     }
     if (!active) ImGui::EndDisabled();
 
@@ -375,7 +374,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     if (!active) ImGui::BeginDisabled(true);
     {
         const float configured_gain = g_ctx.store
-            ? g_ctx.store->snapshot().audio.output_gain
+            ? g_ctx.frame_audio_cfg.output_gain
             : 1.0f;
         float gain_pct         = configured_gain * 100.0f;
         char label[16];

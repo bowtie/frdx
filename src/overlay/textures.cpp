@@ -9,7 +9,6 @@
 #include <array>
 #include <cmath>
 #include <cstring>
-#include <chrono>
 #include <filesystem>
 #include <vector>
 
@@ -639,8 +638,7 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
         return false;
     }
 
-    OverlayConfig cfg;
-    if (g_ctx.store) cfg = g_ctx.store->snapshot().overlay;
+    const auto& cfg = g_ctx.frame_overlay_cfg;
     if (!cfg.blur_enabled) return true; // backbuffer is left in RENDER_TARGET
 
     // Skip the capture+blur pipeline entirely when no window that uses
@@ -663,9 +661,9 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
         transition_to(cmd, backbuffer, bb_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         // Shared pipeline state for every pass.
+        // SetDescriptorHeaps is already done by the overlay's main render
+        // path (hooks.cpp), so we only set the blur-specific state here.
         cmd->SetGraphicsRootSignature(g_dx.blur_root_sig.get());
-        ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
-        cmd->SetDescriptorHeaps(1, heaps);
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         auto run_pass = [&](UINT read, UINT draw, ID3D12PipelineState* pso) {
@@ -712,8 +710,7 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
 
 void draw_backdrop_blur(float alpha_scalar) {
     if (!g_dx.blur_ready || !g_dx.blur_tex[0]) return;
-    OverlayConfig cfg;
-    if (g_ctx.store) cfg = g_ctx.store->snapshot().overlay;
+    const auto& cfg = g_ctx.frame_overlay_cfg;
     if (!cfg.blur_enabled) return;
     if (alpha_scalar <= -1.0f) return; // explicit suppression
 
@@ -775,7 +772,7 @@ void draw_backdrop_blur(float alpha_scalar) {
 
 int push_blur_widget_styles(float alpha_scalar) {
     if (!g_ctx.store) return 0;
-    auto cfg = g_ctx.store->snapshot().overlay;
+    const auto& cfg = g_ctx.frame_overlay_cfg;
     if (!cfg.blur_enabled) return 0;
     if (cfg.blur_widget_opacity >= 1.0f) return 0;
     if (alpha_scalar <= 0.0f) return 0;

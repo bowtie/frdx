@@ -7,6 +7,7 @@
 
 #include "frdx/audio_source_manager.hpp"
 #include "frdx/config_store.hpp"
+#include "frdx/d3d12_debug.hpp"
 #include "frdx/dualsense.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/overlay/overlay.hpp"
@@ -14,19 +15,24 @@
 #include "frdx/sources/shoutcast_source.hpp"
 
 #include <windows.h>
+#include <shellapi.h> // CommandLineToArgvW
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 // ÔöÇÔöÇÔöÇ WASAPI Audio Output ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 // Reads PCM from the ring buffer and plays it through the default audio
@@ -63,7 +69,11 @@ public:
         }
 
         WAVEFORMATEX* mix_fmt = nullptr;
-        client_->GetMixFormat(&mix_fmt);
+        hr = client_->GetMixFormat(&mix_fmt);
+        if (FAILED(hr) || !mix_fmt) {
+            frdx::log::warn("[wasapi] GetMixFormat failed ({})", hr);
+            return false;
+        }
 
         WAVEFORMATEX fmt{};
         fmt.wFormatTag      = WAVE_FORMAT_IEEE_FLOAT;
@@ -415,6 +425,93 @@ static bool sandbox_hook_mode_requested() {
     return value[0] != L'\0' && value[0] != L'0' && value[0] != L'f' && value[0] != L'F';
 }
 
+// ── Benchmark mode ──────────────────────────────────────────────────────
+// `frdx_sandbox.exe --benchmark [N]` renders N frames (default 1000) with
+// the window hidden and vsync off, then writes per-frame timing to
+// bench-results.txt next to the exe and exits 0.  Used by the autoresearch
+// optimize-metric loop to measure overlay render cost.
+struct BenchmarkArgs {
+    bool   enabled     = false;
+    bool   blur        = false;  // --benchmark-blur: force blur on, maxed
+    int    frames      = 1000;
+    int    warmup      = 60;
+};
+
+static BenchmarkArgs parse_benchmark_args() {
+    BenchmarkArgs ba{};
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return ba;
+    for (int i = 1; i < argc; ++i) {
+        std::wstring arg = argv[i];
+        if (arg == L"--benchmark" || arg == L"-benchmark") {
+            ba.enabled = true;
+            if (i + 1 < argc && argv[i + 1][0] != L'-') {
+                ba.frames = std::max(1, _wtoi(argv[i + 1]));
+                ++i;
+            }
+        } else if (arg.rfind(L"--benchmark=", 0) == 0) {
+            ba.enabled = true;
+            ba.frames  = std::max(1, _wtoi(arg.c_str() + 12));
+        } else if (arg == L"--benchmark-blur") {
+            ba.enabled = true;
+            ba.blur    = true;
+            if (i + 1 < argc && argv[i + 1][0] != L'-') {
+                ba.frames = std::max(1, _wtoi(argv[i + 1]));
+                ++i;
+            }
+        } else if (arg.rfind(L"--benchmark-blur=", 0) == 0) {
+            ba.enabled = true;
+            ba.blur    = true;
+            ba.frames  = std::max(1, _wtoi(arg.c_str() + 16));
+        }
+    }
+    LocalFree(argv);
+    return ba;
+}
+
+static void write_benchmark_results(const std::filesystem::path& dir,
+                                    int frames, int warmup, bool blur,
+                                    double frame_avg_ms, double frame_max_ms, double frame_min_ms,
+                                    double overlay_avg_ms, double overlay_max_ms,
+                                    double overlay_min_ms,
+                                    double gpu_avg_ms, double gpu_max_ms, double gpu_min_ms) {
+    auto path = dir / "bench-results.txt";
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.wstring().c_str(), L"w") != 0 || !f) {
+        frdx::log::error("[bench] failed to write {}", path.string());
+        return;
+    }
+    std::fprintf(f,
+                 "bench: frames=%d warmup=%d blur=%s "
+                 "frame_avg=%.3fms frame_max=%.3fms frame_min=%.3fms "
+                 "overlay_avg=%.3fms overlay_max=%.3fms overlay_min=%.3fms "
+                 "gpu_avg=%.3fms gpu_max=%.3fms gpu_min=%.3fms\n",
+                 frames, warmup, blur ? "on(maxed)" : "off",
+                 frame_avg_ms, frame_max_ms, frame_min_ms,
+                 overlay_avg_ms, overlay_max_ms, overlay_min_ms,
+                 gpu_avg_ms, gpu_max_ms, gpu_min_ms);
+    std::fclose(f);
+
+    // Also try to print to the parent console (if launched from a terminal).
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        FILE* con = nullptr;
+        if (freopen_s(&con, "CONOUT$", "w", stdout) == 0 && con) {
+            std::fprintf(con,
+                         "bench: frames=%d warmup=%d blur=%s "
+                         "frame_avg=%.3fms frame_max=%.3fms frame_min=%.3fms "
+                         "overlay_avg=%.3fms overlay_max=%.3fms overlay_min=%.3fms "
+                         "gpu_avg=%.3fms gpu_max=%.3fms gpu_min=%.3fms\n",
+                         frames, warmup, blur ? "on(maxed)" : "off",
+                         frame_avg_ms, frame_max_ms, frame_min_ms,
+                         overlay_avg_ms, overlay_max_ms, overlay_min_ms,
+                         gpu_avg_ms, gpu_max_ms, gpu_min_ms);
+            std::fflush(con);
+        }
+    }
+    frdx::log::info("[bench] results written to {}", path.string());
+}
+
 // ÔöÇÔöÇÔöÇ Teardown guard (typestate-enforced cleanup order) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // The sandbox teardown must respect a strict dependency chain:
@@ -721,12 +818,15 @@ static_assert(has_destroy_dx_and_window<TGSourceDown>::value,
 // ÔöÇÔöÇÔöÇ Entry point ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
+    const auto bench = parse_benchmark_args();
+
     auto data_dir = exe_dir() / "mods" / "frdx";
     std::error_code ec;
     std::filesystem::create_directories(data_dir / "fonts", ec);
 
     frdx::log::init(data_dir / "sandbox.log");
-    frdx::log::info("[sandbox] starting ÔÇö overlay will hook into this process");
+    frdx::log::info("[sandbox] starting ÔÇö overlay will hook into this process{}",
+                    bench.enabled ? " [BENCHMARK MODE]" : "");
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
@@ -737,6 +837,21 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // ÔöÇÔöÇ 1. Config + managers ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
     auto cfg_path    = data_dir / "config.toml";
     frdx::Config cfg = frdx::load_config(cfg_path);
+
+    // In benchmark mode, force the console panel visible so the overlay
+    // actually renders ImGui every frame instead of hitting the all-hidden
+    // early-return in render_overlay_frame.
+    if (bench.enabled) {
+        cfg.overlay.console_visible = true;
+    }
+    // In blur benchmark mode, force blur on with maxed settings to measure
+    // the worst-case Dual-Kawase capture+blur pipeline every frame.
+    if (bench.blur) {
+        cfg.overlay.blur_enabled       = true;
+        cfg.overlay.blur_strength      = 15;  // max: 4 downsample iterations
+        cfg.overlay.blur_widget_opacity = 0.6f;
+    }
+
     frdx::ConfigStore store(cfg_path, cfg);
 
     frdx::AudioSourceManager mgr(4ull << 20);
@@ -829,10 +944,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     HWND hwnd =
         CreateWindowW(wc.lpszClassName, L"FRDX Sandbox ÔÇö Hooked Overlay", WS_OVERLAPPEDWINDOW, 100,
                       100, 1300, 760, nullptr, nullptr, wc.hInstance, nullptr);
-    ShowWindow(hwnd, SW_SHOW);
+    // Hide the window in benchmark mode — we don't need it visible, just
+    // need a valid HWND + swapchain for the overlay to render into.
+    ShowWindow(hwnd, bench.enabled ? SW_HIDE : SW_SHOW);
     UpdateWindow(hwnd);
 
     // ÔöÇÔöÇ 5. DX12 context ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+    // Enable the D3D12 debug layer + DRED before creating the device.
+    // No-op unless FRDX_DX12_DEBUG=1 is set in the environment.
+    frdx::d3d12_debug::enable_debug_layer_if_requested();
     DxContext dx{};
     if (!init_dx(hwnd, dx)) {
         frdx::log::error("[sandbox] DX12 init failed");
@@ -849,7 +969,25 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     // ÔöÇÔöÇ 6. Render loop ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
     MSG msg{};
     bool running = true;
+
+    // Benchmark timing storage.
+    std::vector<double> frame_times_ms;
+    std::vector<double> overlay_times_ms;
+    std::vector<double> gpu_wait_ms;  // fence wait = GPU cost of prev frame
+    int  bench_frame_counter  = 0;
+    const int bench_total     = bench.warmup + bench.frames;
+
+    if (bench.enabled) {
+        frame_times_ms.reserve(bench.frames);
+        overlay_times_ms.reserve(bench.frames);
+        gpu_wait_ms.reserve(bench.frames);
+        frdx::log::info("[bench] starting: warmup={} frames={} blur={}",
+                        bench.warmup, bench.frames, bench.blur ? "on(maxed)" : "off");
+    }
+
     while (running) {
+        // In benchmark mode, still pump messages (DX12 needs a window proc)
+        // but we control exit via frame count, not WM_QUIT.
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 running = false;
@@ -860,6 +998,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         }
         if (!running) break;
 
+        const auto frame_start = std::chrono::steady_clock::now();
+
+        // GPU wait: this blocks until the previous frame's GPU work
+        // (including overlay blur passes) is complete.  In benchmark mode
+        // this is the closest proxy to actual GPU render cost.
+        const auto gpu_wait_start = std::chrono::steady_clock::now();
         if (dx.fence->GetCompletedValue() < dx.fence_val) {
             dx.fence->SetEventOnCompletion(dx.fence_val, dx.fence_evt);
             DWORD wr = WaitForSingleObject(dx.fence_evt, 2000);
@@ -867,6 +1011,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
                 frdx::log::warn("[sandbox] render loop fence wait timed out");
             }
         }
+        const auto gpu_wait_end = std::chrono::steady_clock::now();
 
         UINT bb = dx.swapchain->GetCurrentBackBufferIndex();
         dx.alloc->Reset();
@@ -895,15 +1040,79 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         ID3D12CommandList* lists[] = {dx.cmd};
         dx.queue->ExecuteCommandLists(1, lists);
 
+        // Time the overlay render separately — this is the primary metric.
+        const auto overlay_start = std::chrono::steady_clock::now();
         if (g_overlay_direct) {
             frdx::overlay::render_direct(dx.swapchain, dx.queue);
         }
+        const auto overlay_end = std::chrono::steady_clock::now();
 
         // In hook mode the Present detour fires here and draws the overlay.
-        dx.swapchain->Present(1, 0);
+        // VSync off in benchmark mode for raw frame timing.
+        HRESULT present_hr = dx.swapchain->Present(bench.enabled ? 0 : 1, 0);
+        if (FAILED(present_hr)) {
+            frdx::d3d12_debug::log_device_removed_if_debug(dx.device);
+        }
 
         dx.fence_val++;
         dx.queue->Signal(dx.fence, dx.fence_val);
+
+        const auto frame_end = std::chrono::steady_clock::now();
+
+        if (bench.enabled) {
+            const double overlay_ms = std::chrono::duration<double, std::milli>(
+                overlay_end - overlay_start).count();
+            const double frame_ms = std::chrono::duration<double, std::milli>(
+                frame_end - frame_start).count();
+            const double gpu_ms = std::chrono::duration<double, std::milli>(
+                gpu_wait_end - gpu_wait_start).count();
+
+            if (bench_frame_counter >= bench.warmup) {
+                frame_times_ms.push_back(frame_ms);
+                overlay_times_ms.push_back(overlay_ms);
+                gpu_wait_ms.push_back(gpu_ms);
+            }
+            ++bench_frame_counter;
+
+            if (bench_frame_counter >= bench_total) {
+                running = false; // exit after N measured frames
+            }
+        }
+    }
+
+    // Write benchmark results and exit.
+    if (bench.enabled && !frame_times_ms.empty()) {
+        double frame_sum = 0, frame_max = 0, frame_min = 1e9;
+        for (double v : frame_times_ms) {
+            frame_sum += v;
+            frame_max  = std::max(frame_max, v);
+            frame_min  = std::min(frame_min, v);
+        }
+        double overlay_sum = 0, overlay_max = 0, overlay_min = 1e9;
+        for (double v : overlay_times_ms) {
+            overlay_sum += v;
+            overlay_max  = std::max(overlay_max, v);
+            overlay_min  = std::min(overlay_min, v);
+        }
+        double gpu_sum = 0, gpu_max = 0, gpu_min = 1e9;
+        for (double v : gpu_wait_ms) {
+            gpu_sum += v;
+            gpu_max  = std::max(gpu_max, v);
+            gpu_min  = std::min(gpu_min, v);
+        }
+        const int n = static_cast<int>(frame_times_ms.size());
+        write_benchmark_results(exe_dir(), n, bench.warmup, bench.blur,
+                                frame_sum / n, frame_max, frame_min,
+                                overlay_sum / n, overlay_max, overlay_min,
+                                gpu_sum / n, gpu_max, gpu_min);
+
+        // Teardown then exit — skip the interactive teardown chain below.
+        auto teardown =
+            begin_teardown(dx, dx.fence_val, wasapi, mgr, hwnd, wc.lpszClassName, wc.hInstance);
+        std::move(teardown).shutdown_overlay().stop_wasapi().shutdown_source().destroy_dx_and_window();
+        frdx::log::info("[bench] done, exiting");
+        frdx::log::shutdown();
+        return 0;
     }
 
     // ÔöÇÔöÇ 7. Teardown (order enforced at compile time by typestate guard) ÔöÇÔöÇ

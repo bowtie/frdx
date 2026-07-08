@@ -75,10 +75,17 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
         std::memcpy(fresh, src.data(), src.size());
         fresh[src.size()] = std::byte{0};
 
+        // Capture the old heap pointer before swapping (only valid when
+        // the old slot was heap-allocated, i.e. cap > kSsoCap).
+        std::byte* old_heap = nullptr;
+        if (hdr.cap > kSsoCap) {
+            std::memcpy(&old_heap, hdr.sso_buf, sizeof(old_heap));
+        }
+
         // Switch the slot atomically-enough: pointer first, then size, then
         // cap. A racing reader picks up either the old (still-valid) buffer
         // or the new one; never a mismatched (ptr, size, cap) trio that
-        // points past the end. The old buffer leaks deliberately.
+        // points past the end.
         if (!            seh_call([&] {
                 std::memcpy(target, &fresh, sizeof(fresh));
                 std::memset(target + sizeof(fresh), 0, 16 - sizeof(fresh));
@@ -87,7 +94,17 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
             })) {
             return false; // unique_virtual destructor calls VirtualFree
         }
-        mem.release(); // Ownership transferred to swapped-in slot (intentionally leaked)
+        mem.release(); // Ownership transferred to swapped-in slot
+
+        // Retire the old buffer: free the previous retired buffer (if any)
+        // and take ownership of the old heap pointer. This limits the leak
+        // to at most one buffer instead of unbounded growth. Safe because
+        // metadata updates are infrequent (song changes) — any racing
+        // reader has long since completed by the next swap.
+        if (old_heap) {
+            static unique_virtual retired; // freed on next allocate_and_swap
+            retired.reset(old_heap);
+        }
         return true;
     };
 

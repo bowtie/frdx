@@ -439,6 +439,8 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
     std::lock_guard lk{g_tex_mutex};
     if (g_streamer_mode.empty()) return false;
 
+    HANDLE event = nullptr; // declared outside __try so __except can clean it up
+
     __try {
         // Single square variant — the source payload.
         const auto& variant = variants[0];
@@ -568,18 +570,25 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
                                          IID_PPV_ARGS(pFence.put())))) {
             return false;
         }
-        HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event) return false;
         pQueue->Signal(pFence.get(), 1);
         pFence->SetEventOnCompletion(1, event);
-        WaitForSingleObject(event, 5000);
+        DWORD waitResult = WaitForSingleObject(event, 5000);
         CloseHandle(event);
+        event = nullptr;
+
+        if (waitResult != WAIT_OBJECT_0) {
+            log::error("[texinject] fence wait timeout or failed ({})", waitResult);
+            return false;
+        }
 
         TEX_TRACE_OP(0, nullptr); // idle
         log::info("[texinject] injected BC7 into {} texture(s) (1 variant {}x{})",
                   injected_count, variant.width, variant.height);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (event) CloseHandle(event);
         const DWORD code = GetExceptionCode();
         const int op = g_last_op.load(std::memory_order_acquire);
         const uint64_t res = g_last_op_resource.load(std::memory_order_acquire);

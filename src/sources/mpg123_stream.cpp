@@ -6,11 +6,8 @@
 #include <windows.h>
 #include <winhttp.h>
 
-#include <atomic>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <string_view>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -215,6 +212,10 @@ Mpg123Stream::create(const std::string& url, void* winhttp_session) {
 
     stream->h_connect_ = connect;
     stream->h_request_ = request;
+    // Store the session so the destructor can close it. Only store when
+    // we created a local session (no shared session provided); shared
+    // sessions are owned by the caller.
+    if (!winhttp_session) stream->h_session_ = session;
     stream->raw_buf_.resize(64 * 1024); // 64KB read buffer
 
     log::info("[mpg123] stream connected: {}", url);
@@ -228,6 +229,7 @@ Mpg123Stream::~Mpg123Stream() {
     }
     if (h_request_)  WinHttpCloseHandle(static_cast<HINTERNET>(h_request_));
     if (h_connect_)  WinHttpCloseHandle(static_cast<HINTERNET>(h_connect_));
+    if (h_session_)  WinHttpCloseHandle(static_cast<HINTERNET>(h_session_));
 }
 
 std::size_t Mpg123Stream::read_pcm(std::span<std::byte> out, bool& ended) {

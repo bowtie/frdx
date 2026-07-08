@@ -12,7 +12,6 @@
 namespace frdx::sources {
 
 enum class Mpg123StreamError {
-    dll_not_found,
     mpg123_init_failed,
     handle_creation_failed,
     open_feed_failed,
@@ -75,6 +74,7 @@ private:
     void* mh_ = nullptr;
 
     // WinHTTP handles (opaque HINTERNET)
+    void* h_session_  = nullptr;
     void* h_connect_ = nullptr;
     void* h_request_  = nullptr;
 

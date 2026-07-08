@@ -3,6 +3,7 @@
 // never blocked on FMOD discovery or HTTP startup.
 
 #include <frdx/platform/windows/win32_handle.hpp>
+#include <frdx/d3d12_debug.hpp>
 #include <frdx/fastboot.hpp>
 #include <frdx/log.hpp>
 
@@ -158,6 +159,9 @@ DWORD WINAPI bridge_thread(LPVOID self) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        // Enable the D3D12 debug layer + DRED before the game creates its
+        // device.  No-op unless FRDX_DX12_DEBUG=1 is set in the environment.
+        frdx::d3d12_debug::enable_debug_layer_if_requested();
         // Install crash handler early so we catch crashes during init.
         AddVectoredExceptionHandler(0, crash_handler);
         // FastBoot must start before the game's startup sequence begins —

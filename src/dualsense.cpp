@@ -791,6 +791,8 @@ bool wait_overlapped(HANDLE h, OVERLAPPED& ov, DWORD timeout_ms) {
     const DWORD wait = WaitForSingleObject(ov.hEvent, timeout_ms);
     if (wait != WAIT_OBJECT_0) {
         CancelIo(h);
+        DWORD transferred = 0;
+        GetOverlappedResult(h, &ov, &transferred, TRUE); // drain cancellation
         return false;
     }
     DWORD transferred = 0;
@@ -821,6 +823,8 @@ bool read_exact_with_timeout(HANDLE pipe, void* data, DWORD bytes, DWORD timeout
     const DWORD wait = WaitForSingleObject(ov.hEvent, timeout_ms);
     if (wait != WAIT_OBJECT_0) {
         CancelIo(pipe);
+        DWORD transferred = 0;
+        GetOverlappedResult(pipe, &ov, &transferred, TRUE); // drain cancellation
         return false;
     }
     return GetOverlappedResult(pipe, &ov, &got, FALSE) && got == bytes;
@@ -838,6 +842,8 @@ bool write_exact_with_timeout(HANDLE pipe, const void* data, DWORD bytes, DWORD 
     const DWORD wait = WaitForSingleObject(ov.hEvent, timeout_ms);
     if (wait != WAIT_OBJECT_0) {
         CancelIo(pipe);
+        DWORD transferred = 0;
+        GetOverlappedResult(pipe, &ov, &transferred, TRUE); // drain cancellation
         return false;
     }
     return GetOverlappedResult(pipe, &ov, &written, FALSE) && written == bytes;

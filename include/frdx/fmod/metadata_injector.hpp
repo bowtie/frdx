@@ -24,8 +24,9 @@ enum class MetadataInjectorError { no_target, write_failed };
 // size and capacity. When the new content fits, we overwrite in place;
 // otherwise we VirtualAlloc a fresh buffer and switch the slot to it.
 // VirtualAlloc (not free()) is deliberate: we don't own the original
-// allocator and freeing through the wrong one would corrupt the heap. The
-// leak is one buffer per outgrown overwrite.
+// allocator and freeing through the wrong one would corrupt the heap.
+// The old buffer is retired and freed on the next swap, so at most one
+// buffer is ever leaked at a time.
 class MetadataInjector {
 public:
     MetadataInjector() = default;

@@ -9,7 +9,6 @@
 
 #include <atomic>
 #include <cstdio>
-#include <cstring>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -73,44 +72,6 @@ void kill_process_tree(DWORD pid) {
     }
     HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
     if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-}
-
-void proxy_thread_fn(std::wstring pipe_name, HANDLE src_stdout, std::atomic<bool>& stopping) {
-    // Create the named pipe server and pump stdout → pipe
-    HANDLE pipe = CreateNamedPipeW(pipe_name.c_str(),
-        PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE, 1,
-        65536, 65536, 0, nullptr);
-    if (pipe == INVALID_HANDLE_VALUE) return;
-
-    // Wait for client connection (5s timeout)
-    ConnectNamedPipe(pipe, nullptr);
-    // Check if client already connected (ERROR_PIPE_CONNECTED)
-    if (GetLastError() == ERROR_PIPE_CONNECTED) {
-        // already connected — fine
-    }
-
-    char buf[8192];
-    while (!stopping.load()) {
-        DWORD avail = 0;
-        if (!PeekNamedPipe(src_stdout, nullptr, 0, nullptr, &avail, nullptr) || avail == 0) {
-            // Check if process exited
-            DWORD exit_code = 0;
-            if (!GetExitCodeProcess(src_stdout, &exit_code) || exit_code != STILL_ACTIVE)
-                break;
-            Sleep(10);
-            continue;
-        }
-        DWORD read = 0;
-        if (!ReadFile(src_stdout, buf, sizeof(buf), &read, nullptr) || read == 0)
-            break;
-        DWORD written = 0;
-        if (!WriteFile(pipe, buf, read, &written, nullptr))
-            break;
-    }
-    FlushFileBuffers(pipe);
-    DisconnectNamedPipe(pipe);
-    CloseHandle(pipe);
 }
 
 // ── HTTP download ──
@@ -261,90 +222,6 @@ bool http_download(std::string_view url, std::string_view dest_path) {
 
 // ── Request handlers ──
 
-std::string handle_spawn(const nlohmann::json& req, std::string_view token) {
-    auto chain = req.value("chain", std::vector<std::string>{});
-    auto id_hint = req.value("id_hint", std::string{});
-    auto side_cmd = req.value("side_cmd", std::string{});
-    if (chain.empty()) return R"({"ok":false,"error":"empty chain"})";
-
-    Pipeline pipe;
-    pipe.id = g_next_id.fetch_add(1);
-    pipe.job = create_kill_on_close_job();
-
-    // Create PCM data pipe
-    pipe.pcm_pipe_name = L"\\\\.\\pipe\\frdx-helper-";
-    for (char c : token) pipe.pcm_pipe_name.push_back(static_cast<wchar_t>(c));
-    pipe.pcm_pipe_name += L"-" + std::to_wstring(pipe.id) + L"-pcm";
-
-    // Build the process chain
-    std::vector<HANDLE> stdout_handles;
-    HANDLE prev_stdout = nullptr;
-
-    for (size_t i = 0; i < chain.size(); ++i) {
-        SECURITY_ATTRIBUTES sa{};
-        sa.nLength = sizeof(sa);
-        sa.bInheritHandle = TRUE;
-
-        HANDLE child_stdout = nullptr;
-        if (i < chain.size() - 1) {
-            // Pipe to next stage
-            HANDLE read_end = nullptr;
-            CreatePipe(&read_end, &child_stdout, &sa, 0);
-            // read_end goes to next stage's stdin
-            prev_stdout = read_end;
-        } else {
-            // Last stage: stdout goes to our proxy pipe
-            HANDLE read_end = nullptr;
-            CreatePipe(&read_end, &child_stdout, &sa, 0);
-            // Start proxy thread to pump read_end → named pipe
-            pipe.pcm_pipe = nullptr; // proxy creates it
-            pipe.stopping = std::make_unique<std::atomic<bool>>(false);
-            pipe.proxy = std::thread(proxy_thread_fn, pipe.pcm_pipe_name, read_end, std::ref(*pipe.stopping));
-            // We don't need read_end in the child
-            SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
-        }
-
-        // Create process
-        STARTUPINFOW si{};
-        si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdInput = (i > 0) ? stdout_handles[i - 1] : GetStdHandle(STD_INPUT_HANDLE);
-        si.hStdOutput = child_stdout;
-        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-
-        // Actually we need to handle the pipe chain more carefully
-        // For simplicity, let's use the approach from fh6: each command's stdout
-        // feeds the next command's stdin via anonymous pipes, and the final
-        // stage's stdout is proxied to the named pipe.
-        std::wstring cmd = subprocess::widen(chain[i]);
-        PROCESS_INFORMATION pi{};
-        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                           CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-            return R"({"ok":false,"error":"spawn failed for stage )" + std::to_string(i) + R"("})";
-        }
-        pipe.procs.push_back(pi.hProcess);
-        if (child_stdout) CloseHandle(child_stdout); // parent doesn't need it
-        CloseHandle(pi.hThread);
-        // For intermediate stages, the read_end becomes the next stdin
-        if (i < chain.size() - 1) {
-            stdout_handles.push_back(prev_stdout);
-        }
-    }
-
-    int id = pipe.id;
-    std::wstring pcm_pipe_name_copy = pipe.pcm_pipe_name;
-    {
-        std::lock_guard lk{g_pipelines_mu};
-        g_pipelines.push_back(std::move(pipe));
-    }
-
-    nlohmann::json resp;
-    resp["ok"] = true;
-    resp["id"] = id;
-    resp["pcm_pipe"] = subprocess::narrow(pcm_pipe_name_copy);
-    return resp.dump();
-}
-
 std::string handle_kill(const nlohmann::json& req) {
     int id = req.value("id", -1);
     if (id < 0) return R"({"ok":false,"error":"invalid id"})";
@@ -454,8 +331,6 @@ void handle_connection(HANDLE pipe, std::string_view token) {
             CloseHandle(pipe);
             if (g_shutdown_event) SetEvent(g_shutdown_event);
             return;
-        } else if (op == "spawn") {
-            response = handle_spawn(req, token);
         } else if (op == "kill") {
             response = handle_kill(req);
         } else if (op == "run") {

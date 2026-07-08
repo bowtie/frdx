@@ -323,6 +323,10 @@ struct ExternalCtx {
     dualsense::DualSenseService* dualsense = nullptr;
     std::function<void()> flush_audio;
     bool is_sandbox                        = false;
+    // Per-frame cached config — refreshed once at the top of
+    // render_overlay_frame so hot-path callers avoid repeated lock+copy.
+    OverlayConfig frame_overlay_cfg{};
+    AudioConfig   frame_audio_cfg{};
 };
 extern ExternalCtx g_ctx;
 

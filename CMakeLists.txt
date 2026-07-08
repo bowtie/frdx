@@ -12,6 +12,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# ── ASan/UBSan: instrument the sandbox with clang-cl sanitizers ─────────
+# Enable with: cmake -DFRDX_ASAN=ON -DCMAKE_BUILD_TYPE=Debug ...
+# Requires clang-cl (the default toolchain).  Catches runtime OOB / UB in
+# the DSP callback, ring buffer, and mpg123 decode paths.
+option(FRDX_ASAN "Enable AddressSanitizer + UBSan on frdx_sandbox (requires clang-cl)" OFF)
+if(FRDX_ASAN AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "FRDX_ASAN requires clang-cl (current compiler: ${CMAKE_CXX_COMPILER_ID})")
+endif()
+
 if(MSVC)
     add_compile_options(/W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc /wd4324)
     add_compile_options("$<$<CONFIG:Release>:/MD;/O2;/Gy;/Gw>")
@@ -28,8 +37,34 @@ endif()
 add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
                         _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 
+# ── mpg123: fetch source and build as static library ────────────────────
+# Eliminates the runtime DLL dependency by compiling libmpg123 directly
+# into version.dll and frdx_sandbox.exe.
+include(FetchContent)
+FetchContent_Declare(
+    mpg123
+    GIT_REPOSITORY https://github.com/madebr/mpg123.git
+    GIT_TAG        master
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  ports/cmake
+)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
+set(BUILD_LIBOUT123 OFF CACHE BOOL "Build libout123" FORCE)
+FetchContent_MakeAvailable(mpg123)
+# Suppress warnings in third-party C code.
+if(TARGET libmpg123)
+    target_compile_options(libmpg123 PRIVATE /W0)
+endif()
+if(TARGET compat)
+    target_compile_options(compat PRIVATE /W0)
+endif()
+if(TARGET libsyn123)
+    target_compile_options(libsyn123 PRIVATE /W0)
+endif()
+
 add_library(version SHARED
     src/proxy/dll_main.cpp
+    src/d3d12_debug.cpp
     src/fastboot.cpp
     src/bridge.cpp
     src/log.cpp
@@ -100,13 +135,11 @@ target_include_directories(version PRIVATE
     third_party/imanim
     third_party/hidapi
     third_party/hidapi/hidapi
-    third_party/mpg123/include
+    ${mpg123_SOURCE_DIR}/src/include
 )
 
-target_link_directories(version PRIVATE third_party/mpg123/lib)
-
 target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi cfgmgr32
-                                      user32 dbghelp libmpg123-0)
+                                      user32 dbghelp libmpg123)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version
@@ -128,13 +161,6 @@ if(FRDX_AUTO_DEPLOY)
                 -DTO="${FRDX_GAME_DIR}/version.dll"
                 -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
         COMMENT "Deploying version.dll → ${FRDX_GAME_DIR}"
-    )
-    add_custom_command(TARGET version POST_BUILD
-        COMMAND ${CMAKE_COMMAND}
-                -DFROM="${CMAKE_SOURCE_DIR}/third_party/mpg123/lib/libmpg123-0.dll"
-                -DTO="${FRDX_GAME_DIR}/libmpg123-0.dll"
-                -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
-        COMMENT "Deploying libmpg123-0.dll → ${FRDX_GAME_DIR}"
     )
 endif()
 
@@ -227,6 +253,7 @@ set_tests_properties(dualsense_settings_coverage_test PROPERTIES
 # so the real draw_imgui_ui() runs identically.
 add_executable(frdx_sandbox
     src/sandbox_main.cpp
+    src/d3d12_debug.cpp
     src/fastboot.cpp
     src/bridge.cpp
     src/log.cpp
@@ -301,24 +328,59 @@ target_include_directories(frdx_sandbox PRIVATE
     third_party/imanim
     third_party/hidapi
     third_party/hidapi/hidapi
-    third_party/mpg123/include
+    ${mpg123_SOURCE_DIR}/src/include
 )
 
-target_link_directories(frdx_sandbox PRIVATE third_party/mpg123/lib)
-
 target_link_libraries(frdx_sandbox PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi
-                                           cfgmgr32 user32 dbghelp libmpg123-0)
+                                           cfgmgr32 user32 dbghelp libmpg123)
 
 set_target_properties(frdx_sandbox PROPERTIES
     OUTPUT_NAME frdx_sandbox
     WIN32_EXECUTABLE TRUE
 )
 
-# Copy libmpg123-0.dll next to the sandbox exe so it can find it at runtime.
-add_custom_command(TARGET frdx_sandbox POST_BUILD
-    COMMAND ${CMAKE_COMMAND}
-            -DFROM="${CMAKE_SOURCE_DIR}/third_party/mpg123/lib/libmpg123-0.dll"
-            -DTO="$<TARGET_FILE_DIR:frdx_sandbox>/libmpg123-0.dll"
-            -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
-    COMMENT "Copying libmpg123-0.dll next to frdx_sandbox.exe"
-)
+# Apply ASan/UBSan to the sandbox target only.  The main version.dll is
+# injected into the game process — instrumenting it would require the host
+# to also be ASan-aware.  The sandbox runs the same DSP/ring-buffer code
+# as a standalone EXE, so it catches the same bugs without that constraint.
+if(FRDX_ASAN)
+    target_compile_options(frdx_sandbox PRIVATE
+        -fsanitize=address,undefined
+        /Oy-  # keep frame pointers for readable ASan stack traces
+        -O1   # enough optimization to avoid false positives, not enough to inline them away
+    )
+    # clang-cl ASan requires the release CRT (not /MDd or /MTd).
+    # /MT overrides the /MDd set by the global Debug config (last-wins).
+    target_compile_options(frdx_sandbox PRIVATE /MT)
+
+    # lld-link doesn't auto-link the sanitizer runtimes the way clang-cl
+    # does when used as a linker driver.  Detect the clang resource dir and
+    # explicitly link the ASan + UBSan runtime libraries.
+    execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} /clang:-print-resource-dir
+        OUTPUT_VARIABLE _clang_resource_dir
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_clang_resource_dir)
+        set(_clang_rt_lib_dir "${_clang_resource_dir}/lib/windows")
+        target_link_directories(frdx_sandbox PRIVATE "${_clang_rt_lib_dir}")
+        # Dynamic ASan: the DLL is copied next to the exe at build time.
+        # The thunk redirects CRT functions to the ASan DLL when using /MT.
+        target_link_libraries(frdx_sandbox PRIVATE
+            clang_rt.asan_dynamic-x86_64
+            clang_rt.asan_dynamic_runtime_thunk-x86_64
+            clang_rt.ubsan_standalone-x86_64
+            clang_rt.ubsan_standalone_cxx-x86_64
+        )
+        add_custom_command(TARGET frdx_sandbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                    -DFROM="${_clang_rt_lib_dir}/clang_rt.asan_dynamic-x86_64.dll"
+                    -DTO="$<TARGET_FILE_DIR:frdx_sandbox>/clang_rt.asan_dynamic-x86_64.dll"
+                    -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
+            COMMENT "Copying ASan runtime DLL next to frdx_sandbox.exe"
+        )
+    else()
+        message(FATAL_ERROR "FRDX_ASAN: could not detect clang resource dir")
+    endif()
+endif()

@@ -155,31 +155,6 @@ std::optional<std::string> WorkerClient::run(std::string_view cmd, bool capture_
     return std::nullopt;
 }
 
-std::optional<WorkerClient::SpawnResult>
-WorkerClient::spawn(std::string_view id_hint,
-                    const std::vector<std::string>& chain,
-                    std::string_view side_cmd) {
-    nlohmann::json j;
-    j["op"] = "spawn";
-    j["id_hint"] = id_hint;
-    j["chain"] = chain;
-    if (!side_cmd.empty()) j["side_cmd"] = side_cmd;
-    auto resp = request(j.dump());
-    if (resp.empty()) return std::nullopt;
-    try {
-        auto r = nlohmann::json::parse(resp);
-        if (r.value("ok", false)) {
-            SpawnResult sr;
-            sr.id = r.value("id", -1);
-            sr.pcm_pipe = subprocess::widen(r.value("pcm_pipe", ""));
-            sr.meta_pipe = subprocess::widen(r.value("meta_pipe", ""));
-            return sr;
-        }
-        log::warn("[worker] spawn failed: {}", r.value("error", "unknown"));
-    } catch (...) {}
-    return std::nullopt;
-}
-
 bool WorkerClient::kill(int id) noexcept {
     nlohmann::json j;
     j["op"] = "kill";

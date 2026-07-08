@@ -49,18 +49,6 @@ public:
     // Run a command and capture its stdout. Returns the output or nullopt on failure.
     std::optional<std::string> run(std::string_view cmd, bool capture_stderr = false);
 
-    // Spawn a pipeline of chained commands (each stdout → next stdin).
-    // Returns the pipeline id on success, or nullopt on failure.
-    // `pcm_pipe` and `meta_pipe` are named pipe paths the DLL reads from.
-    struct SpawnResult {
-        int id = -1;
-        std::wstring pcm_pipe;
-        std::wstring meta_pipe;
-    };
-    std::optional<SpawnResult> spawn(std::string_view id_hint,
-                                     const std::vector<std::string>& chain,
-                                     std::string_view side_cmd = {});
-
     // Kill a pipeline by id.
     bool kill(int id) noexcept;
 
