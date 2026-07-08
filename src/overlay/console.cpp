@@ -75,20 +75,14 @@ void draw_console_window() {
     const ImVec2 vp_size = viewport->WorkSize;
     const ImVec2 size(std::min(760.0f * ui_s, vp_size.x - 32.0f * ui_s),
                       std::min(360.0f * ui_s, vp_size.y - 80.0f * ui_s));
-    // Track the console's last known position to detect when it's off-screen
-    // (e.g. after resolution change shrank the viewport).  If so, force
-    // repositioning to the bottom-right corner.
-    static ImVec2 s_last_pos(1e9f, 1e9f);
-    const bool needs_reposition =
-        s_last_pos.x + 50.0f > vp_pos.x + vp_size.x ||
-        s_last_pos.y + 50.0f > vp_pos.y + vp_size.y ||
-        s_last_pos.x < vp_pos.x - 50.0f ||
-        s_last_pos.y < vp_pos.y - 50.0f;
+    // Always reposition the console to the bottom-right corner.  The
+    // console is anchored, not user-draggable, so there's no reason to
+    // preserve position across frames.  This also ensures it repositions
+    // correctly after resolution changes.
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_size.x - 16.0f * ui_s,
                                    vp_pos.y + vp_size.y - 16.0f * ui_s),
-                            needs_reposition ? ImGuiCond_Always : ImGuiCond_FirstUseEver,
-                            ImVec2(1.0f, 1.0f));
-    ImGui::SetNextWindowSize(size, ImGuiCond_FirstUseEver);
+                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
     // Size floor so the panel can't be collapsed past legibility.
     // 480 px is the WRAP-THRESHOLD width: above it the filter row stays
     // single-line for short Subsystems labels; below it ImGui wraps to
@@ -112,7 +106,6 @@ void draw_console_window() {
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, eased);
     bool local_open = true;
     const bool window_expanded = ImGui::Begin("FRDX Console##frdx_console", &local_open, flags);
-    s_last_pos = ImGui::GetWindowPos();
     if (window_expanded) {
 
         // ── Refresh from the global logger (with optional dedup). ────
