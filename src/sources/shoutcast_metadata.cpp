@@ -816,6 +816,7 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
     }
 
     while (!stop.stop_requested()) {
+     try {
         auto conn = winhttp_connect(winhttp_session_, *parsed);
         if (!conn) {
             std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -882,9 +883,26 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
             break;
         }
 
+        // Cap metaint to a sane maximum.  A malicious or buggy server can send
+        // an arbitrarily large value (up to LONG_MAX via wcstol), causing
+        // icy_buf_.resize() to attempt a multi-GB allocation and throw
+        // std::bad_alloc, which the poller thread does not catch -> std::terminate.
+        // 1 MB is far above any legitimate ICY metadata interval (typically
+        // 8-256 KB); larger values are treated as the cap.
+        constexpr int kMaxMetaint = 1 << 20; // 1 MB
+        if (metaint > kMaxMetaint) {
+            log::warn("[shoutcast] icy: server sent metaint={} (capped to {})", metaint, kMaxMetaint);
+            metaint = kMaxMetaint;
+        }
+
         log::info("[shoutcast] icy: connected, metaint={}", metaint);
 
-        std::size_t buf_needed = static_cast<std::size_t>(metaint) + 1 + 4096;
+        // The buffer holds either metaint audio bytes OR up to 4097 metadata
+        // bytes (1 length byte + 4096 payload), never both simultaneously
+        // (metadata overwrites the start of the audio region).  So we only
+        // need max(metaint, 4097) bytes, not metaint + 4097.
+        std::size_t buf_needed = static_cast<std::size_t>(
+            std::max(metaint, static_cast<int>(4097)));
         if (icy_buf_.size() < buf_needed) icy_buf_.resize(buf_needed);
         char* buf = icy_buf_.data();
         bool first_title = true;
@@ -961,6 +979,13 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
         if (!stop.stop_requested()) {
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
+     } catch (const std::bad_alloc& e) {
+         log::warn("[shoutcast] icy: allocation failure ({}), retrying in 5s", e.what());
+         std::this_thread::sleep_for(std::chrono::seconds(5));
+     } catch (const std::exception& e) {
+         log::warn("[shoutcast] icy: exception ({}), retrying in 5s", e.what());
+         std::this_thread::sleep_for(std::chrono::seconds(5));
+     }
     }
 }
 
