@@ -907,6 +907,20 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
+        // Apply a pending font scale reload from the Debug tab (requested
+        // mid-frame last frame).  Must happen before ImGui_ImplDX12_NewFrame
+        // so the DX12 backend rebuilds its font pipeline with the new atlas.
+        if (g_ui.pending_ui_scale >= 0.0f) {
+            g_ui.ui_scale = g_ui.pending_ui_scale;
+            g_ui.pending_ui_scale = -1.0f;
+            auto& io = ImGui::GetIO();
+            io.Fonts->Clear();
+            load_overlay_font(g_ui.ui_scale);
+            io.Fonts->Build();
+            ImGui_ImplDX12_InvalidateDeviceObjects();
+            re_log::info("[overlay] applied pending font scale: {:.2f}", g_ui.ui_scale);
+        }
+
         // Render custom dashboard panel UI
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();

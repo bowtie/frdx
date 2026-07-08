@@ -186,6 +186,9 @@ struct UiState {
     float ui_scale = 1.0f;
     // Debug override: 0 = auto (monitor-based), 1 = force 1x, 2 = force 2x.
     int ui_scale_override = 0;
+    // Pending font reload requested mid-frame (applied next frame).
+    // -1.0f = no pending reload.
+    float pending_ui_scale = -1.0f;
     std::chrono::steady_clock::time_point cursor_hidden_candidate_since{}, cursor_hidden_since{};
     float interactive_alpha = 1.0f, interactive_draw_alpha = 1.0f;
     bool cursor_child_close_elapsed = false, cursor_hide_delay_elapsed = false;

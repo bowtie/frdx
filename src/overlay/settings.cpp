@@ -399,12 +399,10 @@ void draw_debug_tab() {
         float scale = g_ui.ui_scale_override > 0
                           ? static_cast<float>(g_ui.ui_scale_override)
                           : compute_ui_scale_for_current_monitor();
-        g_ui.ui_scale = scale;
-        auto& io = ImGui::GetIO();
-        io.Fonts->Clear();
-        load_overlay_font(scale);
-        io.Fonts->Build();
-        ImGui_ImplDX12_InvalidateDeviceObjects();
+        // Don't reload the font mid-frame — ImGui is actively using it.
+        // Store the requested scale and let the render loop apply it
+        // next frame (before ImGui::NewFrame).
+        g_ui.pending_ui_scale = scale;
     }
 }
 
