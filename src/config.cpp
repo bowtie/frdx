@@ -23,11 +23,6 @@ template <class T> T pick(const toml::value& tbl, const char* key, T fallback) {
     }
 }
 
-std::filesystem::path pick_path(const toml::value& tbl, const char* key) {
-    auto s = pick<std::string>(tbl, key, "");
-    return s.empty() ? std::filesystem::path{} : std::filesystem::path{s};
-}
-
 const toml::value& section(const toml::value& root, const char* key) {
     static const toml::value empty{toml::table{}};
     try {
@@ -74,7 +69,6 @@ Config load_config(const std::filesystem::path& path) {
 
     const auto& sc                = section(root, "shoutcast");
     cfg.shoutcast.default_url     = pick<std::string>(sc, "default_url", "");
-    cfg.shoutcast.ffmpeg_path     = pick_path(sc, "ffmpeg_path");
     cfg.shoutcast.last_station_id = pick<std::string>(sc, "last_station_id", "");
     cfg.shoutcast.last_stream_id  = pick<std::string>(sc, "last_stream_id", "");
     try {
@@ -344,9 +338,6 @@ struct Emitter {
         out += text;
         out += '\n';
     }
-    void kv_path(std::string_view key, const std::filesystem::path& p) {
-        kv(key, p.empty() ? std::string{} : p.string());
-    }
     void kv_strs(std::string_view key, const std::vector<std::string>& v) {
         out += key;
         out += " = [";
@@ -369,7 +360,6 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
 
     e.header("shoutcast");
     e.kv("default_url", cfg.shoutcast.default_url);
-    e.kv_path("ffmpeg_path", cfg.shoutcast.ffmpeg_path);
     if (!cfg.shoutcast.last_station_id.empty())
         e.kv("last_station_id", cfg.shoutcast.last_station_id);
     if (!cfg.shoutcast.last_stream_id.empty()) e.kv("last_stream_id", cfg.shoutcast.last_stream_id);

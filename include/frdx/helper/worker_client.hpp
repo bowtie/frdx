@@ -2,7 +2,7 @@
 
 // Client-side interface for talking to frdx-helper.exe's worker mode.
 // The helper runs outside the game's multi-GB address space so that
-// CreateProcess calls (ffmpeg, downloads, texconv) don't fork the
+// CreateProcess calls (downloads, texconv) don't fork the
 // entire game process — critical for Wine/Proton performance.
 
 #include <cstdint>
@@ -45,9 +45,6 @@ public:
     bool is_running() const noexcept { return process_ != nullptr || external_; }
 
     // ── Worker operations ──
-
-    // Run a command and capture its stdout. Returns the output or nullopt on failure.
-    std::optional<std::string> run(std::string_view cmd, bool capture_stderr = false);
 
     // Kill a pipeline by id.
     bool kill(int id) noexcept;

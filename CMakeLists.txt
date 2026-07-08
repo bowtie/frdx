@@ -98,7 +98,6 @@ add_library(version SHARED
     src/sources/shoutcast_metadata.cpp
     src/sources/mpg123_stream.cpp
     src/helper/worker_client.cpp
-    src/dependency_manager.cpp
     src/texture_injector.cpp
     third_party/hidapi/windows/hid.c
 
@@ -284,7 +283,6 @@ add_executable(frdx_sandbox
     src/sources/shoutcast_metadata.cpp
     src/sources/mpg123_stream.cpp
     src/helper/worker_client.cpp
-    src/dependency_manager.cpp
     src/texture_injector.cpp
     third_party/hidapi/windows/hid.c
 

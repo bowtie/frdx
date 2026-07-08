@@ -139,22 +139,6 @@ std::string WorkerClient::request(std::string_view json_msg) {
     return resp;
 }
 
-std::optional<std::string> WorkerClient::run(std::string_view cmd, bool capture_stderr) {
-    nlohmann::json j;
-    j["op"] = "run";
-    j["cmd"] = cmd;
-    j["capture_stderr"] = capture_stderr;
-    auto resp = request(j.dump());
-    if (resp.empty()) return std::nullopt;
-    try {
-        auto r = nlohmann::json::parse(resp);
-        if (r.value("ok", false))
-            return r.value("output", std::string{});
-        log::warn("[worker] run failed: {}", r.value("error", "unknown"));
-    } catch (...) {}
-    return std::nullopt;
-}
-
 bool WorkerClient::kill(int id) noexcept {
     nlohmann::json j;
     j["op"] = "kill";

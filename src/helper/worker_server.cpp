@@ -243,51 +243,6 @@ std::string handle_kill(const nlohmann::json& req) {
     return R"({"ok":false,"error":"not found"})";
 }
 
-std::string handle_run(const nlohmann::json& req) {
-    auto cmd = req.value("cmd", std::string{});
-    bool capture_stderr = req.value("capture_stderr", false);
-    if (cmd.empty()) return R"({"ok":false,"error":"empty cmd"})";
-
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE stdout_read = nullptr, stdout_write = nullptr;
-    CreatePipe(&stdout_read, &stdout_write, &sa, 0);
-    SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = stdout_write;
-    if (capture_stderr) si.hStdError = stdout_write;
-
-    std::wstring wcmd = subprocess::widen(cmd);
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(stdout_read);
-        CloseHandle(stdout_write);
-        return R"({"ok":false,"error":"spawn failed"})";
-    }
-    CloseHandle(stdout_write);
-    WaitForSingleObject(pi.hProcess, 30000); // 30s timeout
-
-    std::string output;
-    char buf[4096];
-    DWORD read = 0;
-    while (ReadFile(stdout_read, buf, sizeof(buf), &read, nullptr) && read > 0)
-        output.append(buf, read);
-
-    CloseHandle(stdout_read);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-
-    nlohmann::json resp;
-    resp["ok"] = true;
-    resp["output"] = output;
-    return resp.dump();
-}
-
 std::string handle_download(const nlohmann::json& req) {
     auto url = req.value("url", std::string{});
     auto dest = req.value("dest_path", std::string{});
@@ -332,8 +287,6 @@ void handle_connection(HANDLE pipe, [[maybe_unused]] std::string_view token) {
             return;
         } else if (op == "kill") {
             response = handle_kill(req);
-        } else if (op == "run") {
-            response = handle_run(req);
         } else if (op == "download") {
             response = handle_download(req);
         } else {

@@ -11,7 +11,6 @@
 #include "frdx/fmod/pe_image.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/overlay/overlay.hpp"
-#include "frdx/dependency_manager.hpp"
 #include "frdx/helper/worker_client.hpp"
 #include "frdx/texture_injector.hpp"
 
@@ -207,36 +206,16 @@ void run_bridge(HMODULE self) noexcept {
         }
     }
 
-    // Dependency manager: auto-downloads ffmpeg if missing.
-    // The callback fires after each download completes; we use it to
-    // re-resolve the ffmpeg path into the live shoutcast source.
-    DependencyManager deps{data_dir / "bin", worker.is_running() ? &worker : nullptr};
-
     const std::size_t ring_bytes = static_cast<std::size_t>(cfg.general.ring_buffer_mb) << 20;
     AudioSourceManager mgr{ring_bytes};
     dualsense::DualSenseService dualsense{dualsense_service_config(cfg.dualsense)};
     dualsense.start();
 
-    // Resolve ffmpeg path through the dependency manager before creating
-    // the source. If ffmpeg isn't present yet, the source will use the
-    // PATH fallback and the deps callback will update it after download.
-    auto resolved_cfg = cfg;
-    resolved_cfg.shoutcast.ffmpeg_path =
-        deps.resolve(Tool::ffmpeg, cfg.shoutcast.ffmpeg_path);
-
     // Own the sole audio source and hand a raw pointer to the manager.
-    auto shoutcast = std::make_unique<sources::ShoutcastSource>(resolved_cfg.shoutcast);
+    auto shoutcast = std::make_unique<sources::ShoutcastSource>(cfg.shoutcast);
     shoutcast->set_artwork_lookup_enabled(cfg.overlay.artwork_lookup_enabled);
     shoutcast->set_grace_period_ms(static_cast<int64_t>(cfg.overlay.metadata_grace_period * 1000.0f));
     TextureInjector::instance().set_cache_enabled(cfg.overlay.artwork_cache_enabled);
-
-    // Now start the deps worker — the callback re-resolves ffmpeg and
-    // updates the source's config.
-    deps.start([&shoutcast, &deps, &store]() {
-        auto c = store.snapshot();
-        auto path = deps.resolve(Tool::ffmpeg, c.shoutcast.ffmpeg_path);
-        if (shoutcast) shoutcast->update_ffmpeg_path(path);
-    });
 
     // Initialize texture injector
     TextureInjector::instance().set_worker(worker.is_running() ? &worker : nullptr);

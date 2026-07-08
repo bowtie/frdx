@@ -13,7 +13,6 @@ struct GeneralConfig {
 struct ShoutcastConfig {
     std::string default_url;
     std::vector<std::string> presets;
-    std::filesystem::path ffmpeg_path; // empty = look up on PATH
     std::string last_station_id;
     std::string last_stream_id;
 };

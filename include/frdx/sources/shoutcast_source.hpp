@@ -180,13 +180,6 @@ public:
     void set_artwork_lookup_enabled(bool on) noexcept { artwork_lookup_enabled_.store(on, std::memory_order_release); }
     void set_grace_period_ms(int64_t ms) noexcept { grace_period_ms_.store(ms, std::memory_order_release); }
 
-    // Update the ffmpeg binary path. Takes effect on the next stream
-    // (re)connect. Used by DependencyManager after auto-downloading ffmpeg.
-    void update_ffmpeg_path(const std::filesystem::path& path) noexcept {
-        std::lock_guard lk{mu_};
-        cfg_.ffmpeg_path = path;
-    }
-
     // Set the stream URL and restart playback.
     // Station preset management.
     void load_stations(const std::filesystem::path& path) FRDX_EXCLUDES(mu_);

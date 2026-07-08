@@ -1,16 +1,13 @@
 # Example config, copied to `<game>/mods/frdx/config.toml` on first install.
 # Everything is editable from the in-game overlay; you only need to touch this file
 # if you prefer hand edits. Windows paths should use TOML literal strings
-# (single quotes) so backslashes pass through verbatim:
-#
-#   ffmpeg_path = 'C:\tools\ffmpeg.exe'
+# (single quotes) so backslashes pass through verbatim.
 
 [general]
 ring_buffer_mb    = 4
 
 [shoutcast]
 default_url        = ""                          # auto-connect on startup
-ffmpeg_path        = ""                          # blank = bundled <game>/mods/frdx/ffmpeg/ffmpeg.exe, then PATH
 presets            = []                          # e.g. ["http://server:8000/stream"]
 
 [audio]
