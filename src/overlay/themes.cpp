@@ -266,6 +266,89 @@ void ApplyDeusExGold() {
     style.PopupBorderSize            = 0.0f;
 }
 
+// Catppuccin Mocha — soft dark palette with pastel accents.
+// From https://github.com/catppuccin/catppuccin — adapted from @brenocq's post in #707.
+void ApplyCatppuccinMocha() {
+    ImGui::GetStyle() = ImGuiStyle();
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* c         = style.Colors;
+    // Catppuccin Mocha palette
+    const ImVec4 base       = ImVec4(0.117f, 0.117f, 0.172f, 0.94f); // #1e1e2e (slightly transparent for overlay)
+    const ImVec4 mantle     = ImVec4(0.109f, 0.109f, 0.156f, 1.00f); // #181825
+    const ImVec4 surface0   = ImVec4(0.200f, 0.207f, 0.286f, 1.00f); // #313244
+    const ImVec4 surface1   = ImVec4(0.247f, 0.254f, 0.337f, 1.00f); // #3f4056
+    const ImVec4 surface2   = ImVec4(0.290f, 0.301f, 0.388f, 1.00f); // #4a4d63
+    const ImVec4 overlay0   = ImVec4(0.396f, 0.403f, 0.486f, 1.00f); // #65677c
+    const ImVec4 overlay2   = ImVec4(0.576f, 0.584f, 0.654f, 1.00f); // #9399b2
+    const ImVec4 text       = ImVec4(0.803f, 0.815f, 0.878f, 1.00f); // #cdd6f4
+    const ImVec4 subtext0   = ImVec4(0.639f, 0.658f, 0.764f, 1.00f); // #a3a8c3
+    const ImVec4 mauve      = ImVec4(0.796f, 0.698f, 0.972f, 1.00f); // #cba6f7
+    const ImVec4 peach      = ImVec4(0.980f, 0.709f, 0.572f, 1.00f); // #fab387
+    const ImVec4 green      = ImVec4(0.650f, 0.890f, 0.631f, 1.00f); // #a6e3a1
+    const ImVec4 sapphire   = ImVec4(0.458f, 0.784f, 0.878f, 1.00f); // #74c7ec
+    const ImVec4 blue       = ImVec4(0.533f, 0.698f, 0.976f, 1.00f); // #89b4fa
+    const ImVec4 lavender   = ImVec4(0.709f, 0.764f, 0.980f, 1.00f); // #b4befe
+    c[ImGuiCol_Text]                 = text;
+    c[ImGuiCol_TextDisabled]         = subtext0;
+    c[ImGuiCol_WindowBg]             = base;
+    c[ImGuiCol_ChildBg]              = base;
+    c[ImGuiCol_PopupBg]              = surface0;
+    c[ImGuiCol_Border]               = surface1;
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_FrameBg]              = surface0;
+    c[ImGuiCol_FrameBgHovered]       = surface1;
+    c[ImGuiCol_FrameBgActive]        = surface2;
+    c[ImGuiCol_TitleBg]              = mantle;
+    c[ImGuiCol_TitleBgActive]        = surface0;
+    c[ImGuiCol_TitleBgCollapsed]     = mantle;
+    c[ImGuiCol_MenuBarBg]            = mantle;
+    c[ImGuiCol_ScrollbarBg]          = surface0;
+    c[ImGuiCol_ScrollbarGrab]        = surface2;
+    c[ImGuiCol_ScrollbarGrabHovered] = overlay0;
+    c[ImGuiCol_ScrollbarGrabActive]  = overlay2;
+    c[ImGuiCol_CheckMark]            = green;
+    c[ImGuiCol_SliderGrab]           = sapphire;
+    c[ImGuiCol_SliderGrabActive]     = blue;
+    c[ImGuiCol_Button]               = surface0;
+    c[ImGuiCol_ButtonHovered]        = surface1;
+    c[ImGuiCol_ButtonActive]         = surface2;
+    c[ImGuiCol_Header]               = surface0;
+    c[ImGuiCol_HeaderHovered]        = surface1;
+    c[ImGuiCol_HeaderActive]         = surface2;
+    c[ImGuiCol_Separator]            = surface1;
+    c[ImGuiCol_SeparatorHovered]     = mauve;
+    c[ImGuiCol_SeparatorActive]      = lavender;
+    c[ImGuiCol_ResizeGrip]           = surface1;
+    c[ImGuiCol_ResizeGripHovered]    = mauve;
+    c[ImGuiCol_ResizeGripActive]     = lavender;
+    c[ImGuiCol_Tab]                  = mantle;
+    c[ImGuiCol_TabHovered]           = surface1;
+    c[ImGuiCol_TabActive]            = surface0;
+    c[ImGuiCol_TabUnfocused]         = mantle;
+    c[ImGuiCol_TabUnfocusedActive]   = surface0;
+    c[ImGuiCol_PlotLines]            = sapphire;
+    c[ImGuiCol_PlotLinesHovered]     = blue;
+    c[ImGuiCol_PlotHistogram]        = green;
+    c[ImGuiCol_PlotHistogramHovered] = peach;
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(0.458f, 0.784f, 0.878f, 0.35f);
+    c[ImGuiCol_DragDropTarget]       = mauve;
+    c[ImGuiCol_NavHighlight]         = lavender;
+    c[ImGuiCol_NavWindowingHighlight]= ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]    = ImVec4(0.0f, 0.0f, 0.0f, 0.20f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.0f, 0.0f, 0.0f, 0.35f);
+    style.WindowRounding             = 5.0f;
+    style.FrameRounding              = 5.0f;
+    style.GrabRounding               = 5.0f;
+    style.TabRounding                = 5.0f;
+    style.PopupRounding              = 5.0f;
+    style.ScrollbarRounding          = 5.0f;
+    style.WindowPadding              = ImVec2(10.0f, 10.0f);
+    style.FramePadding               = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing                = ImVec2(8.0f, 6.0f);
+    style.PopupBorderSize            = 0.0f;
+}
+
 void ApplyTokyoNight() {
     ImGui::GetStyle() = ImGuiStyle();
     ImGui::StyleColorsDark();
@@ -343,6 +426,7 @@ void ApplyTheme(int idx) {
         case 2: ApplyGruvboxDark(); break;
         case 3: ApplyDracula(); break;
         case 4: ApplyDeusExGold(); break;
+        case 5: ApplyCatppuccinMocha(); break;
         default: ApplyBessDark(); break;
     }
     // Scale all pixel-based style values by the current UI scale factor.
@@ -359,6 +443,7 @@ int theme_index(std::string_view value) noexcept {
     if (value == "gruvbox_dark") return 2;
     if (value == "dracula") return 3;
     if (value == "deus_ex_gold") return 4;
+    if (value == "catppuccin_mocha") return 5;
     return 0;
 }
 
@@ -368,6 +453,7 @@ const char* theme_value(int idx) noexcept {
         case 2:  return "gruvbox_dark";
         case 3:  return "dracula";
         case 4:  return "deus_ex_gold";
+        case 5:  return "catppuccin_mocha";
         default: return "bess_dark";
     }
 }
