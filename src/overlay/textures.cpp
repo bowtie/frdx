@@ -25,12 +25,19 @@ using namespace frdx;
 
 void load_overlay_font(float scale) {
     auto& io             = ImGui::GetIO();
-    const auto font_path = module_directory() / "mods" / "frdx" / "fonts" / "FusionPixel12-ja.ttf";
+    auto font_path = module_directory() / "mods" / "frdx" / "fonts" / "FusionPixel12-ja.ttf";
     if (!std::filesystem::exists(font_path)) {
-        log::warn("[overlay] Fusion Pixel font not found at {}; using ImGui default font",
-                  font_path.string());
-        io.Fonts->AddFontDefault();
-        return;
+        // Fallback: running from a build directory — look up to project assets/
+        auto fb = module_directory() / ".." / "assets" / "fonts" / "FusionPixel12-ja.ttf";
+        std::error_code ec;
+        if (std::filesystem::exists(fb, ec)) {
+            font_path = fb.lexically_normal();
+        } else {
+            log::warn("[overlay] Fusion Pixel font not found at {}; using ImGui default font",
+                      font_path.string());
+            io.Fonts->AddFontDefault();
+            return;
+        }
     }
 
     // Always load the font at 32px (the 2x size).  Switching between 1x
