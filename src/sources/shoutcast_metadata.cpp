@@ -452,10 +452,14 @@ void MetadataController::run_ws_poller(std::string url,
                 if (!artwork.empty()) info.artwork_url = std::move(artwork);
 
                 if (!ffmpeg_icy_active && on_metadata_) {
+                    // Capture artist/title before the move — reading from a
+                    // moved-from std::string is valid but empty in practice.
+                    std::string log_artist = info.artist;
+                    std::string log_title  = info.title;
                     bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
                     if (accepted) {
                         log::info("[shoutcast] ws metadata queued: {} - {}",
-                                  info.artist, info.title);
+                                  log_artist, log_title);
                     }
                 } else if (ffmpeg_icy_active) {
                     log::info("[shoutcast] ws metadata suppressed by recent ffmpeg ICY: {} - {}",
@@ -674,10 +678,12 @@ void MetadataController::process_sse_event(
         if (!artwork.empty()) info.artwork_url = std::move(artwork);
 
         if (!ffmpeg_icy_active && on_metadata_) {
+            std::string log_artist = info.artist;
+            std::string log_title  = info.title;
             bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
             if (accepted) {
                 log::info("[shoutcast] sse metadata queued: {} - {}",
-                          info.artist, info.title);
+                          log_artist, log_title);
             }
         }
     }
@@ -791,10 +797,12 @@ void MetadataController::run_rest_poller(std::string url,
             if (!artwork.empty()) info.artwork_url = std::move(artwork);
 
             if (!ffmpeg_icy_active && on_metadata_) {
+                std::string log_artist = info.artist;
+                std::string log_title  = info.title;
                 bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
                 if (accepted) {
                     log::info("[shoutcast] rest metadata queued: {} - {}",
-                              info.artist, info.title);
+                              log_artist, log_title);
                 }
             }
         }
