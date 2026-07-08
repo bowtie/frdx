@@ -33,20 +33,19 @@ void load_overlay_font(float scale) {
         return;
     }
 
-    // In ImGui 1.92, fonts can be dynamically scaled via style.FontScaleMain
-    // (the replacement for io.FontGlobalScale).  We load the font once at
-    // 16px and control the rendered size through FontScaleMain.
+    // Load the font at 32px (the 2x size) and use FontScaleMain to
+    // scale it down for 1x.  This avoids requiring dynamic font baking
+    // (which the DX12 backend may not support) — the font is baked once
+    // at 32px and FontScaleMain just scales the rendered output.
     //
-    // Effective font size = FontSizeBase * FontScaleMain * FontScaleDpi
-    // FontScaleDpi is for automatic monitor DPI (docking branch only),
-    // so we leave it at 1.0 and use FontScaleMain for our scaling.
+    //   1x: FontScaleMain=0.5  -> 32px * 0.5 = 16px (clean 2:1 downsample)
+    //   2x: FontScaleMain=1.0  -> 32px * 1.0 = 32px (native, crisp)
     //
-    // For our pixel font with PixelSnapH, we snap to integer multiples:
-    //   1x: FontSizeBase=16, FontScaleMain=1.0  -> 16px
-    //   2x: FontSizeBase=16, FontScaleMain=2.0  -> 32px
+    // For our pixel font with PixelSnapH, the 2:1 downsample stays crisp.
     const int int_scale  = std::max(1, static_cast<int>(std::ceil(scale)));
     const float effective_scale = static_cast<float>(int_scale);
-    const float font_size = 16.0f;
+    const float font_size = 32.0f;  // always bake at 2x size
+    const float font_scale_main = effective_scale / 2.0f;  // 1x -> 0.5, 2x -> 1.0
 
     ImFontConfig cfg{};
     cfg.OversampleH = 1;
@@ -57,27 +56,28 @@ void load_overlay_font(float scale) {
         io.FontDefault       = font;
         auto& style          = ImGui::GetStyle();
         style.FontSizeBase   = font_size;
-        style.FontScaleMain  = effective_scale;
+        style.FontScaleMain  = font_scale_main;
         g_ui.ui_scale        = effective_scale;
-        log::info("[overlay] loaded Fusion Pixel font at {:.0f}px (FontScaleMain={:.1f}, int_scale={}x) from {}",
-                  font_size, effective_scale, int_scale, font_path.string());
+        log::info("[overlay] loaded Fusion Pixel font at {:.0f}px (FontScaleMain={:.2f}, int_scale={}x) from {}",
+                  font_size, font_scale_main, int_scale, font_path.string());
     } else {
         log::warn("[overlay] failed to load {}; using ImGui default font", font_path.string());
         io.Fonts->AddFontDefault();
     }
 }
 
-// Switch the font scale without reloading the font atlas.  In 1.92,
-// this is just setting style.FontScaleMain + re-applying the theme
-// (which calls ScaleAllSizes).  Safe to call mid-frame.
+// Switch the font scale without reloading the font atlas.  Just sets
+// FontScaleMain (0.5 for 1x, 1.0 for 2x) + re-applies the theme.
+// Deferred to next frame via pending_ui_scale since FontScaleMain is
+// read during Begin().
 void set_font_scale(float scale) {
     const int int_scale = std::max(1, static_cast<int>(std::ceil(scale)));
     const float effective_scale = static_cast<float>(int_scale);
     g_ui.ui_scale = effective_scale;
-    ImGui::GetStyle().FontScaleMain = effective_scale;
+    ImGui::GetStyle().FontScaleMain = effective_scale / 2.0f;
     ApplyTheme(g_ui.theme_idx);
-    log::info("[overlay] set font scale to {}x (FontScaleMain={:.1f})",
-              int_scale, effective_scale);
+    log::info("[overlay] set font scale to {}x (FontScaleMain={:.2f})",
+              int_scale, effective_scale / 2.0f);
 }
 
 void load_background_texture(ID3D12CommandQueue* queue) {
