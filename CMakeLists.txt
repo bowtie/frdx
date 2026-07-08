@@ -313,3 +313,12 @@ set_target_properties(frdx_sandbox PROPERTIES
     OUTPUT_NAME frdx_sandbox
     WIN32_EXECUTABLE TRUE
 )
+
+# Copy libmpg123-0.dll next to the sandbox exe so it can find it at runtime.
+add_custom_command(TARGET frdx_sandbox POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DFROM="${CMAKE_SOURCE_DIR}/third_party/mpg123/lib/libmpg123-0.dll"
+            -DTO="$<TARGET_FILE_DIR:frdx_sandbox>/libmpg123-0.dll"
+            -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
+    COMMENT "Copying libmpg123-0.dll next to frdx_sandbox.exe"
+)
