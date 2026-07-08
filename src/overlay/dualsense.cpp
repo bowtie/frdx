@@ -612,7 +612,9 @@ void draw_dualsense_controller_tab(const DualSenseConfig& ds) {
     if (ImGui::InputText("##udp_port", udp_buf, sizeof(udp_buf),
                          ImGuiInputTextFlags_CharsDecimal)) {
         if (udp_buf[0] != '\0') {
-            const int udp_port = std::clamp(std::atoi(udp_buf), 1, 65535);
+            // atoi is safe here: ImGuiInputTextFlags_CharsDecimal restricts input to
+            // digits, and std::clamp bounds the result to a valid port range.
+            const int udp_port = std::clamp(std::atoi(udp_buf), 1, 65535); // NOLINT(bugprone-unchecked-string-to-number-conversion,cert-err34-c)
             patch_dualsense([=](DualSenseConfig& c) { c.udp_port = udp_port; });
         }
     }

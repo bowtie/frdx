@@ -180,7 +180,8 @@ void DSPBridge::detach_current_handle_locked() noexcept {
     if (pending_detach_handle_ && current_dsp_ && fns_.channel_control_rem_dsp) {
         const uint32_t pending = pending_detach_handle_;
         pending_detach_handle_ = 0;
-        (void)seh_call([&] { fns_.channel_control_rem_dsp(pending, current_dsp_); });
+        // Result is intentionally discarded: cleanup path, nothing to retry on.
+        (void)seh_call([&] { fns_.channel_control_rem_dsp(pending, current_dsp_); }); // NOLINT(bugprone-unused-return-value)
     }
     if (!current_dsp_ || !current_handle_) return;
     const uint32_t old_handle = current_handle_;
@@ -304,7 +305,8 @@ void DSPBridge::retarget_if_needed() noexcept {
         if (now - pending_detach_time_ >= std::chrono::milliseconds(200)) {
             const uint32_t old = pending_detach_handle_;
             pending_detach_handle_ = 0;
-            (void)seh_call([&] { fns_.channel_control_rem_dsp(old, current_dsp_); });
+            // Result is intentionally discarded: deferred-cleanup path, nothing to retry on.
+            (void)seh_call([&] { fns_.channel_control_rem_dsp(old, current_dsp_); }); // NOLINT(bugprone-unused-return-value)
         }
     }
 

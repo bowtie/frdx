@@ -68,7 +68,7 @@ void cleanup_scheduled_task() {
 }
 
 void print_status(const frdx::dualsense::RuntimeStatus& status) {
-    std::println("[frdx-dualsense] connected={} telemetry={} controller=\"{}\" error=\"{}\"",
+    std::println(R"([frdx-dualsense] connected={} telemetry={} controller="{}" error="{}")",
                  status.controller_connected ? "yes" : "no", status.telemetry_seen ? "yes" : "no",
                  status.controller_name, status.last_error);
     std::fflush(stdout);

@@ -9,11 +9,14 @@ Checks: >
   -bugprone-not-null-terminated-result,
   -bugprone-multi-level-implicit-pointer-conversion,
   -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-throwing-static-initialization,
+  -bugprone-invalid-enum-default-initialization,
   cert-*,
   -cert-err58-cpp,
   -cert-err33-c,
   clang-analyzer-*,
   -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
   cppcoreguidelines-avoid-goto,
   cppcoreguidelines-pro-type-member-init,
   cppcoreguidelines-slicing,
@@ -51,6 +54,14 @@ Checks: >
 # bugprone-not-null-terminated-result:                 raw PE magic comparisons in pe_image.cpp
 # bugprone-multi-level-implicit-pointer-conversion:    FMOD C-API vtable interop in radio_discovery.cpp
 # bugprone-implicit-widening-of-multiplication-result: explicit buffer-size arithmetic
+# bugprone-throwing-static-initialization:             global config/UI containers (g_cfg, g_ui, g_ctx...) -- a
+#                                                      throw during their init is fatal regardless; wrapping each
+#                                                      in try/noexcept adds churn for zero safety gain
+# bugprone-invalid-enum-default-initialization:        D3D12 descriptor structs zero-init'd with {} -- the
+#                                                      idiomatic D3D12 pattern; these enums have no zero member
+# clang-analyzer-optin.core.EnumCastOutOfRange:        fires inside MSVC/Windows SDK headers (xfilesystem_abi,
+#                                                      d3d12.h), not our code -- HeaderFilterRegex can't exclude
+#                                                      them once the optin analyzer descends
 # cert-err33-c:                                        fire-and-forget log/file writes -- error path not actionable
 # cppcoreguidelines-init-variables:                    most "uninitialized" vars are immediate out-params to Win32/FMOD APIs
 # cppcoreguidelines-pro-type-cstyle-cast:              RIP-relative pointer arithmetic in radio_discovery.cpp

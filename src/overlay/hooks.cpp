@@ -352,7 +352,7 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
             // Force the activation state to "active" regardless of what happened.
             wParam = MAKELONG(WA_ACTIVE, 0);
             // Fall through — let the game process the (fake) activation.
-        } else if (uMsg == WM_ACTIVATEAPP || uMsg == WM_KILLFOCUS) {
+        } else if (uMsg == WM_ACTIVATEAPP || uMsg == WM_KILLFOCUS) { // NOLINT(bugprone-branch-clone) intentional: distinct messages, same swallow action
             // Swallow these entirely — the game never sees deactivation.
             return 0;
         } else if (uMsg == WM_SETFOCUS) {
@@ -921,7 +921,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         if (g_ctx.store) {
             auto snap = g_ctx.store->snapshot();
             g_ctx.frame_overlay_cfg = std::move(snap.overlay);
-            g_ctx.frame_audio_cfg   = std::move(snap.audio);
+            g_ctx.frame_audio_cfg   = snap.audio;  // AudioConfig is trivially copyable — move is a no-op
         }
 
         // Dual-Kawase backdrop blur: capture the freshly-rendered backbuffer

@@ -315,7 +315,7 @@ std::string handle_download(const nlohmann::json& req) {
     return R"({"ok":false,"error":"download failed"})";
 }
 
-void handle_connection(HANDLE pipe, std::string_view token) {
+void handle_connection(HANDLE pipe, [[maybe_unused]] std::string_view token) {
     auto msg = ipc::recv(pipe);
     if (msg.empty()) { CloseHandle(pipe); return; }
 

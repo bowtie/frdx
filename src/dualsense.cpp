@@ -113,7 +113,7 @@ detail::unique_handle open_hid_writer_handle(const wchar_t* path, DWORD* last_er
     return h;
 }
 
-enum class HidWriteBackend {
+enum class HidWriteBackend : std::uint8_t {
     write_file,
     set_output_report,
     hidapi_write,
@@ -1272,7 +1272,7 @@ private:
 
     TriggerEffect idle_buzz(const Telemetry& t, const DualSenseConfig& s, TimePoint now) const {
         if (!s.enable_idle_buzz || t.speed >= s.idle_max_speed_kmh || t.accel < 1 ||
-            t.accel > s.idle_accel_max)
+            std::cmp_greater(t.accel, s.idle_accel_max))
             return off();
         const auto ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -1430,7 +1430,9 @@ bool send_test_telemetry(int udp_port) {
     WSADATA wsa{};
     const bool started_wsa = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
     SOCKET sock            = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == INVALID_SOCKET) {
+    // sock == INVALID_SOCKET is the canonical Win32 socket-failure idiom;
+    // clang-tidy misreads the (SOCKET)(~0) macro expansion as a signed compare.
+    if (sock == INVALID_SOCKET) { // NOLINT(modernize-use-integer-sign-comparison)
         if (started_wsa) WSACleanup();
         return false;
     }
@@ -1621,7 +1623,7 @@ void DualSenseService::run() {
     };
 
     auto close_socket = [&] {
-        if (sock != INVALID_SOCKET) {
+        if (sock != INVALID_SOCKET) { // NOLINT(modernize-use-integer-sign-comparison)
             closesocket(sock);
             sock        = INVALID_SOCKET;
             active_port = 0;
@@ -1630,7 +1632,7 @@ void DualSenseService::run() {
 
     auto bind_udp = [&](int family, sockaddr* addr, int addr_len) {
         sock = socket(family, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock == INVALID_SOCKET) return false;
+        if (sock == INVALID_SOCKET) return false; // NOLINT(modernize-use-integer-sign-comparison)
         DWORD timeout = 100;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout),
                    sizeof(timeout));
@@ -1649,7 +1651,7 @@ void DualSenseService::run() {
         addr6.sin6_port   = htons(static_cast<u_short>(port));
 
         sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock != INVALID_SOCKET) {
+        if (sock != INVALID_SOCKET) { // NOLINT(modernize-use-integer-sign-comparison)
             DWORD v6only = 0;
             setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only),
                        sizeof(v6only));
@@ -1702,7 +1704,7 @@ void DualSenseService::run() {
             continue;
         }
 
-        if (sock == INVALID_SOCKET || active_port != cfg.udp_port) {
+        if (sock == INVALID_SOCKET || active_port != cfg.udp_port) { // NOLINT(modernize-use-integer-sign-comparison)
             if (triggers.connected()) triggers.write(off(), off());
             reset_runtime_state();
             {
