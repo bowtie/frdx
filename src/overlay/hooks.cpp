@@ -484,9 +484,9 @@ void post_resize(IDXGISwapChain* swapChain) {
     }
 
     // Recalculate UI scale from the swap chain resolution.  With ceil
-    // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Defer the font reload to
-    // the next render frame (unless the user has a manual override).
-    if (g_ui.ui_scale_override == 0) {
+    // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Defer to the next render
+    // frame (unless the user forced 2x UI via the Debug tab).
+    if (!g_ui.debug_ui_2x) {
         const auto new_scale = compute_ui_scale(desc.BufferDesc.Height);
         if (new_scale != g_ui.ui_scale) {
             g_ui.pending_ui_scale = new_scale;
@@ -818,8 +818,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
                 g_sc_width  = sc_desc.BufferDesc.Width;
                 g_sc_height = sc_desc.BufferDesc.Height;
                 re_log::info("swap chain resolution changed to {}x{}", g_sc_width, g_sc_height);
-                // Don't override if the user set a manual scale override.
-                if (g_ui.ui_scale_override == 0) {
+                // Don't override if the user forced 2x UI via the Debug tab.
+                if (!g_ui.debug_ui_2x) {
                     const auto new_scale = compute_ui_scale(g_sc_height);
                     if (new_scale != g_ui.ui_scale) {
                         g_ui.pending_ui_scale = new_scale;

@@ -184,8 +184,9 @@ struct UiState {
     // multiplied by ui_scale at use sites.  Calculated from the monitor
     // resolution (not the swap chain, which may use DRS).
     float ui_scale = 1.0f;
-    // Debug override: 0 = auto (monitor-based), 1 = force 1x, 2 = force 2x.
-    int ui_scale_override = 0;
+    // Debug toggles for independent UI and font scaling.
+    bool debug_ui_2x = false;
+    bool debug_font_2x = false;
     // Pending font reload requested mid-frame (applied next frame).
     // -1.0f = no pending reload.
     float pending_ui_scale = -1.0f;
