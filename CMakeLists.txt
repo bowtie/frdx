@@ -217,3 +217,99 @@ add_test(NAME dualsense_settings_coverage_test COMMAND dualsense_settings_covera
 set_tests_properties(dualsense_settings_coverage_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
+
+# ─── Sandbox: standalone overlay test harness ────────────────────────────
+# Builds a self-contained DX12 + ImGui window with WASAPI audio for
+# rapid UI iteration without launching the game.
+#   cmake --build build --target frdx_sandbox
+#   ./build/frdx_sandbox.exe   (place fonts in mods/frdx/fonts/ next to exe)
+# Uses the SAME overlay sources as the main target (minus dll_main.cpp)
+# so the real draw_imgui_ui() runs identically.
+add_executable(frdx_sandbox
+    src/sandbox_main.cpp
+    src/fastboot.cpp
+    src/bridge.cpp
+    src/log.cpp
+    src/config.cpp
+    src/config_store.cpp
+    src/subprocess.cpp
+    src/ring_buffer.cpp
+    src/dualsense.cpp
+    src/audio_source_manager.cpp
+    src/fmod/pe_image.cpp
+    src/fmod/sig_scanner.cpp
+    src/fmod/radio_discovery.cpp
+    src/fmod/dsp_bridge.cpp
+    src/fmod/dsp_control_loop.cpp
+    src/fmod/game_state_probe.cpp
+    src/fmod/metadata_injector.cpp
+    src/overlay/overlay.cpp
+    src/overlay/toasts.cpp
+    src/overlay/console.cpp
+    src/overlay/dualsense.cpp
+    src/overlay/themes.cpp
+    src/overlay/textures.cpp
+    src/overlay/hooks.cpp
+    src/overlay/tex_hooks.cpp
+    src/overlay/player_bar.cpp
+    src/overlay/settings.cpp
+    src/sources/shoutcast_source.cpp
+    src/sources/shoutcast_metadata.cpp
+    src/sources/mpg123_stream.cpp
+    src/helper/worker_client.cpp
+    src/dependency_manager.cpp
+    src/texture_injector.cpp
+    third_party/hidapi/windows/hid.c
+
+    # Dear ImGui
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_impl_win32.cpp
+    third_party/imgui/imgui_impl_dx12.cpp
+
+    # MinHook (needed by hooks.cpp for hooked mode)
+    third_party/minhook/buffer.c
+    third_party/minhook/hook.c
+    third_party/minhook/trampoline.c
+    third_party/minhook/hde/hde64.c
+
+    # Kiero (needed by hooks.cpp)
+    third_party/kiero2/kiero_intern.cpp
+    third_party/kiero2/kiero_d3d12.cpp
+
+    # BC7 encoder (needed by textures.cpp)
+    third_party/bc7enc/bc7enc.c
+
+    # ImGui Animated
+    third_party/imgui-animated/imgui_animated.cpp
+    third_party/imanim/im_anim.cpp
+)
+
+target_include_directories(frdx_sandbox PRIVATE
+    include
+    third_party/nlohmann
+    third_party/toml11
+    third_party/wil/include
+    third_party/imgui
+    third_party/minhook
+    third_party/kiero2
+    third_party/stb
+    third_party/bc7enc
+    third_party/imgui-animated
+    third_party/imanim
+    third_party/hidapi
+    third_party/hidapi/hidapi
+    third_party/mpg123/include
+)
+
+target_link_directories(frdx_sandbox PRIVATE third_party/mpg123/lib)
+
+target_link_libraries(frdx_sandbox PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi
+                                           cfgmgr32 user32 dbghelp libmpg123-0)
+
+set_target_properties(frdx_sandbox PROPERTIES
+    OUTPUT_NAME frdx_sandbox
+    WIN32_EXECUTABLE TRUE
+)
