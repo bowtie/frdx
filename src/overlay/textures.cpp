@@ -71,15 +71,21 @@ void load_overlay_font(float scale) {
 }
 
 // Apply a new UI scale (style values + hardcoded pixel multipliers).
-// Font scaling is handled independently via debug_font_2x.
-// Deferred to next frame via pending_ui_scale since style values are
-// read during Begin().
+// Also updates FontGlobalScale to match, unless debug_font_2x is
+// active (in which case the font scale is controlled solely by the
+// Debug toggle).  Deferred to next frame via pending_ui_scale since
+// style values are read during Begin().
 void set_font_scale(float scale) {
     const int int_scale = std::max(1, static_cast<int>(std::ceil(scale)));
     const float effective_scale = static_cast<float>(int_scale);
     g_ui.ui_scale = effective_scale;
+    // Auto-scale font with UI scale unless the debug toggle overrides it.
+    if (!g_ui.debug_font_2x) {
+        ImGui::GetIO().FontGlobalScale = effective_scale / 2.0f;
+    }
     ApplyTheme(g_ui.theme_idx);
-    log::info("[overlay] set UI scale to {}x", int_scale);
+    log::info("[overlay] set UI scale to {}x (FontGlobalScale={:.2f})",
+              int_scale, ImGui::GetIO().FontGlobalScale);
 }
 
 void load_background_texture(ID3D12CommandQueue* queue) {
