@@ -1,3 +1,0 @@
-iteration	decoder	time_ms	pcm_bytes	status
-0	mpg123	111.49	7442060	baseline
-0	miniaudio	93.38	7442240	baseline

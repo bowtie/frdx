@@ -10,6 +10,8 @@ imgui.ini
 nul
 project_dump.md
 qwen.ps1
+autoresearch/
+clang-tidy-report*.txt
 
 # Downloaded by scripts\get-deps.ps1
 third_party/*
