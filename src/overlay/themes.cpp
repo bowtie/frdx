@@ -349,6 +349,213 @@ void ApplyCatppuccinMocha() {
     style.PopupBorderSize            = 0.0f;
 }
 
+// Cherry — pink/red accents on dark blue. From @r-lyeh's post in #707.
+void ApplyCherry() {
+    ImGui::GetStyle() = ImGuiStyle();
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* c         = style.Colors;
+    // Cherry 3-intensity palette
+    const ImVec4 hi  = ImVec4(0.502f, 0.075f, 0.256f, 1.00f); // cherry red
+    const ImVec4 med = ImVec4(0.455f, 0.198f, 0.301f, 1.00f);
+    const ImVec4 low = ImVec4(0.232f, 0.201f, 0.271f, 1.00f);
+    const ImVec4 bg  = ImVec4(0.200f, 0.220f, 0.270f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.86f, 0.93f, 0.89f, 0.78f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.86f, 0.93f, 0.89f, 0.28f);
+    c[ImGuiCol_WindowBg]             = ImVec4(0.13f, 0.14f, 0.17f, 0.94f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.20f, 0.22f, 0.27f, 0.58f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.20f, 0.22f, 0.27f, 0.90f);
+    c[ImGuiCol_Border]               = ImVec4(0.31f, 0.31f, 1.00f, 0.00f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = bg;
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(med.x, med.y, med.z, 0.78f);
+    c[ImGuiCol_FrameBgActive]        = med;
+    c[ImGuiCol_TitleBg]              = low;
+    c[ImGuiCol_TitleBgActive]        = hi;
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(bg.x, bg.y, bg.z, 0.75f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(bg.x, bg.y, bg.z, 0.47f);
+    c[ImGuiCol_ScrollbarBg]          = bg;
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.09f, 0.15f, 0.16f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(med.x, med.y, med.z, 0.78f);
+    c[ImGuiCol_ScrollbarGrabActive]  = med;
+    c[ImGuiCol_CheckMark]            = ImVec4(0.71f, 0.22f, 0.27f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.47f, 0.77f, 0.83f, 0.14f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.71f, 0.22f, 0.27f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.47f, 0.77f, 0.83f, 0.14f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(med.x, med.y, med.z, 0.86f);
+    c[ImGuiCol_ButtonActive]         = med;
+    c[ImGuiCol_Header]               = ImVec4(med.x, med.y, med.z, 0.76f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(med.x, med.y, med.z, 0.86f);
+    c[ImGuiCol_HeaderActive]         = hi;
+    c[ImGuiCol_Separator]            = ImVec4(med.x, med.y, med.z, 0.50f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(hi.x, hi.y, hi.z, 0.78f);
+    c[ImGuiCol_SeparatorActive]      = hi;
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.47f, 0.77f, 0.83f, 0.04f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(med.x, med.y, med.z, 0.78f);
+    c[ImGuiCol_ResizeGripActive]     = med;
+    c[ImGuiCol_Tab]                  = low;
+    c[ImGuiCol_TabHovered]           = ImVec4(med.x, med.y, med.z, 0.86f);
+    c[ImGuiCol_TabActive]            = med;
+    c[ImGuiCol_TabUnfocused]         = low;
+    c[ImGuiCol_TabUnfocusedActive]   = med;
+    c[ImGuiCol_PlotLines]            = ImVec4(0.86f, 0.93f, 0.89f, 0.63f);
+    c[ImGuiCol_PlotLinesHovered]     = med;
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.86f, 0.93f, 0.89f, 0.63f);
+    c[ImGuiCol_PlotHistogramHovered] = med;
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(med.x, med.y, med.z, 0.43f);
+    c[ImGuiCol_DragDropTarget]       = hi;
+    c[ImGuiCol_NavHighlight]         = hi;
+    c[ImGuiCol_NavWindowingHighlight]= ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]    = ImVec4(0.13f, 0.14f, 0.17f, 0.20f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.13f, 0.14f, 0.17f, 0.35f);
+    style.WindowRounding             = 5.0f;
+    style.FrameRounding              = 3.0f;
+    style.GrabRounding               = 2.0f;
+    style.TabRounding                = 4.0f;
+    style.PopupRounding              = 4.0f;
+    style.ScrollbarRounding          = 16.0f;
+    style.WindowPadding              = ImVec2(10.0f, 10.0f);
+    style.FramePadding               = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing                = ImVec2(8.0f, 6.0f);
+    style.PopupBorderSize            = 0.0f;
+}
+
+// Photoshop Charcoal — dark charcoal with orange accents, inspired by Photoshop UI.
+// From @Derydoca's post in #707.
+void ApplyPhotoshopCharcoal() {
+    ImGui::GetStyle() = ImGuiStyle();
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* c         = style.Colors;
+    const ImVec4 orange = ImVec4(1.00f, 0.391f, 0.000f, 1.00f); // #ff6400
+    c[ImGuiCol_Text]                 = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+    c[ImGuiCol_WindowBg]             = ImVec4(0.180f, 0.180f, 0.180f, 0.94f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.280f, 0.280f, 0.280f, 0.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.313f, 0.313f, 0.313f, 0.94f);
+    c[ImGuiCol_Border]               = ImVec4(0.266f, 0.266f, 0.266f, 1.00f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.160f, 0.160f, 0.160f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.200f, 0.200f, 0.200f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.280f, 0.280f, 0.280f, 1.00f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.148f, 0.148f, 0.148f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.148f, 0.148f, 0.148f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.148f, 0.148f, 0.148f, 1.00f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.195f, 0.195f, 0.195f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.160f, 0.160f, 0.160f, 1.00f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.277f, 0.277f, 0.277f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.300f, 0.300f, 0.300f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = orange;
+    c[ImGuiCol_CheckMark]            = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.391f, 0.391f, 0.391f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = orange;
+    c[ImGuiCol_Button]               = ImVec4(1.00f, 1.00f, 1.00f, 0.00f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(1.00f, 1.00f, 1.00f, 0.156f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(1.00f, 1.00f, 1.00f, 0.391f);
+    c[ImGuiCol_Header]               = ImVec4(0.313f, 0.313f, 0.313f, 1.00f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.469f, 0.469f, 0.469f, 1.00f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.469f, 0.469f, 0.469f, 1.00f);
+    c[ImGuiCol_Separator]            = c[ImGuiCol_Border];
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.391f, 0.391f, 0.391f, 1.00f);
+    c[ImGuiCol_SeparatorActive]      = orange;
+    c[ImGuiCol_ResizeGrip]           = ImVec4(1.00f, 1.00f, 1.00f, 0.250f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(1.00f, 1.00f, 1.00f, 0.670f);
+    c[ImGuiCol_ResizeGripActive]     = orange;
+    c[ImGuiCol_Tab]                  = ImVec4(0.098f, 0.098f, 0.098f, 1.00f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.352f, 0.352f, 0.352f, 1.00f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.195f, 0.195f, 0.195f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.098f, 0.098f, 0.098f, 1.00f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.195f, 0.195f, 0.195f, 1.00f);
+    c[ImGuiCol_PlotLines]            = ImVec4(0.469f, 0.469f, 0.469f, 1.00f);
+    c[ImGuiCol_PlotLinesHovered]     = orange;
+    c[ImGuiCol_PlotHistogram]        = orange;
+    c[ImGuiCol_PlotHistogramHovered] = orange;
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(0.391f, 0.391f, 0.391f, 0.35f);
+    c[ImGuiCol_DragDropTarget]       = ImVec4(1.00f, 1.00f, 0.00f, 0.90f);
+    c[ImGuiCol_NavHighlight]         = orange;
+    c[ImGuiCol_NavWindowingHighlight]= ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]    = ImVec4(0.18f, 0.18f, 0.18f, 0.20f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.18f, 0.18f, 0.18f, 0.35f);
+    style.WindowRounding             = 5.0f;
+    style.FrameRounding              = 5.0f;
+    style.GrabRounding               = 5.0f;
+    style.TabRounding                = 5.0f;
+    style.PopupRounding              = 5.0f;
+    style.ScrollbarRounding          = 5.0f;
+    style.WindowPadding              = ImVec2(10.0f, 10.0f);
+    style.FramePadding               = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing                = ImVec2(8.0f, 6.0f);
+    style.PopupBorderSize            = 0.0f;
+}
+
+// Forest Green — green accents on deep pine dark. From @TheAncientOwl's post in #707.
+void ApplyForestGreen() {
+    ImGui::GetStyle() = ImGuiStyle();
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImVec4* c         = style.Colors;
+    const ImVec4 green  = ImVec4(0.35f, 0.67f, 0.42f, 1.00f); // #59ab6b
+    const ImVec4 greenD = ImVec4(0.22f, 0.45f, 0.28f, 1.00f); // darker green
+    c[ImGuiCol_Text]                 = ImVec4(0.85f, 0.90f, 0.85f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.50f, 0.55f, 0.50f, 1.00f);
+    c[ImGuiCol_WindowBg]             = ImVec4(0.06f, 0.09f, 0.06f, 0.94f); // deep pine
+    c[ImGuiCol_ChildBg]              = ImVec4(0.08f, 0.11f, 0.08f, 1.00f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.08f, 0.11f, 0.08f, 0.94f);
+    c[ImGuiCol_Border]               = ImVec4(0.15f, 0.22f, 0.15f, 0.60f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.10f, 0.14f, 0.10f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.14f, 0.20f, 0.14f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.18f, 0.26f, 0.18f, 1.00f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.04f, 0.07f, 0.04f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = greenD;
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.04f, 0.07f, 0.04f, 0.51f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.08f, 0.11f, 0.08f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.06f, 0.09f, 0.06f, 0.53f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.18f, 0.26f, 0.18f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.22f, 0.32f, 0.22f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]  = green;
+    c[ImGuiCol_CheckMark]            = green;
+    c[ImGuiCol_SliderGrab]           = greenD;
+    c[ImGuiCol_SliderGrabActive]     = green;
+    c[ImGuiCol_Button]               = ImVec4(0.14f, 0.20f, 0.14f, 1.00f);
+    c[ImGuiCol_ButtonHovered]        = greenD;
+    c[ImGuiCol_ButtonActive]         = green;
+    c[ImGuiCol_Header]               = ImVec4(0.14f, 0.20f, 0.14f, 1.00f);
+    c[ImGuiCol_HeaderHovered]        = greenD;
+    c[ImGuiCol_HeaderActive]         = green;
+    c[ImGuiCol_Separator]            = ImVec4(0.15f, 0.22f, 0.15f, 0.60f);
+    c[ImGuiCol_SeparatorHovered]     = green;
+    c[ImGuiCol_SeparatorActive]      = green;
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.14f, 0.20f, 0.14f, 0.25f);
+    c[ImGuiCol_ResizeGripHovered]    = greenD;
+    c[ImGuiCol_ResizeGripActive]     = green;
+    c[ImGuiCol_Tab]                  = ImVec4(0.04f, 0.07f, 0.04f, 1.00f);
+    c[ImGuiCol_TabHovered]           = greenD;
+    c[ImGuiCol_TabActive]            = ImVec4(0.14f, 0.20f, 0.14f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.04f, 0.07f, 0.04f, 1.00f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.14f, 0.20f, 0.14f, 1.00f);
+    c[ImGuiCol_PlotLines]            = green;
+    c[ImGuiCol_PlotLinesHovered]     = ImVec4(0.50f, 0.90f, 0.50f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = green;
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.50f, 0.90f, 0.50f, 1.00f);
+    c[ImGuiCol_TextSelectedBg]       = ImVec4(green.x, green.y, green.z, 0.35f);
+    c[ImGuiCol_DragDropTarget]       = green;
+    c[ImGuiCol_NavHighlight]         = green;
+    c[ImGuiCol_NavWindowingHighlight]= ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]    = ImVec4(0.06f, 0.09f, 0.06f, 0.20f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.06f, 0.09f, 0.06f, 0.35f);
+    style.WindowRounding             = 6.0f;
+    style.FrameRounding              = 4.0f;
+    style.GrabRounding               = 4.0f;
+    style.TabRounding                = 4.0f;
+    style.PopupRounding              = 4.0f;
+    style.ScrollbarRounding          = 4.0f;
+    style.WindowPadding              = ImVec2(10.0f, 10.0f);
+    style.FramePadding               = ImVec2(6.0f, 4.0f);
+    style.ItemSpacing                = ImVec2(8.0f, 6.0f);
+    style.PopupBorderSize            = 0.0f;
+}
+
 void ApplyTokyoNight() {
     ImGui::GetStyle() = ImGuiStyle();
     ImGui::StyleColorsDark();
@@ -427,6 +634,9 @@ void ApplyTheme(int idx) {
         case 3: ApplyDracula(); break;
         case 4: ApplyDeusExGold(); break;
         case 5: ApplyCatppuccinMocha(); break;
+        case 6: ApplyCherry(); break;
+        case 7: ApplyPhotoshopCharcoal(); break;
+        case 8: ApplyForestGreen(); break;
         default: ApplyBessDark(); break;
     }
     // Scale all pixel-based style values by the current UI scale factor.
@@ -444,6 +654,9 @@ int theme_index(std::string_view value) noexcept {
     if (value == "dracula") return 3;
     if (value == "deus_ex_gold") return 4;
     if (value == "catppuccin_mocha") return 5;
+    if (value == "cherry") return 6;
+    if (value == "photoshop_charcoal") return 7;
+    if (value == "forest_green") return 8;
     return 0;
 }
 
@@ -454,6 +667,9 @@ const char* theme_value(int idx) noexcept {
         case 3:  return "dracula";
         case 4:  return "deus_ex_gold";
         case 5:  return "catppuccin_mocha";
+        case 6:  return "cherry";
+        case 7:  return "photoshop_charcoal";
+        case 8:  return "forest_green";
         default: return "bess_dark";
     }
 }
