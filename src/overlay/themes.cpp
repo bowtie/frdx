@@ -60,6 +60,26 @@ void ApplyBessDark() {
     style.PopupBorderSize            = 0.0f;
 }
 
+void ApplyBessDarkSpaced() {
+    ApplyBessDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    // Slightly more generous padding/rounding than BessDark for a
+    // breathable, modern feel without going overboard.
+    style.WindowRounding    = 7.0f;
+    style.FrameRounding     = 7.0f;
+    style.GrabRounding      = 7.0f;
+    style.TabRounding       = 7.0f;
+    style.PopupRounding     = 7.0f;
+    style.ScrollbarRounding = 7.0f;
+    style.WindowPadding     = ImVec2(14.0f, 14.0f);
+    style.FramePadding      = ImVec2(9.0f, 6.0f);
+    style.ItemSpacing       = ImVec2(12.0f, 9.0f);
+    style.ItemInnerSpacing  = ImVec2(8.0f, 6.0f);
+    style.IndentSpacing     = 24.0f;
+    style.ScrollbarSize     = 18.0f;
+    style.GrabMinSize       = 12.0f;
+}
+
 void ApplyTokyoNight() {
     ImGui::GetStyle() = ImGuiStyle();
     ImGui::StyleColorsDark();
@@ -134,6 +154,7 @@ void ApplyTheme(int idx) {
     switch (idx) {
         case 0: ApplyBessDark(); break;
         case 1: ApplyTokyoNight(); break;
+        case 2: ApplyBessDarkSpaced(); break;
         default: ApplyBessDark(); break;
     }
     // Scale all pixel-based style values by the current UI scale factor.
@@ -147,10 +168,17 @@ void ApplyTheme(int idx) {
 
 int theme_index(std::string_view value) noexcept {
     if (value == "tokyo_night") return 1;
+    if (value == "bess_dark_spaced") return 2;
     return 0;
 }
 
-const char* theme_value(int idx) noexcept { return idx == 1 ? "tokyo_night" : "bess_dark"; }
+const char* theme_value(int idx) noexcept {
+    switch (idx) {
+        case 1:  return "tokyo_night";
+        case 2:  return "bess_dark_spaced";
+        default: return "bess_dark";
+    }
+}
 
 int notification_position_index(std::string_view value) noexcept {
     if (value == "top_center") return 1;
