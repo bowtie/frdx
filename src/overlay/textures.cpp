@@ -79,8 +79,8 @@ void set_font_scale(float scale) {
     const int int_scale = std::max(1, static_cast<int>(std::ceil(scale)));
     const float effective_scale = static_cast<float>(int_scale);
     g_ui.ui_scale = effective_scale;
-    // Auto-scale font with UI scale unless the debug toggle overrides it.
-    if (!g_ui.debug_font_2x) {
+    // Auto-scale font with UI scale unless the debug font override is active.
+    if (g_ui.debug_font_scale == 0) {
         ImGui::GetIO().FontGlobalScale = effective_scale / 2.0f;
     }
     ApplyTheme(g_ui.theme_idx);

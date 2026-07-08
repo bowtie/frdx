@@ -373,38 +373,55 @@ void draw_debug_tab() {
                           "Check the log for the exact path.");
     }
 
-    // ── Debug scale toggles ──
+    // ── Debug scale selectors ──
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextWrapped("Debug scaling:");
+    ImGui::TextWrapped("Debug scaling (independent):");
     ImGui::Spacing();
+    // UI scale: controls style values (padding, spacing, sizes) + hardcoded pixels.
     {
-        bool ui_2x = g_ui.debug_ui_2x;
-        if (ImGui::Checkbox("2x UI (spacing/padding/sizes)", &ui_2x)) {
-            g_ui.debug_ui_2x = ui_2x;
-            // Recalculate ui_scale: auto from swap chain, or forced 2x.
-            float scale = ui_2x ? 2.0f : compute_ui_scale_for_current_monitor();
-            g_ui.pending_ui_scale = scale;
+        if (ImGui::RadioButton("Auto##ui", g_ui.debug_ui_scale == 0)) {
+            g_ui.debug_ui_scale = 0;
+            g_ui.pending_ui_scale = compute_ui_scale_for_current_monitor();
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("1x##ui", g_ui.debug_ui_scale == 1)) {
+            g_ui.debug_ui_scale = 1;
+            g_ui.pending_ui_scale = 1.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("2x##ui", g_ui.debug_ui_scale == 2)) {
+            g_ui.debug_ui_scale = 2;
+            g_ui.pending_ui_scale = 2.0f;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Scales ImGui style values (padding, spacing,\n"
-                              "scrollbar, rounding) and hardcoded pixel values.\n"
-                              "Font size is controlled separately.");
+            ImGui::SetTooltip("UI: style values (padding, spacing, scrollbar,\n"
+                              "rounding) and hardcoded pixel values.\n"
+                              "Auto: follows monitor resolution (ceil-snapped).");
         }
     }
     ImGui::Spacing();
+    // Font scale: controls glyph size via FontGlobalScale.
     {
-        bool font_2x = g_ui.debug_font_2x;
-        if (ImGui::Checkbox("2x Font (glyph size)", &font_2x)) {
-            g_ui.debug_font_2x = font_2x;
-            // FontGlobalScale: 0.5 = 1x (16px from 32px atlas), 1.0 = 2x (32px).
-            // Applied immediately — FontGlobalScale is read per-frame.
-            ImGui::GetIO().FontGlobalScale = font_2x ? 1.0f : 0.5f;
+        if (ImGui::RadioButton("Auto##font", g_ui.debug_font_scale == 0)) {
+            g_ui.debug_font_scale = 0;
+            ImGui::GetIO().FontGlobalScale = g_ui.ui_scale / 2.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("1x##font", g_ui.debug_font_scale == 1)) {
+            g_ui.debug_font_scale = 1;
+            ImGui::GetIO().FontGlobalScale = 0.5f;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("2x##font", g_ui.debug_font_scale == 2)) {
+            g_ui.debug_font_scale = 2;
+            ImGui::GetIO().FontGlobalScale = 1.0f;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Scales the font glyphs independently of UI layout.\n"
-                              "32px atlas: 0.5x = 16px, 1.0x = 32px.");
+            ImGui::SetTooltip("Font: glyph size only (32px atlas).\n"
+                              "1x = 16px (FontGlobalScale 0.5), 2x = 32px (1.0).\n"
+                              "Auto: follows current UI scale.");
         }
     }
 }
