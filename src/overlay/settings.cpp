@@ -384,9 +384,9 @@ void draw_debug_tab() {
         float scale = override_val > 0
                           ? static_cast<float>(override_val)
                           : compute_ui_scale_for_current_monitor();
-        // FontGlobalScale makes this instant and safe mid-frame —
-        // no atlas rebuild needed.
-        set_font_scale(scale);
+        // Defer to next frame — FontScaleMain is read during Begin()
+        // so mid-frame changes won't affect already-open windows.
+        g_ui.pending_ui_scale = scale;
     };
     if (ImGui::RadioButton("Auto", g_ui.ui_scale_override == 0)) {
         apply_scale(0);

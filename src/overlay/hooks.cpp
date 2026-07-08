@@ -904,8 +904,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
 
         // Apply a pending font scale change from the Debug tab or a
-        // resolution change.  With FontGlobalScale, this is instant —
-        // no atlas rebuild or InvalidateDeviceObjects needed.
+        // resolution change.  Must happen before NewFrame so all windows
+        // pick up the new FontScaleMain during their Begin().
         if (g_ui.pending_ui_scale >= 0.0f) {
             const float scale = g_ui.pending_ui_scale;
             g_ui.pending_ui_scale = -1.0f;
