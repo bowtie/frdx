@@ -249,17 +249,20 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // a simple static array indexed by a small enum for O(1) lookup.
     const char* s_glyph_strs[4] = {"\u23EE", "\u23F8", "\u23F5", "\u23ED"};
     static ImVec2 s_glyph_sz[4] = {};
-    static bool s_glyph_init    = false;
-    if (!s_glyph_init) {
+    static float s_glyph_font_scale = -1.0f;
+    // Recompute glyph sizes when the font scale changes (e.g. 1x -> 2x).
+    // The glyph strings are constants, but their rendered sizes depend on
+    // the active font, so stale cache values cause misaligned icons.
+    if (s_glyph_font_scale != g_ui.ui_scale) {
         for (int i = 0; i < 4; ++i) s_glyph_sz[i] = ImGui::CalcTextSize(s_glyph_strs[i]);
-        s_glyph_init = true;
+        s_glyph_font_scale = g_ui.ui_scale;
     }
     // Helper: returns index into the glyph cache for a known glyph, or -1.
     auto glyph_idx = [&](const char* g) -> int {
-        if (g == s_glyph_strs[0]) return 0;
-        if (g == s_glyph_strs[1] || g == s_glyph_strs[2])
-            return 1; // play/pause share "\u23F8"/"\u23F5" — separate calc
-        if (g == s_glyph_strs[3]) return 3;
+        if (g == s_glyph_strs[0]) return 0;  // prev
+        if (g == s_glyph_strs[1]) return 1;  // pause
+        if (g == s_glyph_strs[2]) return 2;  // play
+        if (g == s_glyph_strs[3]) return 3;  // next
         return -1;
     };
 
@@ -295,11 +298,6 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         int idx = glyph_idx(glyph);
         if (idx >= 0) {
             gsz = s_glyph_sz[idx];
-            // Special case: play/pause use different glyphs — compute on first use.
-            if (glyph == s_glyph_strs[1] && gsz.x == 0) {
-                gsz           = ImGui::CalcTextSize(glyph);
-                s_glyph_sz[1] = gsz;
-            }
         } else {
             gsz = ImGui::CalcTextSize(glyph);
         }
@@ -308,12 +306,6 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         dl->AddText(ImVec2(gx, gy), col_text, glyph);
         return pressed;
     };
-
-    // Pre-compute play/pause glyph size now that the cache is warm.
-    if (s_glyph_sz[1].x == 0) {
-        s_glyph_sz[1] = ImGui::CalcTextSize(s_glyph_strs[1]);
-        s_glyph_sz[2] = ImGui::CalcTextSize(s_glyph_strs[2]);
-    }
 
     ImGui::SameLine(0, 20.0f * ui_s);
 
