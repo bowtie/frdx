@@ -75,7 +75,11 @@ Checks: >
 # misc-use-internal-linkage:                           triggers on run_bridge() which is called from another TU (dll_main)
 
 WarningsAsErrors: ''
-HeaderFilterRegex: '(include|src)/.*'
+# HeaderFilterRegex: analyze only our own headers. Anchored at the repo
+# root (^) so the fetched mpg123 headers under build/_deps/mpg123-src/
+# (which contain an "src/include" substring) are excluded -- those are
+# third-party and already compiled with /W0.
+HeaderFilterRegex: '^(include|src)/.*'
 FormatStyle: file
 CheckOptions:
   - { key: readability-braces-around-statements.ShortStatementLines, value: '2' }
