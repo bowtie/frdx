@@ -913,6 +913,11 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             io.Fonts->Clear();
             load_overlay_font(g_ui.ui_scale);
             io.Fonts->Build();
+            // Re-apply the theme so ImGui style values (FramePadding,
+            // ItemSpacing, ScrollbarSize, etc.) are re-scaled to match
+            // the new ui_scale.  Without this, only the font and window
+            // sizes change but widget spacing/padding stays at 1x.
+            ApplyTheme(g_ui.theme_idx);
             ImGui_ImplDX12_InvalidateDeviceObjects();
             re_log::info("[overlay] applied pending font scale: {:.2f}", g_ui.ui_scale);
         }
