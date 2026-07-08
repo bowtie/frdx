@@ -9,10 +9,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <thread>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -51,48 +53,41 @@ static std::optional<ParsedUrl> parse_url(const std::string& url) {
     return out;
 }
 
-// ── Custom read callback for HTTP streaming mode ──
-// miniaudio calls this to fetch raw bytes. We read from WinHTTP.
-struct HttpReadContext {
-    HINTERNET request = nullptr;
-    std::vector<std::byte>* raw_buf = nullptr;
-    bool eof = false;
-};
+// ── HTTP data pre-buffer ──
+// miniaudio's ma_decoder_init with custom read procs crashes on streaming
+// data (it expects blocking file I/O semantics). Instead, we pre-buffer the
+// raw HTTP data into a vector, then use ma_decoder_init_memory to decode
+// from the buffer. This cleanly separates download time from decode time.
 
-static ma_result ma_http_read_proc(ma_decoder* pDecoder, void* pBufferOut, size_t bytesToRead, size_t* pBytesRead) {
-    auto* ctx = static_cast<HttpReadContext*>(pDecoder->pUserData);
-    if (!ctx || ctx->eof || !ctx->request) {
-        if (pBytesRead) *pBytesRead = 0;
-        return MA_AT_END;
+// Pre-fetch raw MP3 data from an HTTP stream until we have target_bytes
+// or the stream ends. Returns the fetched data.
+static std::vector<std::byte> prefetch_http_data(HINTERNET request, size_t target_bytes) {
+    std::vector<std::byte> result;
+    result.reserve(target_bytes);
+    std::vector<std::byte> buf(64 * 1024);
+
+    while (result.size() < target_bytes) {
+        DWORD avail = 0;
+        // Wait for data to be available (blocking with timeout)
+        for (int wait = 0; wait < 5000; ++wait) {
+            if (!WinHttpQueryDataAvailable(request, &avail)) {
+                log::warn("[miniaudio] WinHttpQueryDataAvailable failed ({})", GetLastError());
+                return result;
+            }
+            if (avail > 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (avail == 0) break;  // timeout or EOF
+
+        DWORD to_read = std::min<DWORD>(static_cast<DWORD>(buf.size()), avail);
+        to_read = std::min<DWORD>(to_read, static_cast<DWORD>(target_bytes - result.size()));
+        DWORD got = 0;
+        if (!WinHttpReadData(request, buf.data(), to_read, &got) || got == 0) break;
+
+        result.insert(result.end(), buf.data(), buf.data() + got);
     }
 
-    DWORD avail = 0;
-    if (!WinHttpQueryDataAvailable(ctx->request, &avail)) {
-        log::warn("[miniaudio] WinHttpQueryDataAvailable failed ({})", GetLastError());
-        ctx->eof = true;
-        if (pBytesRead) *pBytesRead = 0;
-        return MA_AT_END;
-    }
-
-    if (avail == 0) {
-        // No data available right now — return 0 bytes read.
-        if (pBytesRead) *pBytesRead = 0;
-        return MA_SUCCESS;
-    }
-
-    DWORD to_read = std::min<DWORD>(static_cast<DWORD>(ctx->raw_buf->size()), avail);
-    DWORD got = 0;
-    if (!WinHttpReadData(ctx->request, ctx->raw_buf->data(), to_read, &got) || got == 0) {
-        log::warn("[miniaudio] WinHttpReadData failed ({})", GetLastError());
-        ctx->eof = true;
-        if (pBytesRead) *pBytesRead = 0;
-        return MA_AT_END;
-    }
-
-    size_t copy_size = std::min<size_t>(got, bytesToRead);
-    std::memcpy(pBufferOut, ctx->raw_buf->data(), copy_size);
-    if (pBytesRead) *pBytesRead = copy_size;
-    return MA_SUCCESS;
+    return result;
 }
 
 // ── File-based creation (for benchmark) ──
@@ -216,12 +211,26 @@ MiniaudioStream::create(const std::string& url, void* winhttp_session) {
 
     stream->h_connect_ = connect;
     stream->h_request_ = request;
-    stream->raw_buf_.resize(64 * 1024);
 
-    // ── Initialize miniaudio decoder with custom read callback ──
-    auto* ctx = new HttpReadContext{};
-    ctx->request = request;
-    ctx->raw_buf = &stream->raw_buf_;
+    // Pre-fetch enough raw MP3 data for the decoder to work with.
+    // 256KB is enough for format detection + several seconds of decoded
+    // PCM at typical shoutcast bitrates (128-320kbps).
+    constexpr size_t PREFETCH_BYTES = 256 * 1024;
+    auto raw_data = prefetch_http_data(request, PREFETCH_BYTES);
+    if (raw_data.empty()) {
+        log::error("[miniaudio] no data received from stream: {}", url);
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connect);
+        if (!winhttp_session) WinHttpCloseHandle(session);
+        return std::unexpected{MiniaudioStreamError::decoder_init_failed};
+    }
+
+    log::info("[miniaudio] pre-buffered {} bytes from {}", raw_data.size(), url);
+
+    // Initialize decoder from the pre-buffered memory.
+    // Store the buffer in the stream so it stays alive for the decoder's
+    // lifetime.
+    stream->raw_buf_ = std::move(raw_data);
 
     auto* dec = new ma_decoder{};
     stream->decoder_ = dec;
@@ -229,11 +238,10 @@ MiniaudioStream::create(const std::string& url, void* winhttp_session) {
     ma_decoder_config config = ma_decoder_config_init(
         ma_format_s16, 2, 48000);
 
-    // Use custom read proc for streaming
-    ma_result result = ma_decoder_init(ma_http_read_proc, nullptr, ctx, &config, dec);
+    ma_result result = ma_decoder_init_memory(
+        stream->raw_buf_.data(), stream->raw_buf_.size(), &config, dec);
     if (result != MA_SUCCESS) {
-        log::error("[miniaudio] ma_decoder_init failed: {}", static_cast<int>(result));
-        delete ctx;
+        log::error("[miniaudio] ma_decoder_init_memory failed: {}", static_cast<int>(result));
         delete dec;
         stream->decoder_ = nullptr;
         WinHttpCloseHandle(request);
@@ -249,10 +257,6 @@ MiniaudioStream::create(const std::string& url, void* winhttp_session) {
 MiniaudioStream::~MiniaudioStream() {
     if (decoder_) {
         ma_decoder_uninit(DEC(decoder_));
-        // For HTTP mode, the HttpReadContext was stored as pUserData
-        if (!file_mode_ && DEC(decoder_)->pUserData) {
-            delete static_cast<HttpReadContext*>(DEC(decoder_)->pUserData);
-        }
         delete DEC(decoder_);
     }
     if (h_request_) WinHttpCloseHandle(static_cast<HINTERNET>(h_request_));

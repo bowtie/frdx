@@ -330,13 +330,14 @@ add_custom_command(TARGET frdx_sandbox POST_BUILD
 add_executable(frdx_benchmark
     src/benchmark_main.cpp
     src/sources/miniaudio_stream.cpp
-    src/log.cpp
+    src/sources/mpg123_stream.cpp
 )
 
 target_include_directories(frdx_benchmark PRIVATE
     include
     third_party/miniaudio
     third_party/mpg123/include
+    third_party/nlohmann
     third_party/wil/include
 )
 
