@@ -1,5 +1,6 @@
 #include "frdx/sources/mpg123_stream.hpp"
 #include "frdx/log.hpp"
+#include "frdx/platform/windows/subprocess.hpp"
 
 #include <mpg123.h>
 
@@ -44,8 +45,9 @@ struct ParsedUrl {
 };
 
 static std::optional<ParsedUrl> parse_url(const std::string& url) {
-    // Convert to wide string for WinHTTP
-    std::wstring wurl(url.begin(), url.end());
+    // Convert to wide string for WinHTTP (proper UTF-8 -> UTF-16; the old
+    // std::wstring wurl(url.begin(), url.end()) only worked for Latin-1).
+    std::wstring wurl = frdx::subprocess::widen(url);
 
     URL_COMPONENTS uc{};
     uc.dwStructSize = sizeof(uc);
