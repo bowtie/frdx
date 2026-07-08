@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <string>
+#include <utility>
 
 #include <imgui.h>
 #include <imgui_animated.h>
@@ -173,7 +174,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             const char* preview = g_ui.combo_cache.names[g_ui.combo_sel].c_str();
             if (g_ui.combo_anim_sel != g_ui.combo_sel) {
                 if (g_ui.combo_anim_sel >= 0 &&
-                    g_ui.combo_anim_sel < static_cast<int>(g_ui.combo_cache.names.size())) {
+                    std::cmp_less(g_ui.combo_anim_sel, g_ui.combo_cache.names.size())) {
                     g_ui.combo_prev_label =
                         g_ui.combo_cache.names[static_cast<size_t>(g_ui.combo_anim_sel)];
                 } else {
@@ -325,7 +326,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         g_ui.combo_switch_dir = -1;
         animate_station_combo_by(-1);
         const int sel = g_ui.combo_sel;
-        if (sel >= 0 && sel < static_cast<int>(g_ui.combo_cache.sids.size())) {
+        if (sel >= 0 && std::cmp_less(sel, g_ui.combo_cache.sids.size())) {
             enqueue_station_switch(g_ui.combo_cache.sids[sel],
                                    g_ui.combo_cache.strids[sel]);
         }
@@ -353,7 +354,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         g_ui.combo_switch_dir = 1;
         animate_station_combo_by(1);
         const int sel = g_ui.combo_sel;
-        if (sel >= 0 && sel < static_cast<int>(g_ui.combo_cache.sids.size())) {
+        if (sel >= 0 && std::cmp_less(sel, g_ui.combo_cache.sids.size())) {
             enqueue_station_switch(g_ui.combo_cache.sids[sel],
                                    g_ui.combo_cache.strids[sel]);
         }
@@ -474,7 +475,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
     const float target_y      = win_top;
     const auto& st_style      = ImGui::GetStyle();
     const auto& stations      = sc_st->stations_nolock();
-    const float station_count = static_cast<float>(stations.size());
+    const auto station_count  = static_cast<float>(stations.size());
     const float header_h      = ImGui::GetFrameHeight();
     const float collapsed_body_h = st_style.WindowPadding.y * 2.4f + station_count * header_h +
                                    std::max(0.0f, station_count - 1.0f) * st_style.ItemSpacing.y;

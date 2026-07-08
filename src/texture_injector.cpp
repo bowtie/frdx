@@ -95,7 +95,7 @@ void TextureInjector::prewarm_logo_cache(const std::vector<std::string>& logo_ur
             // Deduplicate: skip if already cached with matching file hash.
             std::filesystem::path data_dir;
             {
-                std::lock_guard lk{mtx_};
+                std::scoped_lock lk{mtx_};
                 data_dir = data_dir_;
             }
             if (data_dir.empty()) continue;
@@ -175,10 +175,11 @@ static std::filesystem::path make_cache_file_path(
     auto slug = std::filesystem::path(url).filename().string();
     if (auto dot = slug.rfind('.'); dot != std::string::npos)
         slug = slug.substr(0, dot);
-    for (char& c : slug)
+    for (char& c : slug) {
         if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
             c == '"' || c == '<' || c == '>' || c == '|')
             c = '_';
+    }
     if (slug.empty()) slug = "artwork";
     if (slug.size() > 48) slug = slug.substr(0, 48);
 
@@ -259,9 +260,9 @@ void TextureInjector::save_cache(const std::string& url, uint64_t file_hash,
                                                       v.width, v.height, raw);
         std::ofstream f(cache_file, std::ios::binary | std::ios::trunc);
         if (!f) continue;
-        uint32_t w = static_cast<uint32_t>(v.width);
-        uint32_t ht = static_cast<uint32_t>(v.height);
-        uint32_t ps = static_cast<uint32_t>(v.pixels.size());
+        auto w  = static_cast<uint32_t>(v.width);
+        auto ht = static_cast<uint32_t>(v.height);
+        auto ps = static_cast<uint32_t>(v.pixels.size());
         f.write(reinterpret_cast<const char*>(&w), 4);
         f.write(reinterpret_cast<const char*>(&ht), 4);
         f.write(reinterpret_cast<const char*>(&ps), 4);
@@ -281,7 +282,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
 
     std::filesystem::path data_dir;
     {
-        std::lock_guard lk{mtx_};
+        std::scoped_lock lk{mtx_};
         data_dir = data_dir_;
     }
 
@@ -325,7 +326,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
             }
             log::info("[texinject] cache hit for {} ({} variant)", url, cached_variants.size());
             if (!prewarm) {
-                std::lock_guard lk{pixels_mtx_};
+                std::scoped_lock lk{pixels_mtx_};
                 pending_variants_ = std::move(cached_variants);
                 has_new_image_ = true;
                 has_pending_pixels_.store(true, std::memory_order_release);
@@ -449,7 +450,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     //   - kArtHeight = 104 (displays as 104 * 96/104 = 96 after squish)
     // The source image is cover-fit to kArtWidth × kArtHeight (taller
     // than wide), then placed at x=0..kArtWidth, y=0..kArtHeight.
-    const int kArtWidth  = static_cast<int>(target_h * 96 / 104);
+    const int kArtWidth  = (target_h * 96 / 104);
     const int kArtHeight = target_h;
 
     // Single variant at the actual target dimensions.
@@ -654,7 +655,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         return;
     }
     {
-        std::lock_guard lk{pixels_mtx_};
+        std::scoped_lock lk{pixels_mtx_};
         pending_variants_ = std::move(variants);
         has_new_image_ = true;
         has_pending_pixels_.store(true, std::memory_order_release);
@@ -665,7 +666,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
 }
 
 bool TextureInjector::pop_pending_pixels(std::vector<PixelVariant>& out_variants) {
-    std::lock_guard lk{pixels_mtx_};
+    std::scoped_lock lk{pixels_mtx_};
     if (!has_new_image_) return false;
     out_variants = pending_variants_;       // copy (keep cache)
     last_variants_ = pending_variants_;     // cache for reinject
@@ -675,7 +676,7 @@ bool TextureInjector::pop_pending_pixels(std::vector<PixelVariant>& out_variants
 }
 
 bool TextureInjector::reinject_last() noexcept {
-    std::lock_guard lk{pixels_mtx_};
+    std::scoped_lock lk{pixels_mtx_};
     if (last_variants_.empty()) return false;
     pending_variants_ = last_variants_;     // restore cached variants
     has_new_image_ = true;

@@ -37,7 +37,7 @@ DependencyManager::DependencyManager(std::filesystem::path bin_dir,
 
 DependencyManager::~DependencyManager() {
     stop_.store(true);
-    std::lock_guard lk{thread_mu_};
+    std::scoped_lock lk{thread_mu_};
     if (thread_.joinable()) thread_.join();
 }
 
@@ -55,7 +55,7 @@ void DependencyManager::start(std::function<void()> on_tool_ready) {
 
 void DependencyManager::retry() {
     stop_.store(false);
-    std::lock_guard lk{thread_mu_};
+    std::scoped_lock lk{thread_mu_};
     if (thread_.joinable()) thread_.join();
     thread_ = std::thread([this] { run_worker(); });
 }
@@ -81,7 +81,7 @@ std::vector<DependencyStatus> DependencyManager::snapshot() const {
         s.downloaded_bytes  = slots_[i].downloaded_bytes.load(std::memory_order_relaxed);
         s.total_bytes       = slots_[i].total_bytes.load(std::memory_order_relaxed);
         {
-            std::lock_guard lk{slots_[i].err_mu};
+            std::scoped_lock lk{slots_[i].err_mu};
             s.error = slots_[i].error;
         }
         out.push_back(std::move(s));
@@ -112,7 +112,7 @@ bool DependencyManager::download_tool(Tool t) {
     slot.downloaded_bytes.store(0, std::memory_order_relaxed);
     slot.total_bytes.store(0, std::memory_order_relaxed);
     {
-        std::lock_guard lk{slot.err_mu};
+        std::scoped_lock lk{slot.err_mu};
         slot.error.clear();
     }
 
@@ -135,7 +135,7 @@ bool DependencyManager::download_tool(Tool t) {
     slot.downloading.store(false, std::memory_order_relaxed);
 
     if (!ok) {
-        std::lock_guard lk{slot.err_mu};
+        std::scoped_lock lk{slot.err_mu};
         slot.error = "download failed";
         log::warn("[deps] failed to download {}", sp.out_name);
         return false;
@@ -144,7 +144,7 @@ bool DependencyManager::download_tool(Tool t) {
     // Verify the file exists
     std::error_code ec;
     if (!std::filesystem::exists(dest, ec)) {
-        std::lock_guard lk{slot.err_mu};
+        std::scoped_lock lk{slot.err_mu};
         slot.error = "file missing after download";
         return false;
     }

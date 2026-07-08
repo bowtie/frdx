@@ -122,9 +122,10 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
                 sp.metadata.ws_filter.data_field = mf.value("data_field", "");
                 if (mf.contains("stream_type_value_map") && mf["stream_type_value_map"].is_object()) {
                     for (auto it = mf["stream_type_value_map"].begin();
-                         it != mf["stream_type_value_map"].end(); ++it)
+                         it != mf["stream_type_value_map"].end(); ++it) {
                         sp.metadata.ws_filter.stream_type_value_map[it.key()] =
                             it.value().get<std::string>();
+                    }
                 }
             }
             if (m.contains("heartbeat")) {
@@ -139,9 +140,10 @@ std::vector<StationPreset> parse_stations_json(const std::filesystem::path& path
                 sp.metadata.ws_subscribe.message       = sub.value("message", "");
                 if (sub.contains("stream_message_map") && sub["stream_message_map"].is_object()) {
                     for (auto it = sub["stream_message_map"].begin();
-                         it != sub["stream_message_map"].end(); ++it)
+                         it != sub["stream_message_map"].end(); ++it) {
                         sp.metadata.ws_subscribe.stream_message_map[it.key()] =
                             it.value().get<std::string>();
+                    }
                 }
             }
         }

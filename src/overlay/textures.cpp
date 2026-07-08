@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <utility>
 #include <vector>
 
 #include <imgui.h>
@@ -55,7 +56,7 @@ void load_overlay_font(float scale) {
     //
     // Snap the scale to an integer multiple (ceil) so 1440p gets 2x.
     const int int_scale  = std::max(1, static_cast<int>(std::ceil(scale)));
-    const float effective_scale = static_cast<float>(int_scale);
+    const auto effective_scale    = static_cast<float>(int_scale);
     const float font_size = 16.0f * 2.0f;  // always 32px atlas
     const float font_global_scale = effective_scale / 2.0f;  // 1x -> 0.5, 2x -> 1.0
 
@@ -83,7 +84,7 @@ void load_overlay_font(float scale) {
 // style values are read during Begin().
 void set_font_scale(float scale) {
     const int int_scale = std::max(1, static_cast<int>(std::ceil(scale)));
-    const float effective_scale = static_cast<float>(int_scale);
+    const auto effective_scale = static_cast<float>(int_scale);
     g_ui.ui_scale = effective_scale;
     // Auto-scale font with UI scale unless the debug font override is active.
     if (g_ui.debug_font_scale == 0) {
@@ -228,7 +229,7 @@ void load_background_texture(ID3D12CommandQueue* queue) {
     g_dx.device->CreateShaderResourceView(tex.get(), &srvDesc, cpuHandle);
 
     g_ui.bg_texture        = std::move(tex);
-    g_ui.bg_texture_id     = (ImTextureID)(gpuHandle.ptr);
+    g_ui.bg_texture_id     = static_cast<ImTextureID>(gpuHandle.ptr);
     g_ui.bg_texture_width  = static_cast<UINT>(w);
     g_ui.bg_texture_height = static_cast<UINT>(h);
     log::info("[overlay] loaded sandbox background ({}x{}) from {}", w, h, bg_path.string());
@@ -328,7 +329,7 @@ static const std::array<BlurStrength, 15>& blur_strength_table() {
 
         std::array<BlurStrength, 15> out{};
         int idx = 0;
-        for (int i = 0; i < static_cast<int>(blurOffsets.size()); ++i) {
+        for (int i = 0; std::cmp_less(i, blurOffsets.size()); ++i) {
             int iterationNumber = static_cast<int>(std::ceil(
                 (blurOffsets[i].maxOffset - blurOffsets[i].minOffset) / offsetSum * numOfBlurSteps));
             remainingSteps -= iterationNumber;
@@ -741,8 +742,8 @@ void draw_backdrop_blur(float alpha_scalar) {
 
     // 1) The blurred scene (forced opaque via the SRV; faded by alpha_scalar).
     const ImU32 img_col = IM_COL32(255, 255, 255, static_cast<int>(alpha * 255.0f));
-    dl->AddImageRounded((ImTextureID)g_dx.blur_srv_gpu[0].ptr, p_min, p_max, ImVec2(u0, v0),
-                        ImVec2(u1, v1), img_col, rounding);
+    dl->AddImageRounded(static_cast<ImTextureID>(g_dx.blur_srv_gpu[0].ptr), p_min, p_max,
+                        ImVec2(u0, v0), ImVec2(u1, v1), img_col, rounding);
 
     // 2) A translucent frosted-glass tint on top, so opaque widgets have a
     //    surface to sit on and bright scenes don't wash the panel out.

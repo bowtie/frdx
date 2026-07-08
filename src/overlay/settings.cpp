@@ -307,7 +307,7 @@ void draw_debug_tab() {
         if (s_custom_image_path[0] != '\0' && !s_custom_injecting.load()) {
             s_custom_injecting.store(true);
             {
-                std::lock_guard lk(s_custom_inject_mu);
+                std::scoped_lock lk(s_custom_inject_mu);
                 s_custom_inject_status = "Processing local file...";
             }
             const bool raw = s_inject_mode == 0;
@@ -315,10 +315,10 @@ void draw_debug_tab() {
             std::string path(s_custom_image_path);
             std::thread([raw, border, path] {
                 std::string url = "file:///" + path;
-                std::replace(url.begin(), url.end(), '\\', '/');
+                std::ranges::replace(url, '\\', '/');
                 TextureInjector::instance().update_artwork_url(url, raw, border);
                 {
-                    std::lock_guard lk(s_custom_inject_mu);
+                    std::scoped_lock lk(s_custom_inject_mu);
                     s_custom_inject_status = "Injected — check HUD";
                 }
                 s_custom_injecting.store(false);
@@ -342,7 +342,7 @@ void draw_debug_tab() {
         if (s_custom_image_url[0] != '\0' && !s_custom_injecting.load()) {
             s_custom_injecting.store(true);
             {
-                std::lock_guard lk(s_custom_inject_mu);
+                std::scoped_lock lk(s_custom_inject_mu);
                 s_custom_inject_status = "Downloading from URL...";
             }
             const bool raw = s_inject_mode == 0;
@@ -351,7 +351,7 @@ void draw_debug_tab() {
             std::thread([raw, border, url] {
                 TextureInjector::instance().update_artwork_url(url, raw, border);
                 {
-                    std::lock_guard lk(s_custom_inject_mu);
+                    std::scoped_lock lk(s_custom_inject_mu);
                     s_custom_inject_status = "Injected — check HUD";
                 }
                 s_custom_injecting.store(false);
@@ -362,7 +362,7 @@ void draw_debug_tab() {
     // Status line
     std::string status_copy;
     {
-        std::lock_guard lk(s_custom_inject_mu);
+        std::scoped_lock lk(s_custom_inject_mu);
         status_copy = s_custom_inject_status;
     }
     if (!status_copy.empty()) {

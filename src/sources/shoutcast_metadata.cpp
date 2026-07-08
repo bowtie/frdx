@@ -909,8 +909,7 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
         // bytes (1 length byte + 4096 payload), never both simultaneously
         // (metadata overwrites the start of the audio region).  So we only
         // need max(metaint, 4097) bytes, not metaint + 4097.
-        std::size_t buf_needed = static_cast<std::size_t>(
-            std::max(metaint, static_cast<int>(4097)));
+        std::size_t buf_needed = static_cast<std::size_t>(std::max(metaint, 4097));
         if (icy_buf_.size() < buf_needed) icy_buf_.resize(buf_needed);
         char* buf = icy_buf_.data();
         bool first_title = true;

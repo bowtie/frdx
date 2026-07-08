@@ -34,11 +34,11 @@ void push_toast(ToastKind kind, std::string title, std::string detail, float lif
 
 ImVec4 toast_color(ToastKind kind) {
     switch (kind) {
-        case ToastKind::success: return ImVec4(0.45f, 0.85f, 0.55f, 1.0f);
-        case ToastKind::warn: return ImVec4(1.0f, 0.72f, 0.35f, 1.0f);
+        case ToastKind::success: return {0.45f, 0.85f, 0.55f, 1.0f};
+        case ToastKind::warn: return {1.0f, 0.72f, 0.35f, 1.0f};
         case ToastKind::info: break;
     }
-    return ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
+    return {0.55f, 0.78f, 1.0f, 1.0f};
 }
 
 bool is_status_artist(std::string_view artist) noexcept {

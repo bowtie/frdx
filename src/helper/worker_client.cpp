@@ -124,7 +124,7 @@ void WorkerClient::stop() noexcept {
 }
 
 std::string WorkerClient::request(std::string_view json_msg) {
-    std::lock_guard lk{mu_};
+    std::scoped_lock lk{mu_};
     if (token_.empty()) return {};
     const auto pipe_name = ipc::control_pipe_name(token_);
     HANDLE h = CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE,

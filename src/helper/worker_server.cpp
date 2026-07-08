@@ -79,9 +79,8 @@ void kill_process_tree(DWORD pid) {
 bool http_download(std::string_view url, std::string_view dest_path) {
     // Parse URL
     std::string url_str{url};
-    if (url_str.rfind("https://", 0) != 0 && url_str.rfind("http://", 0) != 0)
-        return false;
-    bool https = url_str.rfind("https://", 0) == 0;
+    if (!url_str.starts_with("https://") && !url_str.starts_with("http://")) return false;
+    bool https      = url_str.starts_with("https://");
     auto scheme_end = url_str.find("://") + 3;
     auto host_end = url_str.find('/', scheme_end);
     if (host_end == std::string::npos) host_end = url_str.size();
@@ -119,8 +118,8 @@ bool http_download(std::string_view url, std::string_view dest_path) {
     auto percent_encode_path = [](const std::string& path) -> std::string {
         std::string out;
         out.reserve(path.size() * 3);
-        for (size_t i = 0; i < path.size(); ++i) {
-            unsigned char c = static_cast<unsigned char>(path[i]);
+        for (char i : path) {
+            auto c = static_cast<unsigned char>(i);
             // Keep ASCII safe characters as-is (RFC 3986 unreserved + path chars)
             if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
                 (c >= '0' && c <= '9') ||
@@ -226,7 +225,7 @@ std::string handle_kill(const nlohmann::json& req) {
     int id = req.value("id", -1);
     if (id < 0) return R"({"ok":false,"error":"invalid id"})";
 
-    std::lock_guard lk{g_pipelines_mu};
+    std::scoped_lock lk{g_pipelines_mu};
     for (auto it = g_pipelines.begin(); it != g_pipelines.end(); ++it) {
         if (it->id == id) {
             it->stopping->store(true);
@@ -295,7 +294,7 @@ std::string handle_download(const nlohmann::json& req) {
     if (url.empty() || dest.empty()) return R"({"ok":false,"error":"missing url or dest"})";
 
     // Handle local file:// URLs by copying the file directly.
-    if (url.rfind("file://", 0) == 0) {
+    if (url.starts_with("file://")) {
         std::string local = url.substr(7);
         // Strip leading slashes after file:// (e.g. file:///C:/path)
         while (local.size() > 1 && local[0] == '/' && local.size() > 2 &&
@@ -412,7 +411,7 @@ void run_worker_loop(const std::wstring& pipe_name, HANDLE shutdown_event,
 
     // Cleanup: kill all pipelines
     {
-        std::lock_guard lk{g_pipelines_mu};
+        std::scoped_lock lk{g_pipelines_mu};
         for (auto& p : g_pipelines) {
             p.stopping->store(true);
             for (HANDLE h : p.procs) {

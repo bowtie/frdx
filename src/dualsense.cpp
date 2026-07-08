@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace frdx::dualsense {
@@ -199,7 +200,7 @@ TriggerEffect rigid_zones(const std::array<uint8_t, 10>& zones) {
     TriggerEffect out;
     out.mode          = EffectMode::rigid_zones;
     const auto packed = pack_zones(zones);
-    std::copy(packed.begin(), packed.end(), out.params.begin());
+    std::ranges::copy(packed, out.params.begin());
     out.param_count = 10;
     return out;
 }
@@ -213,7 +214,7 @@ TriggerEffect vibrate_zones(uint8_t amp, int freq, int wall_zones) {
     TriggerEffect out;
     out.mode          = EffectMode::vibrate_zones;
     const auto packed = pack_zones(zones);
-    std::copy(packed.begin(), packed.end(), out.params.begin());
+    std::ranges::copy(packed, out.params.begin());
     out.params[8]   = clamp_byte(static_cast<float>(freq));
     out.param_count = 10;
     return out;
@@ -486,14 +487,13 @@ std::vector<HidApiCandidate> enumerate_hidapi_controllers() {
     }
     hid_free_enumeration(root);
 
-    std::stable_sort(out.begin(), out.end(),
-                     [](const HidApiCandidate& a, const HidApiCandidate& b) {
-                         const int sa = (a.col03 ? 16 : 0) + (a.interface_no == 3 ? 8 : 0) +
-                                        (a.gamepad_usage ? 2 : 0) + (a.bluetooth ? 0 : 1);
-                         const int sb = (b.col03 ? 16 : 0) + (b.interface_no == 3 ? 8 : 0) +
-                                        (b.gamepad_usage ? 2 : 0) + (b.bluetooth ? 0 : 1);
-                         return sa > sb;
-                     });
+    std::ranges::stable_sort(out, [](const HidApiCandidate& a, const HidApiCandidate& b) {
+        const int sa = (a.col03 ? 16 : 0) + (a.interface_no == 3 ? 8 : 0) +
+                       (a.gamepad_usage ? 2 : 0) + (a.bluetooth ? 0 : 1);
+        const int sb = (b.col03 ? 16 : 0) + (b.interface_no == 3 ? 8 : 0) +
+                       (b.gamepad_usage ? 2 : 0) + (b.bluetooth ? 0 : 1);
+        return sa > sb;
+    });
     if (out.empty()) {
         log::warn("[dualsense] HIDAPI found no DualSense paths; scanned Sony HID devices={}",
                   g_last_scan_stats.hidapi_devices);
@@ -503,8 +503,8 @@ std::vector<HidApiCandidate> enumerate_hidapi_controllers() {
 
 bool contains_controller_path(const std::vector<ControllerInfo>& controllers,
                               std::wstring_view path) {
-    return std::any_of(controllers.begin(), controllers.end(),
-                       [&](const ControllerInfo& c) { return c.path == path; });
+    return std::ranges::any_of(controllers,
+                               [&](const ControllerInfo& c) { return c.path == path; });
 }
 
 void append_rawinput_dualsense_devices(std::vector<ControllerInfo>& out,
@@ -677,14 +677,15 @@ std::vector<ControllerInfo> enumerate_controllers() {
     for (const auto& c : out) {
         if (!c.bluetooth && !c.serial.empty()) wired_serials.push_back(c.serial);
     }
-    out.erase(std::remove_if(out.begin(), out.end(),
-                             [&](const ControllerInfo& c) {
-                                 return c.bluetooth && !c.serial.empty() &&
-                                        std::find(wired_serials.begin(), wired_serials.end(),
-                                                  c.serial) != wired_serials.end();
-                             }),
+    out.erase(std::ranges::remove_if(out,
+                                     [&](const ControllerInfo& c) {
+                                         return c.bluetooth && !c.serial.empty() &&
+                                                std::ranges::find(wired_serials, c.serial) !=
+                                                    wired_serials.end();
+                                     })
+                  .begin(),
               out.end());
-    std::stable_sort(out.begin(), out.end(), [](const ControllerInfo& a, const ControllerInfo& b) {
+    std::ranges::stable_sort(out, [](const ControllerInfo& a, const ControllerInfo& b) {
         const int sa = (a.blocked ? 0 : 8) + (a.col03 ? 16 : 0) + (a.gamepad_usage ? 2 : 0) +
                        (a.bluetooth ? 0 : 1);
         const int sb = (b.blocked ? 0 : 8) + (b.col03 ? 16 : 0) + (b.gamepad_usage ? 2 : 0) +
@@ -891,9 +892,8 @@ public:
         }
         auto selected = controllers.begin();
         if (!locked_serial.empty()) {
-            auto match =
-                std::find_if(controllers.begin(), controllers.end(),
-                             [&](const ControllerInfo& c) { return c.serial == locked_serial; });
+            auto match = std::ranges::find_if(
+                controllers, [&](const ControllerInfo& c) { return c.serial == locked_serial; });
             if (match != controllers.end()) selected = match;
         }
         info_   = *selected;
@@ -1006,9 +1006,8 @@ private:
 
         auto selected = controllers.begin();
         if (!locked_serial.empty()) {
-            auto match =
-                std::find_if(controllers.begin(), controllers.end(),
-                             [&](const HidApiCandidate& c) { return c.serial == locked_serial; });
+            auto match = std::ranges::find_if(
+                controllers, [&](const HidApiCandidate& c) { return c.serial == locked_serial; });
             if (match != controllers.end()) selected = match;
         }
         hidapi_info_ = *selected;
@@ -1241,9 +1240,10 @@ private:
     using TimePoint = std::chrono::steady_clock::time_point;
 
     void arm_shift(const Telemetry& t, const DualSenseConfig& s, TimePoint now) {
-        if (prev_gear_ && t.gear != *prev_gear_)
+        if (prev_gear_ && t.gear != *prev_gear_) {
             shift_until_ = now + std::chrono::milliseconds(
                                      static_cast<int>(std::lround(s.gear_shift_duration_ms)));
+        }
         prev_gear_ = t.gear;
     }
 
@@ -1260,18 +1260,19 @@ private:
         const bool handbrake_full_throttle =
             t.accel >= static_cast<uint8_t>(kRawMax * 0.8f) && t.handbrake > 16 && t.speed < 1.0f;
         if (handbrake_full_throttle) return vibrate(s.rev_limit_freq, s.rev_limit_amp);
-        if (t.accel >= s.accel_deadzone) {
+        if (std::cmp_greater_equal(t.accel, s.accel_deadzone)) {
             const float rpm_ratio = t.max_rpm > 0.0f ? t.rpm / t.max_rpm : 0.0f;
-            if (rpm_ratio > s.rev_limit_ratio)
+            if (rpm_ratio > s.rev_limit_ratio) {
                 rev_until_ = now + std::chrono::milliseconds(
                                        static_cast<int>(std::lround(s.rev_limit_hold_ms)));
+            }
         }
         return now < rev_until_ ? vibrate(s.rev_limit_freq, s.rev_limit_amp) : off();
     }
 
     TriggerEffect idle_buzz(const Telemetry& t, const DualSenseConfig& s, TimePoint now) const {
-        if (!s.enable_idle_buzz || t.speed >= s.idle_max_speed_kmh ||
-            !(t.accel >= 1 && t.accel <= s.idle_accel_max))
+        if (!s.enable_idle_buzz || t.speed >= s.idle_max_speed_kmh || t.accel < 1 ||
+            t.accel > s.idle_accel_max)
             return off();
         const auto ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -1287,7 +1288,7 @@ private:
     }
 
     TriggerEffect wheelspin_buzz(const Telemetry& t, const DualSenseConfig& s) const {
-        if (!s.enable_wheelspin_buzz || t.accel < s.accel_deadzone) return off();
+        if (!s.enable_wheelspin_buzz || std::cmp_less(t.accel, s.accel_deadzone)) return off();
         const auto wheels = driven_wheels(t.drive_train);
         float spin        = 0.0f;
         if (t.speed < kLowSpeedKmh) {
@@ -1308,7 +1309,7 @@ private:
     }
 
     TriggerEffect abs_pulse(const Telemetry& t, const DualSenseConfig& s) const {
-        if (!s.enable_abs || t.brake < std::max(1, s.abs_brake_threshold) ||
+        if (!s.enable_abs || std::cmp_less(t.brake, std::max(1, s.abs_brake_threshold)) ||
             t.speed < s.abs_min_speed_kmh)
             return off();
         if (max_abs(t.tire_slip_ratio) < s.abs_slip_ratio_threshold &&
@@ -1343,9 +1344,10 @@ private:
         l2_in_wall_ =
             wall_state(t.brake, l2_in_wall_, s.brake_wall_engage_at, s.brake_wall_release_at);
         if (l2_in_wall_) return build_wall(s.wall_zones);
-        if (s.enable_brake_static_wall)
+        if (s.enable_brake_static_wall) {
             return build_brake_walls(s.brake_static_wall_at, s.brake_static_wall_force,
                                      s.wall_zones);
+        }
         return brake_resistance(t, s);
     }
 
@@ -1367,8 +1369,8 @@ private:
     }
 
     std::optional<uint8_t> prev_gear_;
-    TimePoint shift_until_{};
-    TimePoint rev_until_{};
+    TimePoint shift_until_;
+    TimePoint rev_until_;
     bool l2_in_wall_ = false;
     bool r2_in_wall_ = false;
 };
@@ -1388,8 +1390,8 @@ std::vector<ControllerDevice> enumerate_devices() {
 bool identify_controller(const std::string& serial, int force) {
     if (serial.empty()) return false;
     const auto devices = enumerate_controllers();
-    const auto it      = std::find_if(devices.begin(), devices.end(),
-                                      [&](const ControllerInfo& d) { return d.serial == serial; });
+    const auto it =
+        std::ranges::find_if(devices, [&](const ControllerInfo& d) { return d.serial == serial; });
     if (it == devices.end()) return false;
 
     detail::unique_handle h = open_hid_writer_handle(it->path.c_str());
@@ -1442,7 +1444,7 @@ bool send_test_telemetry(int udp_port) {
                0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     closesocket(sock);
     if (started_wsa) WSACleanup();
-    return sent == static_cast<int>(packet.size());
+    return std::cmp_equal(sent, packet.size());
 }
 
 int run_controller_broker(const std::wstring& pipe_name, const std::string& locked_serial) {
@@ -1559,7 +1561,7 @@ int run_controller_broker_server(const std::string& locked_serial) {
     }
 }
 
-DualSenseService::DualSenseService(DualSenseConfig cfg) : cfg_{cfg} {}
+DualSenseService::DualSenseService(DualSenseConfig cfg) : cfg_{std::move(cfg)} {}
 
 DualSenseService::~DualSenseService() { stop(); }
 
@@ -1593,7 +1595,7 @@ void DualSenseService::run() {
         return;
     }
 
-    SOCKET sock     = INVALID_SOCKET;
+    auto sock       = INVALID_SOCKET;
     int active_port = 0;
     TriggerWriter triggers;
     EffectController controller;

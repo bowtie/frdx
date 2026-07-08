@@ -2,6 +2,7 @@
 #include "frdx/overlay/overlay_priv.hpp"
 #include <array>
 #include <fstream>
+#include <utility>
 #include "frdx/platform/windows/subprocess.hpp"
 
 namespace frdx::overlay {
@@ -366,7 +367,7 @@ void draw_dualsense_controller_picker(const DualSenseConfig& ds) {
             const auto& dev     = g_ui.dualsense_devices[i];
             const bool disabled = dev.serial.empty();
             if (disabled) ImGui::BeginDisabled();
-            const bool is_selected  = selected == static_cast<int>(i + 1);
+            const bool is_selected  = std::cmp_equal(selected, i + 1);
             const std::string label = disabled ? dev.name + " (no serial)" : dev.name;
             if (ImGui::Selectable(label.c_str(), is_selected) && !disabled) {
                 patch_dualsense([serial = dev.serial](DualSenseConfig& c) {

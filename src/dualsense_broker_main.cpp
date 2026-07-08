@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <print>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -67,10 +68,9 @@ void cleanup_scheduled_task() {
 }
 
 void print_status(const frdx::dualsense::RuntimeStatus& status) {
-    std::printf("[frdx-dualsense] connected=%s telemetry=%s controller=\"%s\" error=\"%s\"\n",
-                status.controller_connected ? "yes" : "no",
-                status.telemetry_seen ? "yes" : "no", status.controller_name.c_str(),
-                status.last_error.c_str());
+    std::println("[frdx-dualsense] connected={} telemetry={} controller=\"{}\" error=\"{}\"",
+                 status.controller_connected ? "yes" : "no", status.telemetry_seen ? "yes" : "no",
+                 status.controller_name, status.last_error);
     std::fflush(stdout);
 }
 
@@ -129,7 +129,7 @@ bool process_name_exists(std::wstring_view name) {
 }
 
 int run_external_controller(const std::filesystem::path& config_path, int port_override,
-                            const std::string& locked_serial, std::wstring watch_process) {
+                            const std::string& locked_serial, const std::wstring& watch_process) {
     // The helper exe lives in <game>/mods/frdx/, so exe_directory() already
     // returns the data directory — don't append "mods/frdx" again.
     const auto data_dir = exe_directory();
@@ -144,13 +144,13 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     HANDLE singleton = CreateMutexW(nullptr, TRUE, L"Local\\FRDX_DualSenseExternalHelper");
     if (!singleton) {
         frdx::log::warn("[dualsense-external] singleton mutex failed ({})", GetLastError());
-        std::printf("[frdx-dualsense] failed to create singleton mutex (%lu)\n", GetLastError());
+        std::println("[frdx-dualsense] failed to create singleton mutex ({})", GetLastError());
         std::fflush(stdout);
         return 2;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         frdx::log::info("[dualsense-external] helper already running; exiting duplicate");
-        std::printf("[frdx-dualsense] already running; duplicate exiting\n");
+        std::println("[frdx-dualsense] already running; duplicate exiting");
         std::fflush(stdout);
         CloseHandle(singleton);
         return 0;
@@ -182,15 +182,16 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                     cfg.dualsense.controller_lock_serial.empty()
                         ? std::string{"<none>"}
                         : cfg.dualsense.controller_lock_serial);
-    std::printf("[frdx-dualsense] external mode starting\n");
-    std::printf("[frdx-dualsense] exe dir: %ls\n", data_dir.c_str());
-    std::printf("[frdx-dualsense] log: %ls\n", log_path.c_str());
-    std::printf("[frdx-dualsense] config: %ls\n", config_path.c_str());
-    std::printf("[frdx-dualsense] UDP port: %d\n", cfg.dualsense.udp_port);
+    std::println("[frdx-dualsense] external mode starting");
+    std::println("[frdx-dualsense] exe dir: {}", data_dir.string());
+    std::println("[frdx-dualsense] log: {}", log_path.string());
+    std::println("[frdx-dualsense] config: {}", config_path.string());
+    std::println("[frdx-dualsense] UDP port: {}", cfg.dualsense.udp_port);
     if (!watch_process.empty()) {
-        std::printf("[frdx-dualsense] watching: %ls\n", watch_process.c_str());
+        // wstring → narrow for the narrow-char println format string.
+        std::println("[frdx-dualsense] watching: {}", narrow(watch_process));
     }
-    std::printf("[frdx-dualsense] Press Ctrl+C to stop.\n");
+    std::println("[frdx-dualsense] Press Ctrl+C to stop.");
     std::fflush(stdout);
 
     frdx::dualsense::DualSenseService service{cfg.dualsense};
@@ -241,7 +242,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
         // Check if the bridge requested shutdown (user disabled triggers).
         if (stop_event && WaitForSingleObject(stop_event, 0) == WAIT_OBJECT_0) {
             frdx::log::info("[dualsense-external] stop event signaled; shutting down");
-            std::printf("[frdx-dualsense] stop requested; shutting down\n");
+            std::println("[frdx-dualsense] stop requested; shutting down");
             std::fflush(stdout);
             shutdown_all();
             return 0;
@@ -256,8 +257,8 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                 } else if (saw_game_process) {
                     frdx::log::info("[dualsense-external] watched process '{}' exited; shutting down",
                                     narrow(watch_process));
-                    std::printf("[frdx-dualsense] %ls exited; shutting down\n",
-                                watch_process.c_str());
+                    std::println("[frdx-dualsense] {} exited; shutting down",
+                                 narrow(watch_process));
                     std::fflush(stdout);
                     shutdown_all();
                     return 0;
@@ -283,8 +284,8 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                                 next.dualsense.controller_lock_serial.empty()
                                     ? std::string{"<none>"}
                                     : next.dualsense.controller_lock_serial);
-                std::printf("[frdx-dualsense] reloaded config; UDP port: %d\n",
-                            next.dualsense.udp_port);
+                std::println("[frdx-dualsense] reloaded config; UDP port: {}",
+                             next.dualsense.udp_port);
                 std::fflush(stdout);
             }
         }

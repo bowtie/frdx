@@ -23,8 +23,7 @@
 #include <thread>
 #include <vector>
 
-namespace frdx {
-namespace fastboot {
+namespace frdx::fastboot {
 namespace {
 
 FastBootConfig g_cfg;
@@ -217,7 +216,7 @@ int64_t real_qpc() {
 int64_t now_ms() {
     int64_t f = g_freq.load(std::memory_order_relaxed);
     if (f == 0) return 0;
-    return static_cast<int64_t>(real_qpc() * 1000 / f);
+    return (real_qpc() * 1000 / f);
 }
 
 bool boot_window() {
@@ -456,9 +455,9 @@ void install_hooks() {
 
     // Initialize clock at 1x (virtual == real) BEFORE enabling hooks.
     int64_t q = real_qpc();
-    int64_t t64 = static_cast<int64_t>(g_real_gtc64 ? g_real_gtc64() : 0);
-    int64_t t = static_cast<int64_t>(g_real_gtc ? g_real_gtc() : 0);
-    int64_t m = static_cast<int64_t>(g_real_mm ? g_real_mm() : 0);
+    auto t64  = static_cast<int64_t>(g_real_gtc64 ? g_real_gtc64() : 0);
+    auto t    = static_cast<int64_t>(g_real_gtc ? g_real_gtc() : 0);
+    auto m    = static_cast<int64_t>(g_real_mm ? g_real_mm() : 0);
     store_snap(Snap{1000, q, q, t64, t64, t, t, m, m});
     g_start_ms.store(now_ms(), std::memory_order_seq_cst);
 
@@ -736,5 +735,4 @@ void mark_intro_done_for_sandbox() noexcept {
     g_intro_done.store(true, std::memory_order_release);
 }
 
-} // namespace fastboot
-} // namespace frdx
+} // namespace frdx::fastboot

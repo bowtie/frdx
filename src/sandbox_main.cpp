@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+#include <print>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -447,7 +448,7 @@ static BenchmarkArgs parse_benchmark_args() {
                 ba.frames = std::max(1, _wtoi(argv[i + 1]));
                 ++i;
             }
-        } else if (arg.rfind(L"--benchmark=", 0) == 0) {
+        } else if (arg.starts_with(L"--benchmark=")) {
             ba.enabled = true;
             ba.frames  = std::max(1, _wtoi(arg.c_str() + 12));
         } else if (arg == L"--benchmark-blur") {
@@ -457,7 +458,7 @@ static BenchmarkArgs parse_benchmark_args() {
                 ba.frames = std::max(1, _wtoi(argv[i + 1]));
                 ++i;
             }
-        } else if (arg.rfind(L"--benchmark-blur=", 0) == 0) {
+        } else if (arg.starts_with(L"--benchmark-blur=")) {
             ba.enabled = true;
             ba.blur    = true;
             ba.frames  = std::max(1, _wtoi(arg.c_str() + 16));
@@ -479,30 +480,26 @@ static void write_benchmark_results(const std::filesystem::path& dir,
         frdx::log::error("[bench] failed to write {}", path.string());
         return;
     }
-    std::fprintf(f,
-                 "bench: frames=%d warmup=%d blur=%s "
-                 "frame_avg=%.3fms frame_max=%.3fms frame_min=%.3fms "
-                 "overlay_avg=%.3fms overlay_max=%.3fms overlay_min=%.3fms "
-                 "gpu_avg=%.3fms gpu_max=%.3fms gpu_min=%.3fms\n",
-                 frames, warmup, blur ? "on(maxed)" : "off",
-                 frame_avg_ms, frame_max_ms, frame_min_ms,
-                 overlay_avg_ms, overlay_max_ms, overlay_min_ms,
-                 gpu_avg_ms, gpu_max_ms, gpu_min_ms);
+    std::println(f,
+                 "bench: frames={} warmup={} blur={} frame_avg={:.3f}ms frame_max={:.3f}ms "
+                 "frame_min={:.3f}ms overlay_avg={:.3f}ms overlay_max={:.3f}ms "
+                 "overlay_min={:.3f}ms gpu_avg={:.3f}ms gpu_max={:.3f}ms gpu_min={:.3f}ms",
+                 frames, warmup, blur ? "on(maxed)" : "off", frame_avg_ms, frame_max_ms,
+                 frame_min_ms, overlay_avg_ms, overlay_max_ms, overlay_min_ms, gpu_avg_ms,
+                 gpu_max_ms, gpu_min_ms);
     std::fclose(f);
 
     // Also try to print to the parent console (if launched from a terminal).
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* con = nullptr;
         if (freopen_s(&con, "CONOUT$", "w", stdout) == 0 && con) {
-            std::fprintf(con,
-                         "bench: frames=%d warmup=%d blur=%s "
-                         "frame_avg=%.3fms frame_max=%.3fms frame_min=%.3fms "
-                         "overlay_avg=%.3fms overlay_max=%.3fms overlay_min=%.3fms "
-                         "gpu_avg=%.3fms gpu_max=%.3fms gpu_min=%.3fms\n",
-                         frames, warmup, blur ? "on(maxed)" : "off",
-                         frame_avg_ms, frame_max_ms, frame_min_ms,
-                         overlay_avg_ms, overlay_max_ms, overlay_min_ms,
-                         gpu_avg_ms, gpu_max_ms, gpu_min_ms);
+            std::println(con,
+                         "bench: frames={} warmup={} blur={} frame_avg={:.3f}ms frame_max={:.3f}ms "
+                         "frame_min={:.3f}ms overlay_avg={:.3f}ms overlay_max={:.3f}ms "
+                         "overlay_min={:.3f}ms gpu_avg={:.3f}ms gpu_max={:.3f}ms gpu_min={:.3f}ms",
+                         frames, warmup, blur ? "on(maxed)" : "off", frame_avg_ms, frame_max_ms,
+                         frame_min_ms, overlay_avg_ms, overlay_max_ms, overlay_min_ms, gpu_avg_ms,
+                         gpu_max_ms, gpu_min_ms);
             std::fflush(con);
         }
     }

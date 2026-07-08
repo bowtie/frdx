@@ -58,7 +58,7 @@ std::size_t RingBuffer::read(void* dst, std::size_t n) noexcept {
     if (!dst || n == 0) return 0;
     if (hold_.load(std::memory_order_acquire)) return 0;
 
-    std::lock_guard lk{drain_mu_};
+    std::scoped_lock lk{drain_mu_};
     const auto r     = read_pos_.load(std::memory_order_relaxed);
     const auto w     = write_pos_.load(std::memory_order_acquire);
     const auto avail = w - r;
@@ -92,18 +92,18 @@ std::span<const std::byte> RingBuffer::readable_span(std::size_t n) const noexce
 void RingBuffer::consume(std::size_t n) noexcept {
     if (n == 0) return;
 
-    std::lock_guard lk{drain_mu_};
+    std::scoped_lock lk{drain_mu_};
     const auto r = read_pos_.load(std::memory_order_relaxed);
     read_pos_.store(r + n, std::memory_order_release);
 }
 
 void RingBuffer::drain() noexcept {
-    std::lock_guard lk{drain_mu_};
+    std::scoped_lock lk{drain_mu_};
     read_pos_.store(write_pos_.load(std::memory_order_acquire), std::memory_order_release);
 }
 
 void RingBuffer::drop(std::size_t n) noexcept {
-    std::lock_guard lk{drain_mu_};
+    std::scoped_lock lk{drain_mu_};
     const auto r     = read_pos_.load(std::memory_order_relaxed);
     const auto w     = write_pos_.load(std::memory_order_acquire);
     const auto avail = w - r;

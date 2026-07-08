@@ -300,8 +300,8 @@ void run_bridge(HMODULE self) noexcept {
                 logo_urls.push_back(st.metadata.static_artwork_url);
         }
         // Deduplicate
-        std::sort(logo_urls.begin(), logo_urls.end());
-        logo_urls.erase(std::unique(logo_urls.begin(), logo_urls.end()), logo_urls.end());
+        std::ranges::sort(logo_urls);
+        logo_urls.erase(std::ranges::unique(logo_urls).begin(), logo_urls.end());
         TextureInjector::instance().prewarm_logo_cache(logo_urls);
     }
 

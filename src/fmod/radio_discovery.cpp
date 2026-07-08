@@ -78,7 +78,7 @@ std::size_t append_vtable_candidates(const std::byte* s, const std::byte* e,
         std::memcpy(&v, p, 8);
         if (v != target) continue;
         auto* candidate = const_cast<std::byte*>(p) + 8;
-        if (std::find(out.begin(), out.end(), candidate) == out.end()) {
+        if (std::ranges::find(out, candidate) == out.end()) {
             out.push_back(candidate);
         }
     }

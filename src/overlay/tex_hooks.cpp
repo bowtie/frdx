@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <MinHook.h>
+#include <algorithm>
 #include <kiero.hpp>
 #include <kiero_d3d12.hpp>
 #include <cstring>
@@ -56,7 +57,6 @@ bool is_tex_injection_enabled() noexcept {
 
 // Definition deferred to after the tracking globals are declared (it
 // needs g_tex_mutex / g_streamer_mode / g_unverified / g_pending_fp).
-void set_tex_injection_enabled(bool enabled) noexcept;
 
 // ── Radio active flag ──
 // Set by the control loop when the FMOD radio channel is alive.
@@ -175,7 +175,7 @@ void set_tex_injection_enabled(bool enabled) noexcept {
         if (!enabled) {
             // Drop all tracked state so nothing tries to inject into
             // stale textures if/when it's re-enabled later.
-            std::lock_guard lk{g_tex_mutex};
+            std::scoped_lock lk{g_tex_mutex};
             for (auto& tt : g_streamer_mode) { if (tt.resource) tt.resource.reset(); }
             g_streamer_mode.clear();
             g_unverified.clear();
@@ -436,7 +436,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
                    const std::vector<TextureInjector::PixelVariant>& variants) {
     if (!pDevice || !pQueue || variants.empty()) return false;
 
-    std::lock_guard lk{g_tex_mutex};
+    std::scoped_lock lk{g_tex_mutex};
     if (g_streamer_mode.empty()) return false;
 
     HANDLE event = nullptr; // declared outside __try so __except can clean it up
@@ -604,7 +604,7 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
                                const D3D12_SHADER_RESOURCE_VIEW_DESC* pDesc,
                                D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) {
     if (pResource && is_target_texture(pResource)) {
-        std::lock_guard lk{g_tex_mutex};
+        std::scoped_lock lk{g_tex_mutex};
 
         // Periodic clear: if no target texture has been seen for >1 second,
         // clear unverified and pending fingerprint entries — the game likely
@@ -686,7 +686,7 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
         log::error("[texinject] SEH CRASH in injection (code=0x{:08X} op={} res=0x{:X} ecl={})",
                    code, op, res, g_ecl_count.load());
         // Clear state to prevent re-entry into broken textures.
-        std::lock_guard lk{g_tex_mutex};
+        std::scoped_lock lk{g_tex_mutex};
         g_streamer_mode.clear();
         g_unverified.clear();
         g_pending_fp.clear();
@@ -743,22 +743,23 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
     if (fingerprint_due) {
         // Cleanup old unverified entries every 1 second (UI reload detection)
         {
-            std::lock_guard lk{g_tex_mutex};
+            std::scoped_lock lk{g_tex_mutex};
             if (now - g_last_cleanup > std::chrono::seconds(1)) {
                 g_last_cleanup = now;
-                g_unverified.erase(
-                    std::remove_if(g_unverified.begin(), g_unverified.end(),
-                        [&](const TrackedTexture& tt) {
-                            return now - tt.first_seen > std::chrono::seconds(5);
-                        }),
-                    g_unverified.end());
+                g_unverified.erase(std::ranges::remove_if(g_unverified,
+                                                          [&](const TrackedTexture& tt) {
+                                                              return now - tt.first_seen >
+                                                                     std::chrono::seconds(5);
+                                                          })
+                                       .begin(),
+                                   g_unverified.end());
             }
         }
 
         // Fingerprint unverified textures after 2 seconds.
         std::vector<ID3D12Resource*> to_fingerprint;
         {
-            std::lock_guard lk{g_tex_mutex};
+            std::scoped_lock lk{g_tex_mutex};
             for (auto it = g_unverified.begin(); it != g_unverified.end(); ) {
                 if (now - it->first_seen >= std::chrono::seconds(2)) {
                     to_fingerprint.push_back(it->resource.get());
@@ -793,7 +794,7 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
     // reduced how often the stall happened, not the cost of the stall
     // itself.
     {
-        std::lock_guard lk{g_tex_mutex};
+        std::scoped_lock lk{g_tex_mutex};
         for (auto& pf : started) g_pending_fp.push_back(std::move(pf));
 
         for (auto it = g_pending_fp.begin(); it != g_pending_fp.end(); ) {
@@ -835,7 +836,7 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
     {
         bool have_target = false;
         {
-            std::lock_guard lk{g_tex_mutex};
+            std::scoped_lock lk{g_tex_mutex};
             have_target = !g_streamer_mode.empty();
         }
         if (have_target) {
@@ -857,19 +858,22 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
             last_heartbeat_ns.store(now_ns, std::memory_order_relaxed);
             size_t sm_count = 0, sm_stale = 0;
             {
-                std::lock_guard lk{g_tex_mutex};
+                std::scoped_lock lk{g_tex_mutex};
                 // Prune stale textures (refcount <= 1 means only our ref remains)
-                g_streamer_mode.erase(
-                    std::remove_if(g_streamer_mode.begin(), g_streamer_mode.end(),
-                        [&](const TrackedTexture& tt) {
-                            if (!tt.resource) return true;
-                            tt.resource->AddRef();
-                            ULONG rc = tt.resource->Release();
-                            if (rc <= 1) { sm_stale++; return true; }
-                            sm_count++;
-                            return false;
-                        }),
-                    g_streamer_mode.end());
+                g_streamer_mode.erase(std::ranges::remove_if(g_streamer_mode,
+                                                             [&](const TrackedTexture& tt) {
+                                                                 if (!tt.resource) return true;
+                                                                 tt.resource->AddRef();
+                                                                 ULONG rc = tt.resource->Release();
+                                                                 if (rc <= 1) {
+                                                                     sm_stale++;
+                                                                     return true;
+                                                                 }
+                                                                 sm_count++;
+                                                                 return false;
+                                                             })
+                                         .begin(),
+                                      g_streamer_mode.end());
             }
             log::info("[texinject] heartbeat: ecl={} radio={} streamer_mode={} (stale={}) "
                       "unverified={} pending_fp={} work_pending={} last_op={}",

@@ -37,11 +37,11 @@ ConsoleLineKind classify_console_line(std::string_view line) {
 
 ImVec4 console_line_color(ConsoleLineKind kind) {
     switch (kind) {
-        case ConsoleLineKind::error: return ImVec4(1.0f, 0.38f, 0.38f, 1.0f);
-        case ConsoleLineKind::warn: return ImVec4(1.0f, 0.78f, 0.35f, 1.0f);
-        case ConsoleLineKind::overlay: return ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
-        case ConsoleLineKind::dualsense: return ImVec4(0.64f, 0.92f, 0.72f, 1.0f);
-        case ConsoleLineKind::radio: return ImVec4(0.95f, 0.78f, 0.50f, 1.0f);
+        case ConsoleLineKind::error: return {1.0f, 0.38f, 0.38f, 1.0f};
+        case ConsoleLineKind::warn: return {1.0f, 0.78f, 0.35f, 1.0f};
+        case ConsoleLineKind::overlay: return {0.55f, 0.78f, 1.0f, 1.0f};
+        case ConsoleLineKind::dualsense: return {0.64f, 0.92f, 0.72f, 1.0f};
+        case ConsoleLineKind::radio: return {0.95f, 0.78f, 0.50f, 1.0f};
         case ConsoleLineKind::normal: break;
     }
     return ImGui::GetStyleColorVec4(ImGuiCol_Text);
@@ -181,7 +181,7 @@ void draw_console_window() {
                     // Subsystems (V / M muted) popup provides after-the-
                     // fact mute.  If we ever need a "Mute new" filter
                     // row toggle it belongs there, not here.
-                    const uint16_t new_id = static_cast<uint16_t>(v.size());
+                    const auto new_id = static_cast<uint16_t>(v.size());
                     v.push_back({std::move(key), true});
                     it = ix.emplace(v.back().name, new_id).first;
                 }
@@ -279,10 +279,9 @@ void draw_console_window() {
                 sorted.clear();
                 sorted.reserve(g_ui.console_subsystems.size());
                 for (auto& s : g_ui.console_subsystems) sorted.push_back(&s);
-                std::sort(sorted.begin(), sorted.end(),
-                          [](const SubsystemState* a, const SubsystemState* b) {
-                              return a->name < b->name;
-                          });
+                std::ranges::sort(sorted, [](const SubsystemState* a, const SubsystemState* b) {
+                    return a->name < b->name;
+                });
                 for (auto* s : sorted) {
                     char label[48];
                     std::snprintf(label, sizeof(label), "[%s]%s", s->name.c_str(),
@@ -341,8 +340,8 @@ void draw_console_window() {
         // ImGui::GetIO().Fonts->... so the font pointer is the right
         // invalidation key for theme switches across the project's two
         // themes "Bess Dark" + "Tokyo Night").
-        static size_t       s_last_shown = static_cast<size_t>(-1);
-        static size_t       s_last_total = static_cast<size_t>(-1);
+        static auto s_last_shown              = static_cast<size_t>(-1);
+        static auto s_last_total              = static_cast<size_t>(-1);
         static const ImFont* s_last_font = nullptr;
         static float        s_last_font_scale = -1.0f;
         static float        s_cached_w   = 0.0f;
