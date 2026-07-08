@@ -48,15 +48,15 @@ void ApplyBessDark() {
     c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.30f, 0.30f, 0.35f, 1.00f);
     c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.40f, 0.40f, 0.50f, 1.00f);
     c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.45f, 0.45f, 0.55f, 1.00f);
-    style.WindowRounding             = 5.0f;
-    style.FrameRounding              = 5.0f;
-    style.GrabRounding               = 5.0f;
-    style.TabRounding                = 5.0f;
-    style.PopupRounding              = 5.0f;
-    style.ScrollbarRounding          = 5.0f;
-    style.WindowPadding              = ImVec2(10.0f, 10.0f);
-    style.FramePadding               = ImVec2(6.0f, 4.0f);
-    style.ItemSpacing                = ImVec2(8.0f, 6.0f);
+    style.WindowRounding             = 10.0f;
+    style.FrameRounding              = 10.0f;
+    style.GrabRounding               = 10.0f;
+    style.TabRounding                = 10.0f;
+    style.PopupRounding              = 10.0f;
+    style.ScrollbarRounding          = 10.0f;
+    style.WindowPadding              = ImVec2(20.0f, 20.0f);
+    style.FramePadding               = ImVec2(12.0f, 8.0f);
+    style.ItemSpacing                = ImVec2(16.0f, 12.0f);
     style.PopupBorderSize            = 0.0f;
 }
 
@@ -114,20 +114,20 @@ void ApplyTokyoNight() {
     c[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
     c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
-    style.WindowRounding              = 6.0f;
-    style.FrameRounding               = 4.0f;
-    style.ScrollbarRounding           = 4.0f;
-    style.GrabRounding                = 3.0f;
-    style.ChildRounding               = 4.0f;
-    style.PopupRounding               = 4.0f;
-    style.TabRounding                 = 4.0f;
-    style.WindowPadding               = ImVec2(8.0f, 8.0f);
-    style.FramePadding                = ImVec2(5.0f, 4.0f);
-    style.ItemSpacing                 = ImVec2(6.0f, 6.0f);
-    style.ItemInnerSpacing            = ImVec2(6.0f, 6.0f);
-    style.IndentSpacing               = 22.0f;
-    style.ScrollbarSize               = 14.0f;
-    style.GrabMinSize                 = 10.0f;
+    style.WindowRounding              = 12.0f;
+    style.FrameRounding               = 8.0f;
+    style.ScrollbarRounding           = 8.0f;
+    style.GrabRounding                = 6.0f;
+    style.ChildRounding               = 8.0f;
+    style.PopupRounding               = 8.0f;
+    style.TabRounding                 = 8.0f;
+    style.WindowPadding               = ImVec2(16.0f, 16.0f);
+    style.FramePadding                = ImVec2(10.0f, 8.0f);
+    style.ItemSpacing                 = ImVec2(12.0f, 12.0f);
+    style.ItemInnerSpacing            = ImVec2(12.0f, 12.0f);
+    style.IndentSpacing               = 44.0f;
+    style.ScrollbarSize               = 28.0f;
+    style.GrabMinSize                 = 20.0f;
 }
 
 void ApplyTheme(int idx) {
