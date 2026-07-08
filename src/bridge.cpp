@@ -314,7 +314,9 @@ void run_bridge(HMODULE self) noexcept {
         ctrl = std::make_unique<fmod_bridge::ControlLoop>(bridge, img, cfg.audio.output_gain);
         ctrl->set_metadata_truncation(cfg.overlay.metadata_truncation_enabled,
                                        cfg.overlay.metadata_max_length);
-        ctrl->set_metadata_grace_period(cfg.overlay.metadata_grace_period);
+        // set_metadata_grace_period removed — the actual grace period is
+        // handled by ShoutcastSource, which reads its own grace_period_ms_
+        // configured from the same config field.
     }
 
     store.on_change(
@@ -333,7 +335,7 @@ void run_bridge(HMODULE self) noexcept {
                 ctrl_ptr->set_configured_gain(c.audio.output_gain);
                 ctrl_ptr->set_metadata_truncation(c.overlay.metadata_truncation_enabled,
                                                    c.overlay.metadata_max_length);
-                ctrl_ptr->set_metadata_grace_period(c.overlay.metadata_grace_period);
+                // set_metadata_grace_period removed - handled by ShoutcastSource below.
             }
             if (shoutcast) {
                 shoutcast->set_grace_period_ms(

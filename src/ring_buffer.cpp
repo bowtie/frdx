@@ -29,11 +29,12 @@ std::size_t RingBuffer::writable() const noexcept {
 }
 
 std::size_t RingBuffer::write(const void* src, std::size_t n) noexcept {
-    // Delegate to write_partial; reject if the full payload didn't fit.
-    // The SPSC contract guarantees write_pos won't change between the two
-    // internal atomic loads (single writer), and read_pos can only increase
-    // (single reader), so the double-load is safe.
-    return write_partial(src, n) == n ? n : 0;
+    // All-or-nothing: only write if the full payload fits.  write_partial()
+    // commits bytes even on a partial write, so calling it and then returning 0
+    // would violate the "never partial" contract by silently dropping data in
+    // the ring while telling the caller nothing was written.
+    if (n > writable()) return 0;
+    return write_partial(src, n);
 }
 
 std::size_t RingBuffer::write_partial(const void* src, std::size_t n) noexcept {
@@ -57,6 +58,7 @@ std::size_t RingBuffer::read(void* dst, std::size_t n) noexcept {
     if (!dst || n == 0) return 0;
     if (hold_.load(std::memory_order_acquire)) return 0;
 
+    std::lock_guard lk{drain_mu_};
     const auto r     = read_pos_.load(std::memory_order_relaxed);
     const auto w     = write_pos_.load(std::memory_order_acquire);
     const auto avail = w - r;
@@ -90,15 +92,18 @@ std::span<const std::byte> RingBuffer::readable_span(std::size_t n) const noexce
 void RingBuffer::consume(std::size_t n) noexcept {
     if (n == 0) return;
 
+    std::lock_guard lk{drain_mu_};
     const auto r = read_pos_.load(std::memory_order_relaxed);
     read_pos_.store(r + n, std::memory_order_release);
 }
 
 void RingBuffer::drain() noexcept {
+    std::lock_guard lk{drain_mu_};
     read_pos_.store(write_pos_.load(std::memory_order_acquire), std::memory_order_release);
 }
 
 void RingBuffer::drop(std::size_t n) noexcept {
+    std::lock_guard lk{drain_mu_};
     const auto r     = read_pos_.load(std::memory_order_relaxed);
     const auto w     = write_pos_.load(std::memory_order_acquire);
     const auto avail = w - r;

@@ -1,10 +1,14 @@
 #pragma once
 
-// SPSC lock-free byte ring with power-of-2 capacity. Producer is the audio
-// source's pump; consumer is FMOD's mixer thread.
+// SPSC byte ring with power-of-2 capacity. Producer is the audio source's
+// pump (lock-free write); consumer is FMOD's mixer thread (read).  drain()
+// and drop() are also called from control/UI threads, so the reader-side
+// read_pos_ mutations are serialized via drain_mu_ to avoid racing with
+// the consumer.  The producer (write_partial) remains fully lock-free.
 
 #include <atomic>
 #include <cstddef>
+#include <mutex>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -46,11 +50,14 @@ public:
     void consume(std::size_t n) noexcept;
 
     // Discard everything currently in flight (advance read to write).
+    // May be called from non-consumer threads; serialized with the consumer's
+    // read/consume via drain_mu_.
     void drain() noexcept;
 
     // Discard up to `n` bytes from the read side (skip ahead without
     // copying).  Used for drift correction when the buffer has grown
-    // too large from FMOD callback micro-freezes.
+    // too large from FMOD callback micro-freezes.  Serialized with the
+    // consumer's read/consume via drain_mu_.
     void drop(std::size_t n) noexcept;
 
     // Hold mode: when engaged, reads return 0 (as if empty). The producer
@@ -68,6 +75,11 @@ private:
     alignas(64) std::atomic<std::size_t> write_pos_{0};
     alignas(64) std::atomic<std::size_t> read_pos_{0};
     alignas(64) std::atomic<bool> hold_{false};
+
+    // Serializes drain()/drop() (called from control/UI threads) with the
+    // consumer's read()/consume() (FMOD mixer thread).  The producer's
+    // write_partial() is unaffected — it only reads read_pos_ with acquire.
+    mutable std::mutex drain_mu_;
 };
 
 } // namespace frdx

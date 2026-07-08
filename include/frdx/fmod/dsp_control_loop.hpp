@@ -47,11 +47,6 @@ public:
         meta_.set_truncation(enabled, max_len);
     }
 
-    void set_metadata_grace_period(float seconds) noexcept {
-        grace_period_ms_.store(static_cast<int64_t>(seconds * 1000.0f),
-                               std::memory_order_release);
-    }
-
     // IRadioTargetProvider
     std::byte* radio_stream() const noexcept override { return radio_stream_; }
     std::byte* sample_props_body() const noexcept override { return sample_props_body_; }
@@ -74,7 +69,6 @@ private:
     DSPBridge& bridge_;
     const PEImage& img_;
     std::atomic<float> configured_gain_;
-    std::atomic<int64_t> grace_period_ms_{2500};
     MetadataInjector meta_;
     GameStateProbe game_state_;
     IAudioSource* metadata_source_     = nullptr;

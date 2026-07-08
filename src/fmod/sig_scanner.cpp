@@ -90,7 +90,7 @@ std::vector<const std::byte*> find_anchor_strings(const PEImage& img, std::strin
     const std::byte* s = img.rdata;
     const std::byte* e = img.rdata_end;
     if (e <= s || static_cast<std::size_t>(e - s) < n + 1) return hits;
-    for (const std::byte* p = s; p + n + 1 < e; ++p) {
+    for (const std::byte* p = s; p + n + 1 <= e; ++p) {
         if (std::memcmp(p, anchor.data(), n) != 0) continue;
         if (p[n] != std::byte{0}) continue;
         if (p > s && p[-1] != std::byte{0}) continue;

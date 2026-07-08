@@ -360,8 +360,8 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     // Station logos are bundled with the dist and referenced as relative paths
     // in stations.json.  Loading from disk is instant (~1ms) vs downloading
     // from the web (~500ms-1s).  Works in both raw and non-raw modes.
-    if (!data_dir_.empty()) {
-        auto local_path = data_dir_ / url;
+    if (!data_dir.empty()) {
+        auto local_path = data_dir / url;
         std::error_code ec2;
         if (std::filesystem::exists(local_path, ec2)) {
             log::info("[texinject] loading local logo: {}", url);

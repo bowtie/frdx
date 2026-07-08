@@ -180,7 +180,7 @@ void DSPBridge::detach_current_handle_locked() noexcept {
     if (pending_detach_handle_ && current_dsp_ && fns_.channel_control_rem_dsp) {
         const uint32_t pending = pending_detach_handle_;
         pending_detach_handle_ = 0;
-        seh_call([&] { fns_.channel_control_rem_dsp(pending, current_dsp_); });
+        (void)seh_call([&] { fns_.channel_control_rem_dsp(pending, current_dsp_); });
     }
     if (!current_dsp_ || !current_handle_) return;
     const uint32_t old_handle = current_handle_;
@@ -304,7 +304,7 @@ void DSPBridge::retarget_if_needed() noexcept {
         if (now - pending_detach_time_ >= std::chrono::milliseconds(200)) {
             const uint32_t old = pending_detach_handle_;
             pending_detach_handle_ = 0;
-            seh_call([&] { fns_.channel_control_rem_dsp(old, current_dsp_); });
+            (void)seh_call([&] { fns_.channel_control_rem_dsp(old, current_dsp_); });
         }
     }
 
@@ -352,6 +352,14 @@ void DSPBridge::detach() noexcept {
 // FMOD DSP read callback (mixer thread). Sources write 48 kHz S16 stereo
 // (miniaudio / ffmpeg resample upstream), which is FMOD's master rate, so
 // the callback is a straight int16 -> float conversion with gain.
+//
+// Lifetime: g_bridge is a process-global atomic set once in bridge_main() and
+// only cleared (to nullptr) after the bridge process has decided to shut down.
+// In the proxy (in-game) path, bridge_main() blocks forever and g_bridge is
+// never cleared while FMOD is running, so the pointer loaded here stays valid
+// for the entire callback.  In sandbox mode the FMOD DSP path is not used at
+// all (WASAPI handles output).  A full reference-counting solution would be
+// over-engineering for this never-tear-down lifetime model.
 FRDX_NO_THREAD_SAFETY_ANALYSIS
 uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, float* out_buf,
                                             uint32_t length, int32_t /*in_channels*/,

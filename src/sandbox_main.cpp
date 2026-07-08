@@ -125,9 +125,6 @@ public:
                         sample_rate_, buffer_frames_, bridge_->gain());
 
         thread_ = std::jthread([this](const std::stop_token& stop) {
-            // WASAPI COM objects require COM initialization on the calling thread
-            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-
             // RAII COM initializer ÔÇö ensures CoUninitialize is called on any exit path.
             struct ComGuard {
                 ComGuard() { CoInitializeEx(nullptr, COINIT_MULTITHREADED); }

@@ -44,7 +44,7 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
         std::memcpy(&heap, hdr.sso_buf, sizeof(heap));
         if (!heap) return false;
         return seh_call([&] {
-            std::memcpy(heap, src.data(), src.size());
+            if (!src.empty()) std::memcpy(heap, src.data(), src.size());
             heap[src.size()] = std::byte{0};
             std::memcpy(target + 16, &new_size, sizeof(new_size));
         }).has_value();
@@ -52,7 +52,7 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
 
     auto inplace_overwrite_sso = [&]() -> bool {
         return seh_call([&] {
-            std::memcpy(target, src.data(), src.size());
+            if (!src.empty()) std::memcpy(target, src.data(), src.size());
             target[src.size()] = std::byte{0};
             std::memcpy(target + 16, &new_size, sizeof(new_size));
             // Cap stays at 15 (SSO) -- we don't touch it.
@@ -72,7 +72,7 @@ bool write_string_slot(std::byte* target, std::string_view src) noexcept {
         }
         unique_virtual mem{fresh}; // RAII: auto-frees on failure paths
 
-        std::memcpy(fresh, src.data(), src.size());
+        if (!src.empty()) std::memcpy(fresh, src.data(), src.size());
         fresh[src.size()] = std::byte{0};
 
         // Capture the old heap pointer before swapping (only valid when
