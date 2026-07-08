@@ -651,7 +651,7 @@ TeardownGuard<TeardownPhase::OverlayDown>::stop_wasapi() && {
     return {*dx_, *mgr_, hwnd_, className_, hInst_};
 }
 
-// Phase 3 ÔåÆ 4: Deactivate the source and shut it down (kills ffmpeg, joins
+// Phase 3 → 4: Deactivate the source and shut it down (stops the decoder, joins
 // metadata poller threads).  Both consumers (overlay + WASAPI) have already
 // released it, so this is safe.
 inline TeardownGuard<TeardownPhase::WasapiDown>::TeardownGuard(DxContext& dx,

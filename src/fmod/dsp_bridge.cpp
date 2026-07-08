@@ -352,7 +352,7 @@ void DSPBridge::detach() noexcept {
 }
 
 // FMOD DSP read callback (mixer thread). Sources write 48 kHz S16 stereo
-// (miniaudio / ffmpeg resample upstream), which is FMOD's master rate, so
+// (mpg123 / miniaudio resample upstream), which is FMOD's master rate, so
 // the callback is a straight int16 -> float conversion with gain.
 //
 // Lifetime: g_bridge is a process-global atomic set once in bridge_main() and

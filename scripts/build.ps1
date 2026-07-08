@@ -11,7 +11,6 @@
 #   dist\mods\frdx\config.toml           seeded from config.example.toml
 #   dist\mods\frdx\stations.json         seeded from stations.example.json
 #   dist\mods\frdx\fonts\FusionPixel12-ja.ttf
-#   dist\mods\frdx\ffmpeg\ffmpeg.exe
 
 param(
     [switch]$Clean,
@@ -212,7 +211,6 @@ if (Test-Path $dist) {
 }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\fonts") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\ffmpeg") | Out-Null
 
 # Ninja outputs to build/ directly; MSBuild puts artifacts under build/Release/
 $dllSrc = if ($ninja) { Join-Path $build "version.dll" } else { Join-Path $build "Release\version.dll" }
@@ -223,7 +221,6 @@ Copy-Item $helperSrc $dist
 if (Test-Path (Join-Path $root "assets\fonts")) {
     Copy-Item -Recurse (Join-Path $root "assets\fonts\*") (Join-Path $dist "mods\frdx\fonts")
 }
-Copy-Item (Join-Path $root "assets\ffmpeg\ffmpeg.exe") (Join-Path $dist "mods\frdx\ffmpeg\ffmpeg.exe")
 if ($null -ne $preservedConfig) {
     Set-Content -Path (Join-Path $dist "mods\frdx\config.toml") -Value $preservedConfig -NoNewline -Encoding utf8
 } else {

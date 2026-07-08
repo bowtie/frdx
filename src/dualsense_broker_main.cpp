@@ -199,7 +199,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
 
     // ── Unified worker server ──
     // The external helper also serves as the worker process for
-    // downloads/ffmpeg/texconv, eliminating the need for a separate
+    // downloads/texconv, eliminating the need for a separate
     // frdx-helper.exe --worker child of the game.  The game connects
     // to the well-known pipe name.
     HANDLE worker_shutdown = CreateEventW(nullptr, TRUE, FALSE, nullptr);

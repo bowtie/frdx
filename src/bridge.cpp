@@ -175,7 +175,7 @@ void run_bridge(HMODULE self) noexcept {
     // Always launch the unified external helper via Task Scheduler.  It
     // runs in a separate session (needed for DualSense HID access since
     // the game holds the XInput handle) and hosts the worker server for
-    // downloads/ffmpeg/texconv.  One process, both roles.
+    // downloads/texconv.  One process, both roles.
     maybe_launch_external_helper(dir, cfg.dualsense);
 
     auto img = fmod_bridge::parse(reinterpret_cast<std::byte*>(GetModuleHandleW(nullptr)));
@@ -249,7 +249,7 @@ void run_bridge(HMODULE self) noexcept {
         }
         if (!sel_station.empty() && !sel_stream.empty()) {
             shoutcast->select_station(sel_station, sel_stream);
-            // select_station starts the ffmpeg pipe; pause() stops it so we
+            // select_station starts the stream; pause() stops it so we
             // don't buffer a stream with nowhere to go.  The user starts
             // playback manually via the overlay's play button.
             shoutcast->pause();

@@ -59,7 +59,6 @@ if ($installedMd5 -ne $distMd5) {
 $dataDir = Join-Path $GameDir "mods\frdx"
 if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Force -Path $dataDir | Out-Null }
 New-Item -ItemType Directory -Force -Path (Join-Path $dataDir "fonts") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $dataDir "ffmpeg") | Out-Null
 
 $cfg = Join-Path $dataDir "config.toml"
 if (-not (Test-Path $cfg)) {
@@ -74,10 +73,6 @@ if (-not (Test-Path $stations)) {
 if (Test-Path (Join-Path $dist "mods\frdx\fonts\FusionPixel12-ja.ttf")) {
     Copy-Item (Join-Path $dist "mods\frdx\fonts\*") (Join-Path $dataDir "fonts") -Force
     Write-Host "  + mods\frdx\fonts\" -ForegroundColor Yellow
-}
-if (Test-Path (Join-Path $dist "mods\frdx\ffmpeg\ffmpeg.exe")) {
-    Copy-Item (Join-Path $dist "mods\frdx\ffmpeg\ffmpeg.exe") (Join-Path $dataDir "ffmpeg\ffmpeg.exe") -Force
-    Write-Host "  + mods\frdx\ffmpeg\ffmpeg.exe" -ForegroundColor Yellow
 }
 
 Write-Host "`nDone. Launch the game, set Audio -> Radio DJ = Off, Streamer Mode = On." -ForegroundColor Green
