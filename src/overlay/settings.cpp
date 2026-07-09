@@ -403,17 +403,17 @@ void draw_debug_tab() {
     {
         if (ImGui::RadioButton("Auto##ui", g_ui.debug_ui_scale == 0)) {
             g_ui.debug_ui_scale = 0;
-            g_ui.pending_ui_scale = compute_ui_scale_for_current_monitor();
+            request_ui_scale(compute_ui_scale_for_current_monitor(), true);
         }
         ImGui::SameLine();
         if (ImGui::RadioButton("1x##ui", g_ui.debug_ui_scale == 1)) {
             g_ui.debug_ui_scale = 1;
-            g_ui.pending_ui_scale = 1.0f;
+            request_ui_scale(1.0f, true);
         }
         ImGui::SameLine();
         if (ImGui::RadioButton("2x##ui", g_ui.debug_ui_scale == 2)) {
             g_ui.debug_ui_scale = 2;
-            g_ui.pending_ui_scale = 2.0f;
+            request_ui_scale(2.0f, true);
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("UI: style values (padding, spacing, scrollbar,\n"
@@ -422,25 +422,28 @@ void draw_debug_tab() {
         }
     }
     ImGui::Spacing();
-    // Font scale: controls glyph size via FontGlobalScale.
+    // Font scale: switches io.FontDefault between the pre-baked 16px (1x)
+    // and 32px (2x) fonts. Both are LockBakedSizes, so switching is
+    // bake-free (no transition-frame flash).
     {
         if (ImGui::RadioButton("Auto##font", g_ui.debug_font_scale == 0)) {
             g_ui.debug_font_scale = 0;
-            ImGui::GetIO().FontGlobalScale = g_ui.ui_scale / 2.0f;
+            ImFont* wanted = (g_ui.ui_scale >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
+            if (wanted) ImGui::GetIO().FontDefault = wanted;
         }
         ImGui::SameLine();
         if (ImGui::RadioButton("1x##font", g_ui.debug_font_scale == 1)) {
             g_ui.debug_font_scale = 1;
-            ImGui::GetIO().FontGlobalScale = 0.5f;
+            if (g_ui.font_1x) ImGui::GetIO().FontDefault = g_ui.font_1x;
         }
         ImGui::SameLine();
         if (ImGui::RadioButton("2x##font", g_ui.debug_font_scale == 2)) {
             g_ui.debug_font_scale = 2;
-            ImGui::GetIO().FontGlobalScale = 1.0f;
+            if (g_ui.font_2x) ImGui::GetIO().FontDefault = g_ui.font_2x;
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Font: glyph size only (32px atlas).\n"
-                              "1x = 16px (FontGlobalScale 0.5), 2x = 32px (1.0).\n"
+            ImGui::SetTooltip("Font: pre-baked glyph size (no atlas rebuild on switch).\n"
+                              "1x = 16px, 2x = 32px.\n"
                               "Auto: follows current UI scale.");
         }
     }

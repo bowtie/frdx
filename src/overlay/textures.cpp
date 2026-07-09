@@ -40,37 +40,45 @@ void load_overlay_font(float scale) {
         }
     }
 
-    // Always load the font at 32px (the 2x size).  Switching between 1x
-    // and 2x is done via io.FontGlobalScale (0.5 for 1x, 1.0 for 2x)
-    // rather than reloading the font atlas.  This avoids the expensive
-    // and crash-prone atlas rebuild + InvalidateDeviceObjects cycle.
+    // Load TWO fonts up front — 16px (1x) and 32px (2x) — and switch between
+    // them via io.FontDefault on a scale change. Both are loaded with
+    // ImFontFlags_LockBakedSizes so their baked sizes are pinned to their
+    // load size and ImGui 1.92's dynamic font baking never creates a new
+    // baked font / texture when we switch.
     //
-    // At 1x, FontGlobalScale=0.5 scales the 32px atlas down to 16px
-    // equivalent — a clean 2:1 downsample that stays crisp for the
-    // pixel font.  At 2x, FontGlobalScale=1.0 uses the full 32px atlas.
+    // The previous approach loaded one 32px font and scaled 1x/2x via
+    // io.FontGlobalScale (0.5 / 1.0). But our DX12 backend sets
+    // ImGuiBackendFlags_RendererHasTextures, which activates the dynamic
+    // baker, and the baked-font cache key includes the *rounded* final
+    // font size (which FontGlobalScale feeds). So flipping FontGlobalScale
+    // 0.5<->1.0 changed the rounded baked size 16<->32 and triggered a NEW
+    // baked font + texture on the transition frame, uploaded async inside
+    // RenderDrawData — producing a one-frame "2x font flash" where vertices
+    // were sized at the new scale but sampled the old/not-yet-uploaded bake.
     //
-    // We use io.FontGlobalScale (legacy) instead of style.FontScaleMain
-    // because FontScaleMain interacts with the 1.92 dynamic font baking
-    // system which our DX12 backend doesn't fully support.  The legacy
-    // path just scales the rendered output, which works reliably.
-    //
-    // Snap the scale to an integer multiple (ceil) so 1440p gets 2x.
-    const int int_scale  = std::max(1, static_cast<int>(std::ceil(scale)));
+    // Switching FontDefault between two pre-baked fonts hits the baker's
+    // fast path (exact-size match) with no new bake, so scale transitions
+    // are flash-free. FontGlobalScale stays 1.0. Each font bakes once on
+    // its first used frame (a one-time cost at first 1x / first 2x display),
+    // not on every transition.
+    const int int_scale  = snap_ui_scale(scale);
     const auto effective_scale    = static_cast<float>(int_scale);
-    const float font_size = 16.0f * 2.0f;  // always 32px atlas
-    const float font_global_scale = effective_scale / 2.0f;  // 1x -> 0.5, 2x -> 1.0
 
     ImFontConfig cfg{};
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH  = true;
-    auto* font      = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), font_size, &cfg);
-    if (font) {
-        io.FontDefault       = font;
-        io.FontGlobalScale   = font_global_scale;
-        g_ui.ui_scale        = effective_scale;
-        log::info("[overlay] loaded Fusion Pixel font at {:.0f}px (FontGlobalScale={:.2f}, int_scale={}x) from {}",
-                  font_size, font_global_scale, int_scale, font_path.string());
+    cfg.Flags      |= ImFontFlags_LockBakedSizes;  // pin baked size to load size
+
+    g_ui.font_1x = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg);
+    g_ui.font_2x = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 32.0f, &cfg);
+
+    if (g_ui.font_1x && g_ui.font_2x) {
+        io.FontGlobalScale = 1.0f;  // baked size already encodes the scale; no global scaling
+        io.FontDefault     = (effective_scale >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
+        g_ui.ui_scale      = effective_scale;
+        log::info("[overlay] loaded Fusion Pixel font at 16px (1x) + 32px (2x), int_scale={}x, FontDefault={} from {}",
+                  int_scale, io.FontDefault == g_ui.font_2x ? "32px" : "16px", font_path.string());
     } else {
         log::warn("[overlay] failed to load {}; using ImGui default font", font_path.string());
         io.Fonts->AddFontDefault();
@@ -78,21 +86,21 @@ void load_overlay_font(float scale) {
 }
 
 // Apply a new UI scale (style values + hardcoded pixel multipliers).
-// Also updates FontGlobalScale to match, unless debug_font_2x is
-// active (in which case the font scale is controlled solely by the
-// Debug toggle).  Deferred to next frame via pending_ui_scale since
-// style values are read during Begin().
+// Switches io.FontDefault between the pre-baked 16px (1x) and 32px (2x)
+// fonts — bake-free, so no transition-frame flash. Honors the Debug-tab
+// font override (debug_font_scale: 0=auto, 1=force 1x, 2=force 2x).
+// Deferred to next frame via pending_ui_scale since style values are read
+// during Begin().
 void set_font_scale(float scale) {
-    const int int_scale = std::max(1, static_cast<int>(std::ceil(scale)));
+    const int int_scale = snap_ui_scale(scale);
     const auto effective_scale = static_cast<float>(int_scale);
     g_ui.ui_scale = effective_scale;
-    // Auto-scale font with UI scale unless the debug font override is active.
-    if (g_ui.debug_font_scale == 0) {
-        ImGui::GetIO().FontGlobalScale = effective_scale / 2.0f;
-    }
+    // Pick the active font: debug override wins over auto scale.
+    const int font_sel = (g_ui.debug_font_scale != 0) ? g_ui.debug_font_scale : int_scale;
+    ImFont* wanted = (font_sel >= 2) ? g_ui.font_2x : g_ui.font_1x;
+    if (wanted) ImGui::GetIO().FontDefault = wanted;
     ApplyTheme(g_ui.theme_idx);
-    log::info("[overlay] set UI scale to {}x (FontGlobalScale={:.2f})",
-              int_scale, ImGui::GetIO().FontGlobalScale);
+    log::info("[overlay] set UI scale to {}x (font={}px)", int_scale, wanted == g_ui.font_2x ? 32 : 16);
 }
 
 void load_background_texture(ID3D12CommandQueue* queue) {
@@ -767,7 +775,7 @@ void draw_backdrop_blur(float alpha_scalar) {
         const ImU32 border =
             IM_COL32(static_cast<int>(br * 255.0f), static_cast<int>(bg * 255.0f),
                      static_cast<int>(bb * 255.0f), static_cast<int>(border_a * 255.0f));
-        dl->AddRect(p_min, p_max, border, rounding, 0, 1.0f);
+        dl->AddRect(p_min, p_max, border, rounding, 1.0f);
     }
 }
 

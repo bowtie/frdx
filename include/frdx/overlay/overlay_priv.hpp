@@ -9,8 +9,10 @@
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/audio_source.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -105,7 +107,9 @@ struct DxResources {
     // Pool of command allocators, larger than the backbuffer count so we
     // can always find a ready one without blocking the Present thread.
     // Each allocator tracks the fence value of its last submitted work.
-    static constexpr size_t kAllocatorPoolSize = 8;
+    // A larger pool (32) is used because frame generation can double the
+    // Present rate, increasing the number of in-flight overlay frames.
+    static constexpr size_t kAllocatorPoolSize = 32;
     std::vector<wil::com_ptr<ID3D12CommandAllocator>> allocators;
     std::vector<UINT64> allocator_fence_values;
     std::vector<wil::com_ptr<ID3D12Resource>> fb_bufs;
@@ -187,9 +191,21 @@ struct UiState {
     // Debug overrides: 0 = auto, 1 = force 1x, 2 = force 2x.
     int debug_ui_scale = 0;
     int debug_font_scale = 0;
-    // Pending font reload requested mid-frame (applied next frame).
-    // -1.0f = no pending reload.
+    // Pre-baked font handles for the two UI scales. Both are loaded once at
+    // init with ImFontFlags_LockBakedSizes so their baked sizes are pinned
+    // (16px for 1x, 32px for 2x) and ImGui 1.92's dynamic font baking never
+    // creates a new baked font / texture on a scale switch — that creation
+    // is what caused the one-frame "2x font flash" on transitions. Switching
+    // io.FontDefault between these is bake-free; FontGlobalScale stays 1.0.
+    ImFont* font_1x = nullptr;  // 16px baked
+    ImFont* font_2x = nullptr;  // 32px baked
+    // Pending font/UI scale change. -1.0f = no pending reload.
+    // pending_ui_scale_frames counts how many consecutive frames the same
+    // pending value has been queued; values are only committed after a short
+    // settle period so transient resolution changes don't flicker the font.
     float pending_ui_scale = -1.0f;
+    int pending_ui_scale_frames = 0;
+    bool pending_ui_scale_immediate = false;
     std::chrono::steady_clock::time_point cursor_hidden_candidate_since{}, cursor_hidden_since{};
     float interactive_alpha = 1.0f, interactive_draw_alpha = 1.0f;
     bool cursor_child_close_elapsed = false, cursor_hide_delay_elapsed = false;
@@ -334,7 +350,20 @@ extern ExternalCtx g_ctx;
 
 // ── Cross-file constants and function declarations ──
 
-inline constexpr UINT kOverlaySrvCount = 16;
+inline constexpr UINT kOverlaySrvCount = 128;
+inline constexpr int k_ui_scale_settle_frames = 0;
+
+// Snap a continuous UI scale to an integer multiple.  Small hysteresis
+// (ceil(scale - 0.05f)) avoids jumping to 2x for swap-chain heights barely
+// above 1080p (e.g. 1081/1082).  1440p/4K still snap to 2x as intended.
+inline int snap_ui_scale(float scale) {
+    return std::max(1, static_cast<int>(std::ceil(scale - 0.05f)));
+}
+
+// Queue a UI scale change. By default the change is applied immediately on
+// the same render frame (settle = 0); passing immediate=true applies it on
+// the next render frame (used by the Debug tab so user toggles stay responsive).
+void request_ui_scale(float scale, bool immediate = false);
 
 inline D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource,
                                                  D3D12_RESOURCE_STATES before,
