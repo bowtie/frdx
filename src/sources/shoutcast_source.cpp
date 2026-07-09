@@ -347,20 +347,13 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
     } // mu_ released — stream launch happens outside the lock
 
     // Phase 2: launch mpg123 stream OUTSIDE the lock (HTTP handshake).
-    // Only launch when the radio is audible AND the user has actually
-    // requested playback (playing/buffering). Without the state_ check,
-    // switching stations while paused or before FMOD is hooked would
-    // launch the stream into a void — audible_ defaults to true and is
-    // only flipped by the control loop once FMOD is installed, so it
-    // can't gate the pre-FMOD case on its own. The overlay's FMOD-ready
-    // auto-play hook calls play() to start streaming when ready.
+    // Only launch when audible — if the radio channel isn't active yet
+    // (e.g. main menu, no FMOD DSP), we just select the station and the
+    // overlay auto-play hook starts it when FMOD becomes ready.
     bool should_launch = false;
     {
         frdx::ScopedLock lk{mu_};
-        const auto st = state_.load(std::memory_order_relaxed);
-        const bool user_playing = (st == PlaybackState::playing ||
-                                   st == PlaybackState::buffering);
-        should_launch = audible_ && user_playing && !launch_url.empty();
+        should_launch = audible_ && !launch_url.empty();
     }
     auto new_stream_result = should_launch
                                ? launch_stream(launch_url, winhttp_session_)
@@ -683,19 +676,11 @@ void ShoutcastSource::cycle_and_restart(int direction) {
     {
         frdx::ScopedLock lk{mu_};
         cycle_preset(direction);
-        // Only (re)start the stream when the radio is audible AND the user
-        // has requested playback — mirrors select_station()'s gate. Without
-        // the state_ check, cycling presets while paused or before FMOD is
-        // hooked would launch the stream into a void.
-        const auto st = state_.load(std::memory_order_relaxed);
-        const bool user_playing = (st == PlaybackState::playing ||
-                                   st == PlaybackState::buffering);
-        if (audible_ && user_playing) {
+        if (audible_) {
             launch_url = start_stream_locked();
         } else {
-            // Not audible / not playing: update the display info so the
-            // station name is ready when the UI comes back, but don't start
-            // the stream yet.
+            // Not audible: update the display info so the station name is
+            // ready when the UI comes back, but don't start the stream yet.
             restore_station_display_locked();
         }
         // Always clear pending timed metadata on station swap — the
