@@ -225,6 +225,13 @@ void run_station_switch(const PendingStationSwitch& request) {
     }
 }
 
+// Grace window for station switching: if a request was queued within this
+// interval, hold it briefly so an even-newer next/prev press can supersede
+// it. This collapses a burst of rapid presses into a single stream launch
+// (one HTTP handshake) for the final station, instead of launching — and
+// tearing down — a stream per press.
+constexpr auto kStationSwitchGrace = std::chrono::milliseconds(250);
+
 void process_station_switches() {
     for (;;) {
         PendingStationSwitch request;
@@ -238,6 +245,25 @@ void process_station_switches() {
             g_station_switch.latest.reset();
         }
 
+        // Debounce: if the user is mashing next/prev, the request above is
+        // likely to be superseded within the grace window. Wait it out, and
+        // if a newer request arrived, drop this one and take the newest
+        // directly (without re-waiting — we already held one grace window,
+        // so the newest has already survived one coalescing round). A lone
+        // press (no follow-up) incurs only the grace delay, which is small
+        // relative to the HTTP handshake that follows.
+        const auto since_queued =
+            std::chrono::steady_clock::now() - request.queued_at;
+        if (since_queued < kStationSwitchGrace) {
+            std::this_thread::sleep_for(kStationSwitchGrace - since_queued);
+            frdx::ScopedLock lk{g_station_switch.mutex};
+            if (g_station_switch.latest) {
+                // A newer request arrived during the wait — supersede.
+                request = std::move(*g_station_switch.latest);
+                g_station_switch.latest.reset();
+            }
+        }
+
         log::info("[overlay] switching to requested station '{}' stream '{}'", request.station_id,
                   request.stream_id);
         run_station_switch(request);
@@ -248,7 +274,8 @@ void enqueue_station_switch(std::string station_id, std::string stream_id) {
     bool should_queue_worker = false;
     {
         frdx::ScopedLock lk{g_station_switch.mutex};
-        g_station_switch.latest = PendingStationSwitch{std::move(station_id), std::move(stream_id)};
+        g_station_switch.latest = PendingStationSwitch{std::move(station_id), std::move(stream_id),
+                                                        std::chrono::steady_clock::now()};
         if (!g_station_switch.worker_queued) {
             g_station_switch.worker_queued = true;
             should_queue_worker            = true;

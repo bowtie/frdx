@@ -324,6 +324,11 @@ extern ActionQueue g_aq;
 
 struct PendingStationSwitch {
     std::string station_id, stream_id;
+    // When the request was enqueued (steady_clock). Used by the switch
+    // worker to debounce rapid next/prev mashing: a request younger than
+    // the grace window is held briefly so an even-newer request can
+    // supersede it, coalescing a burst of presses into one stream launch.
+    std::chrono::steady_clock::time_point queued_at{};
 };
 struct StationSwitchQueue {
     frdx::Mutex mutex;

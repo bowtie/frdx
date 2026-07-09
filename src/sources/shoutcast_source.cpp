@@ -564,9 +564,18 @@ void ShoutcastSource::play() {
     {
         frdx::ScopedLock lk{mu_};
         drain_pending_ = true;
+        // Flip the UI button to "pause" immediately, even before the HTTP
+        // handshake that happens below.  If the user pauses while we are
+        // handshaking, the post-handshake check will abort.
+        state_.store(PlaybackState::buffering, std::memory_order_release);
         if (!stream_.load(std::memory_order_acquire)) {
             launch_url = start_stream_locked();
             started_stream = true;
+            // start_stream_locked() calls stop_stream_locked(), which resets
+            // state_ to stopped. Re-assert buffering so the UI stays in the
+            // "buffering" state for the handshake and the post-handshake
+            // abort check has a stable baseline to compare against.
+            state_.store(PlaybackState::buffering, std::memory_order_release);
         }
         // If start_stream_locked() didn't run (stream already existed) or failed to
         // set a station display (no active station), make sure the display is
@@ -585,21 +594,43 @@ void ShoutcastSource::play() {
         auto stream_result = launch_stream(launch_url, winhttp_session_);
         {
             frdx::ScopedLock lk{mu_};
+            // If the user hit pause while we were handshaking, pause() set
+            // state_ to paused.  Don't install a stale stream or flip the UI
+            // back to "playing".  (We compare against paused, not != buffering,
+            // because start_stream_locked()'s internal stop_stream_locked()
+            // transiently resets state_ to stopped — that's an internal reset,
+            // not a user pause, and must not abort the launch.)
+            if (state_.load(std::memory_order_relaxed) == PlaybackState::paused) {
+                return;
+            }
             install_stream_locked(launch_url, std::move(stream_result));
             has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
+            if (has_stream) {
+                state_.store(PlaybackState::playing, std::memory_order_release);
+            } else {
+                state_.store(PlaybackState::stopped, std::memory_order_release);
+            }
         }
+    } else if (has_stream) {
+        // Resuming an existing stream — no HTTP handshake, so keep it under lock.
+        frdx::ScopedLock lk{mu_};
+        state_.store(PlaybackState::playing, std::memory_order_release);
     }
 
-    // Restart the metadata poller — pause() stops it, so unpausing needs to
-    // bring it back to get live track info again.
+    // Restart the metadata poller — pause() no longer stops it synchronously,
+    // so unpausing needs to restart it to get live track info again.
     if (has_stream) {
         restart_metadata_for_current();
-        state_.store(PlaybackState::playing, std::memory_order_release);
     }
 }
 
 void ShoutcastSource::pause() {
-    metadata_controller_->stop();
+    // NOTE: we intentionally do NOT call metadata_controller_->stop() here.
+    // stop() joins the poller threads, which can block the UI thread for the
+    // network receive timeout (up to several seconds).  Pausing only needs to
+    // stop the audio stream and reset the display; the metadata callbacks will
+    // be ignored while state_ is not playing/buffering.  restart_metadata_for_current()
+    // is called on resume (action worker) and on station change.
     {
         frdx::ScopedLock lk{mu_};
         stop_stream_locked();
@@ -727,6 +758,10 @@ TrackInfo ShoutcastSource::current_track() const {
 bool ShoutcastSource::queue_timed_metadata_locked(TrackInfo info, int64_t now_ms,
                                                   uint64_t metadata_epoch) {
     if (metadata_epoch != metadata_epoch_.load(std::memory_order_acquire)) return false;
+    // Ignore metadata updates while paused/stopped — pause() no longer stops
+    // the poller synchronously, so callbacks can still arrive.
+    const auto st = state_.load(std::memory_order_relaxed);
+    if (st != PlaybackState::playing && st != PlaybackState::buffering) return false;
     if (info.title.empty() && info.artist.empty()) return false;
     if (info.title == info_.title && info.artist == info_.artist) {
         clear_pending_metadata_locked();
