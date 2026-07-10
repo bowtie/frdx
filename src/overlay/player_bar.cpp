@@ -103,7 +103,8 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     draw_backdrop_blur(g_ui.interactive_draw_alpha);
     const int blur_widget_pushes = push_blur_widget_styles(g_ui.interactive_draw_alpha);
 
-    const bool is_playing = active && active->playback_state() == PlaybackState::playing;
+    const bool is_playing = active && (active->playback_state() == PlaybackState::playing ||
+                                       active->playback_state() == PlaybackState::buffering);
     // The FMOD DSP bridge must be installed on a live channel before playback
     // is meaningful — otherwise the shoutcast stream buffers but the audio has
     // nowhere to go.  Disable transport until the radio channel is discovered.
@@ -202,8 +203,13 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
                                            ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
                                        : preview_hovered ? ImGui::GetColorU32(ImGuiCol_ButtonHovered)
                                                          : ImGui::GetColorU32(ImGuiCol_Button);
-            dl->AddRectFilled(pmin, pmax, preview_bg, ImGui::GetStyle().FrameRounding);
-            ImGui::PushClipRect(pmin, pmax, true);
+            const float preview_rounding = ImGui::GetStyle().FrameRounding;
+            dl->AddRectFilled(pmin, pmax, preview_bg, preview_rounding);
+            // Clip to the straight-sided region of the rounded button so the
+            // sliding station name text doesn't leak into the rounded corners.
+            ImGui::PushClipRect(
+                ImVec2(pmin.x + preview_rounding, pmin.y),
+                ImVec2(pmax.x - preview_rounding, pmax.y), true);
             const ImVec4 base_preview_col  = ImGui::GetStyleColorVec4(ImGuiCol_Text);
             const ImVec2 preview_text_size = ImGui::CalcTextSize(preview);
             const float text_y    = pmin.y + (combo_size.y - ImGui::GetTextLineHeight()) * 0.5f;
