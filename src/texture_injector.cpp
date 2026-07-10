@@ -443,14 +443,17 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     if (target_w == 0) target_w = 196;
     if (target_h == 0) target_h = 104;
 
-    // Artwork area: the game squishes the texture vertically when
-    // displaying it (196x104 texture → ~196x96 on screen).  To get a
-    // square art area on screen, the art in the texture must be:
-    //   - kArtWidth  = 96  (displays as 96, no horizontal squish)
-    //   - kArtHeight = 104 (displays as 104 * 96/104 = 96 after squish)
-    // The source image is cover-fit to kArtWidth × kArtHeight (taller
-    // than wide), then placed at x=0..kArtWidth, y=0..kArtHeight.
-    const int kArtWidth  = (target_h * 96 / 104);
+    // Artwork area: the game uses rectangular placeholders (196x104,
+    // 392x208) for the expanded streamer panel and square placeholders
+    // (196x196, 392x392) for the icon.  The rectangular texture is squished
+    // vertically by the game, so the art must be pre-stretched (96:104) to
+    // look square on screen.  The square icon is not squished, so the art
+    // should fill the whole square.
+    //
+    // For the rectangular panel, the art sits on the left and the rest of
+    // the texture is the text area.  For the square icon, the art fills the
+    // entire texture.
+    const int kArtWidth  = (target_w == target_h) ? target_h : (target_h * 96 / 104);
     const int kArtHeight = target_h;
 
     // Single variant at the actual target dimensions.
