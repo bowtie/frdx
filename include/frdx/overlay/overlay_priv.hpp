@@ -112,6 +112,18 @@ struct DxResources {
     static constexpr size_t kAllocatorPoolSize = 32;
     std::vector<wil::com_ptr<ID3D12CommandAllocator>> allocators;
     std::vector<UINT64> allocator_fence_values;
+    // Ring of the fence values signaled at the end of the last
+    // fb_bufs.size() (== ImGui NumFramesInFlight) overlay frames. ImGui's
+    // DX12 backend reuses vertex/index buffers in a round-robin of
+    // NumFramesInFlight slots WITHOUT fencing the GPU read, so before we
+    // let it Map/overwrite a slot we must guarantee the GPU has finished
+    // the frame that last used that slot — i.e. the frame NumFramesInFlight
+    // ago. render_overlay_frame waits on the oldest entry before
+    // ImGui_ImplDX12_RenderDrawData. Without this, animated widgets (whose
+    // vertex data changes frame to frame) tear diagonally because the GPU
+    // reads a buffer mid-overwrite. Static content is unaffected because
+    // overwriting identical data is invisible.
+    std::vector<UINT64> frame_fence_ring;
     std::vector<wil::com_ptr<ID3D12Resource>> fb_bufs;
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> fb_rtvs;
 

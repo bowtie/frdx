@@ -54,6 +54,32 @@ using namespace frdx;
 // Debug flag: set by the Debug tab to request a screenshot capture.
 std::atomic<bool> g_capture_backbuffer_requested{false};
 
+// Serialize overlay rendering. Present can be called from the frame-
+// generation thread (or from multiple swap-chain wrappers), and the
+// ImGui/D3D12 state used by render_overlay_frame is not thread-safe.
+static std::mutex s_render_mutex;
+
+// Free slots in the SRV heap for ImGui-managed textures. Slots 1-6 are
+// reserved by the overlay (1 = background image, 2-6 = blur mip chain).
+// Slot 0 is the first font atlas descriptor; additional slots are 7+.
+static std::vector<UINT> g_imgui_srv_heap_free_slots;
+
+static void imgui_dx12_alloc_srv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu,
+                                 D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu) {
+    IM_ASSERT(!g_imgui_srv_heap_free_slots.empty());
+    const UINT slot = g_imgui_srv_heap_free_slots.back();
+    g_imgui_srv_heap_free_slots.pop_back();
+    *out_cpu = g_dx.srv_heap.cpu(slot);
+    *out_gpu = g_dx.srv_heap.gpu(slot);
+}
+
+static void imgui_dx12_free_srv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu,
+                                D3D12_GPU_DESCRIPTOR_HANDLE) {
+    IM_ASSERT(g_dx.srv_heap.increment > 0);
+    const UINT slot = static_cast<UINT>((cpu.ptr - g_dx.srv_heap.cpu_base.ptr) / g_dx.srv_heap.increment);
+    g_imgui_srv_heap_free_slots.push_back(slot);
+}
+
 // ── Two-frame GPU screenshot ────────────────────────────────────────────
 // Frame N (screenshot requested):
 //   Copy backbuffer → staging texture (default heap, CopyResource —
@@ -280,6 +306,9 @@ using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInter
 using ResizeBuffers_t          = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT BufferCount,
                                                       UINT Width, UINT Height, DXGI_FORMAT NewFormat,
                                                       UINT SwapChainFlags);
+using CreateSwapChain_t = HRESULT(__stdcall*)(IDXGIFactory* pFactory, IUnknown* pDevice,
+                                              DXGI_SWAP_CHAIN_DESC* pDesc,
+                                              IDXGISwapChain** ppSwapChain);
 using CreateSwapChainForHwnd_t = HRESULT(__stdcall*)(
     IDXGIFactory2* pFactory, IUnknown* pDevice, HWND hWnd, const DXGI_SWAP_CHAIN_DESC1* pDesc,
     const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGIOutput* pRestrictToOutput,
@@ -303,6 +332,7 @@ using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT 
 
 Present_t original_Present                               = nullptr;
 ResizeBuffers_t original_ResizeBuffers                   = nullptr;
+CreateSwapChain_t original_CreateSwapChain               = nullptr;
 CreateSwapChainForHwnd_t original_CreateSwapChainForHwnd = nullptr;
 ExecuteCommandLists_t original_ExecuteCommandLists       = nullptr;
 
@@ -447,6 +477,19 @@ static float compute_ui_scale(UINT sc_height) {
     return static_cast<float>(sc_height) / 1080.0f;
 }
 
+// Queue a new UI scale.  With k_ui_scale_settle_frames=0 the change is
+// committed in the next render_overlay_frame() (same frame if called from
+// within it, next frame if called from a resize handler).
+void request_ui_scale(float scale, bool immediate) {
+    if (scale == g_ui.pending_ui_scale && g_ui.pending_ui_scale_immediate == immediate) {
+        // Keep the existing counter; don't reset the settle timer.
+        return;
+    }
+    g_ui.pending_ui_scale = scale;
+    g_ui.pending_ui_scale_frames = 0;
+    g_ui.pending_ui_scale_immediate = immediate;
+}
+
 // Public wrapper for the Debug tab's "Apply Scale" button.
 float compute_ui_scale_for_current_monitor() {
     return compute_ui_scale(g_sc_height);
@@ -459,42 +502,11 @@ void post_resize(IDXGISwapChain* swapChain) {
     DXGI_SWAP_CHAIN_DESC desc;
     swapChain->GetDesc(&desc);
 
-    // Cache the swap chain resolution for the render loop.
-    g_sc_width  = desc.BufferDesc.Width;
-    g_sc_height = desc.BufferDesc.Height;
     // Refresh window client size for mouse coordinate scaling.
     RECT rc{};
     if (GetClientRect(desc.OutputWindow, &rc)) {
         g_win_width  = rc.right - rc.left;
         g_win_height = rc.bottom - rc.top;
-    }
-
-    // The game can change the swap chain resolution without changing the
-    // window size (e.g. lowering in-game resolution while in fullscreen).
-    // The ImGui Win32 backend sets DisplaySize from WM_SIZE (window size),
-    // which would be stale.  Override it with the actual swap chain
-    // resolution so ImGui's coordinate system matches the render target.
-    auto& io = ImGui::GetIO();
-    if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(desc.BufferDesc.Width) ||
-        static_cast<int>(io.DisplaySize.y) != static_cast<int>(desc.BufferDesc.Height)) {
-        re_log::info("ImGui DisplaySize updated: {}x{} -> {}x{}",
-                     static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y),
-                     desc.BufferDesc.Width, desc.BufferDesc.Height);
-        io.DisplaySize = ImVec2(
-            static_cast<float>(desc.BufferDesc.Width),
-            static_cast<float>(desc.BufferDesc.Height));
-    }
-
-    // Recalculate UI scale from the swap chain resolution.  With ceil
-    // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Defer to the next render
-    // frame (unless the user forced a specific scale via the Debug tab).
-    if (g_ui.debug_ui_scale == 0) {
-        const auto new_scale = compute_ui_scale(desc.BufferDesc.Height);
-        if (new_scale != g_ui.ui_scale) {
-            g_ui.pending_ui_scale = new_scale;
-            re_log::info("ui_scale pending: {:.2f} (swap chain {}x{})",
-                         new_scale, desc.BufferDesc.Width, desc.BufferDesc.Height);
-        }
     }
 
     SIZE_T rtvDescriptorSize =
@@ -503,6 +515,9 @@ void post_resize(IDXGISwapChain* swapChain) {
 
     g_dx.fb_bufs.resize(desc.BufferCount);
     g_dx.fb_rtvs.resize(desc.BufferCount);
+    // Buffer count may have changed (resize/recreate) — drop stale ring
+    // entries so the ImGui-slot wait uses the new NumFramesInFlight.
+    g_dx.frame_fence_ring.clear();
 
     for (UINT i = 0; i < desc.BufferCount; i++) {
         wil::com_ptr<ID3D12Resource> tmp;
@@ -514,16 +529,56 @@ void post_resize(IDXGISwapChain* swapChain) {
         }
     }
 
+    // Use the actual D3D12 resource dimensions, not the wrapper GetDesc().
+    // Frame-generation wrappers may report a different resolution than the
+    // backbuffer they wrap.
+    D3D12_RESOURCE_DESC bb_desc = {};
+    if (g_dx.fb_bufs[0]) {
+        bb_desc = g_dx.fb_bufs[0]->GetDesc();
+        g_sc_width  = static_cast<UINT>(bb_desc.Width);
+        g_sc_height = bb_desc.Height;
+    }
+
+    // The game can change the swap chain resolution without changing the
+    // window size (e.g. lowering in-game resolution while in fullscreen).
+    // The ImGui Win32 backend sets DisplaySize from WM_SIZE (window size),
+    // which would be stale.  Override it with the actual backbuffer
+    // resolution so ImGui's coordinate system matches the render target.
+    auto& io = ImGui::GetIO();
+    if (static_cast<int>(io.DisplaySize.x) != static_cast<int>(g_sc_width) ||
+        static_cast<int>(io.DisplaySize.y) != static_cast<int>(g_sc_height)) {
+        re_log::info("ImGui DisplaySize updated: {}x{} -> {}x{}",
+                     static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y),
+                     g_sc_width, g_sc_height);
+        io.DisplaySize = ImVec2(
+            static_cast<float>(g_sc_width),
+            static_cast<float>(g_sc_height));
+    }
+
+    // Recalculate UI scale from the actual backbuffer resolution.  With ceil
+    // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Apply immediately (settle=0)
+    // so a resolution change doesn't leave the text at the old scale for
+    // multiple frames.
+    if (g_ui.debug_ui_scale == 0) {
+        const auto new_scale = compute_ui_scale(g_sc_height);
+        if (snap_ui_scale(new_scale) != g_ui.ui_scale) {
+            request_ui_scale(new_scale, false);
+            re_log::info("ui_scale pending: {:.2f} (backbuffer {}x{})",
+                         new_scale, g_sc_width, g_sc_height);
+        }
+    }
+
     ImGui_ImplDX12_CreateDeviceObjects();
 
     // Re-allocate the blur mip-chain textures at the new resolution (the
     // PSOs/root signature survive and are reused).
-    resize_backdrop_blur(desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+    resize_backdrop_blur(g_sc_width, g_sc_height, bb_desc.Format);
 
     re_log::info("recovered DX12 backbuffer RTV resources after resize ({}x{})",
-                 desc.BufferDesc.Width, desc.BufferDesc.Height);
+                 g_sc_width, g_sc_height);
 }
 
+FRDX_NO_THREAD_SAFETY_ANALYSIS
 ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
     static std::atomic<ID3D12CommandQueue*> cached_queue{nullptr};
     static std::atomic<IDXGISwapChain*> cached_chain{nullptr};
@@ -531,12 +586,76 @@ ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
     auto* q = cached_queue.load(std::memory_order_acquire);
     if (q && cached_chain.load(std::memory_order_relaxed) == swapChain) return q;
 
-    frdx::ScopedLock lk{g_sc.mutex};
-    auto it = g_sc.queues_ref().find(swapChain);
-    q       = (it != g_sc.queues_ref().end()) ? it->second : nullptr;
-    cached_queue.store(q, std::memory_order_release);
-    cached_chain.store(q ? swapChain : nullptr, std::memory_order_release);
+    {
+        std::scoped_lock lk{g_sc.mutex, g_cq.mutex};
+        auto it = g_sc.queues_ref().find(swapChain);
+        if (it != g_sc.queues_ref().end()) {
+            q = it->second;
+        } else {
+            // Frame-generation wrappers and alternate factory paths may create
+            // swap chains we don't catch. Fall back to a DIRECT command queue on
+            // the same device as the swap chain. This only runs once per unknown
+            // swap chain, after which the result is cached in g_sc.
+            ID3D12Device* raw_sc_device = nullptr;
+            if (SUCCEEDED(swapChain->GetDevice(__uuidof(ID3D12Device),
+                                               reinterpret_cast<void**>(&raw_sc_device))) &&
+                raw_sc_device) {
+                wil::com_ptr<ID3D12Device> sc_device;
+                sc_device.attach(raw_sc_device);
+                for (auto& [queue, state] : g_cq.queues_ref()) {
+                    if (!queue) continue;
+                    const D3D12_COMMAND_QUEUE_DESC qd = queue->GetDesc();
+                    if (qd.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) continue;
+
+                    ID3D12Device* raw_q_device = nullptr;
+                    if (SUCCEEDED(queue->GetDevice(__uuidof(ID3D12Device),
+                                                   reinterpret_cast<void**>(&raw_q_device))) &&
+                        raw_q_device) {
+                        wil::com_ptr<ID3D12Device> q_device;
+                        q_device.attach(raw_q_device);
+                        if (q_device.get() == sc_device.get()) {
+                            q = queue;
+                            q->AddRef();
+                            g_sc.queues_ref()[swapChain] = q;
+                            re_log::info(
+                                "[present] swapchain 0x{:X} not in g_sc map; fallback to command queue 0x{:X} on same device",
+                                reinterpret_cast<uintptr_t>(swapChain),
+                                reinterpret_cast<uintptr_t>(q));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        cached_queue.store(q, std::memory_order_release);
+        cached_chain.store(q ? swapChain : nullptr, std::memory_order_release);
+    }
     return q;
+}
+
+HRESULT __stdcall
+hook_CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc,
+                     IDXGISwapChain** ppSwapChain) {
+    HRESULT hr = original_CreateSwapChain(pFactory, pDevice, pDesc, ppSwapChain);
+    if (SUCCEEDED(hr) && ppSwapChain && *ppSwapChain && pDevice) {
+        ID3D12CommandQueue* queue = nullptr;
+        if (SUCCEEDED(pDevice->QueryInterface(__uuidof(ID3D12CommandQueue), (void**)&queue)) &&
+            queue) {
+            frdx::ScopedLock lk{g_sc.mutex};
+            // Release existing if already mapped
+            auto it = g_sc.queues_ref().find(*ppSwapChain);
+            if (it != g_sc.queues_ref().end()) {
+                if (it->second) it->second->Release();
+            }
+            // NOLINTNEXTLINE(bugprone-pointer-arithmetic-on-polymorphic-object,cert-ctr56-cpp)
+            g_sc.queues_ref()[*ppSwapChain] = queue;
+            re_log::info("intercepted CreateSwapChain: mapped swapchain 0x{:X} to "
+                         "command queue 0x{:X}",
+                         reinterpret_cast<uintptr_t>(*ppSwapChain),
+                         reinterpret_cast<uintptr_t>(queue));
+        }
+    }
+    return hr;
 }
 
 HRESULT __stdcall
@@ -576,20 +695,15 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         return false;
     }
 
-    // Calculate UI scale from the swap chain (render) resolution.
-    // With ceil snapping: 1080p -> 1x, 1440p/4K -> 2x.
-    g_ui.ui_scale = compute_ui_scale(desc.BufferDesc.Height);
-    g_sc_width  = desc.BufferDesc.Width;
-    g_sc_height = desc.BufferDesc.Height;
     // Cache window client size for mouse coordinate scaling.
     RECT rc{};
     if (GetClientRect(desc.OutputWindow, &rc)) {
         g_win_width  = rc.right - rc.left;
         g_win_height = rc.bottom - rc.top;
     }
-    re_log::info("swap chain: {}x{}, window: {}x{}, ui_scale={:.2f}",
+    re_log::info("swap chain desc: {}x{}, window: {}x{}",
                  desc.BufferDesc.Width, desc.BufferDesc.Height,
-                 g_win_width, g_win_height, g_ui.ui_scale);
+                 g_win_width, g_win_height);
 
     original_wnd_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
         desc.OutputWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(wnd_proc_hook)));
@@ -604,6 +718,21 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         re_log::error("failed to create SRV descriptor heap!");
         return false;
     }
+
+    // Reserve ImGui SRV slots. Slots 1-6 are used by the overlay for the
+    // background image and blur mip chain; slot 0 is available for the
+    // font atlas. The rest are available for dynamic atlas textures.
+    g_imgui_srv_heap_free_slots.clear();
+    g_imgui_srv_heap_free_slots.reserve(kOverlaySrvCount - 7 + 1);
+    for (int i = static_cast<int>(kOverlaySrvCount) - 1; i >= 7; --i) {
+        g_imgui_srv_heap_free_slots.push_back(static_cast<UINT>(i));
+    }
+    g_imgui_srv_heap_free_slots.push_back(0);
+
+    // Clear any stale pending scale from a previous swap chain.
+    g_ui.pending_ui_scale = -1.0f;
+    g_ui.pending_ui_scale_frames = 0;
+    g_ui.pending_ui_scale_immediate = false;
 
     // RTV heap holds the backbuffer RTVs plus kBlurMaxLevels extra slots for
     // the dual-Kawase blur mip chain (which live past the backbuffer RTVs).
@@ -675,11 +804,25 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         rtvHandle.ptr   += rtvDescriptorSize;
     }
 
+    // The actual D3D12 resource dimensions are the ground truth.  Frame-
+    // generation wrappers may report a different resolution in GetDesc() than
+    // the backbuffer they wrap, so use the resource desc for the overlay.
+    D3D12_RESOURCE_DESC bb_desc = {};
+    if (g_dx.fb_bufs[0]) {
+        bb_desc = g_dx.fb_bufs[0]->GetDesc();
+        g_sc_width  = static_cast<UINT>(bb_desc.Width);
+        g_sc_height = bb_desc.Height;
+    }
+
+    // Calculate UI scale from the actual backbuffer (render) resolution.
+    // With ceil snapping: 1080p -> 1x, 1440p/4K -> 2x.
+    g_ui.ui_scale = compute_ui_scale(g_sc_height);
+
     // ImGui Win32 + DX12 contexts
     ImGui::CreateContext();
-    // Set DisplaySize to the swap chain resolution, not the window size.
+    // Set DisplaySize to the actual backbuffer resolution, not the window size.
     // The Win32 backend uses WM_SIZE (window size) which may differ from
-    // the swap chain resolution when the game uses a non-native render
+    // the backbuffer resolution when the game uses a non-native render
     // resolution.  The per-frame render loop enforces this continuously.
     ImGui::GetIO().DisplaySize = ImVec2(
         static_cast<float>(g_sc_width),
@@ -703,10 +846,12 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     init_info.Device                       = g_dx.device.get();
     init_info.CommandQueue                 = active_queue;
     init_info.NumFramesInFlight            = desc.BufferCount;
-    init_info.RTVFormat                    = desc.BufferDesc.Format;
+    init_info.RTVFormat                    = bb_desc.Format;
     init_info.SrvDescriptorHeap            = g_dx.srv_heap.heap.get();
-    init_info.LegacySingleSrvCpuDescriptor = g_dx.srv_heap.cpu_base;
-    init_info.LegacySingleSrvGpuDescriptor = g_dx.srv_heap.gpu_base;
+    init_info.SrvDescriptorAllocFn         = imgui_dx12_alloc_srv;
+    init_info.SrvDescriptorFreeFn          = imgui_dx12_free_srv;
+    init_info.LegacySingleSrvCpuDescriptor = {};
+    init_info.LegacySingleSrvGpuDescriptor = {};
     if (!ImGui_ImplDX12_Init(&init_info)) {
         re_log::error("ImGui DX12 backend initialization failed");
         ImGui_ImplWin32_Shutdown();
@@ -722,7 +867,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     load_background_texture(active_queue);
 
     // Build the dual-Kawase backdrop blur pipeline + mip-chain textures.
-    init_backdrop_blur(desc.BufferDesc.Width, desc.BufferDesc.Height, desc.BufferDesc.Format);
+    init_backdrop_blur(g_sc_width, g_sc_height, bb_desc.Format);
 
     return true;
 }
@@ -768,25 +913,66 @@ void cleanup_imgui_resources() {
 static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     if (!pSwapChain || !active_queue) return false;
 
+    // Serialize the whole render path. Present can be called from the frame-
+    // generation thread (or through a different wrapper), and the static state
+    // below (s_current_swapchain, s_cached_sc3, g_dx) is not thread-safe.
+    std::scoped_lock render_lk{s_render_mutex};
+
     // Cached IDXGISwapChain3 pointer — avoids a mutex lock + map lookup
     // every frame.  Cleared on swap chain change (below).
     static IDXGISwapChain3* s_cached_sc3 = nullptr;
 
     // Detect swap chain change: the game may create a new swap chain
     // when changing resolution (e.g. DLDSR) instead of calling
-    // ResizeBuffers.  When this happens, our fb_bufs/fb_rtvs still
-    // reference the old swap chain's backbuffers.  Reinitialize.
+    // ResizeBuffers.  Frame-generation wrappers may also present through a
+    // different IDXGISwapChain pointer that points to the same backbuffers,
+    // so compare the backbuffer resource instead of the wrapper pointer to
+    // avoid a spurious reinit.
     static IDXGISwapChain* s_current_swapchain = nullptr;
     if (g_ui.is_init && s_current_swapchain && s_current_swapchain != pSwapChain) {
-        re_log::info("swap chain changed (0x{:X} -> 0x{:X}); reinitializing overlay",
-                     reinterpret_cast<uintptr_t>(s_current_swapchain),
-                     reinterpret_cast<uintptr_t>(pSwapChain));
-        cleanup_imgui_resources();
-        g_ui.is_init = false;
-        s_current_swapchain = nullptr;
-        // Clear the cached sc3 pointer so the backbuffer lookup re-queries
-        // the new swap chain.
-        s_cached_sc3 = nullptr;
+        bool same_backbuffers = false;
+        if (!g_dx.fb_bufs.empty() && g_dx.fb_bufs[0]) {
+            wil::com_ptr<ID3D12Resource> tmp;
+            if (SUCCEEDED(pSwapChain->GetBuffer(0, IID_PPV_ARGS(tmp.put()))) && tmp) {
+                same_backbuffers = (tmp.get() == g_dx.fb_bufs[0].get());
+            }
+        }
+
+        if (same_backbuffers) {
+            re_log::info("swap chain wrapper changed (0x{:X} -> 0x{:X}); backbuffers match, "
+                         "reusing overlay",
+                         reinterpret_cast<uintptr_t>(s_current_swapchain),
+                         reinterpret_cast<uintptr_t>(pSwapChain));
+            s_current_swapchain = pSwapChain;
+            s_cached_sc3 = nullptr;
+            {
+                frdx::ScopedLock lk{g_sc.mutex};
+                auto it = g_sc.cache3_ref().find(pSwapChain);
+                if (it == g_sc.cache3_ref().end()) {
+                    IDXGISwapChain3* sc3 = nullptr;
+                    if (SUCCEEDED(pSwapChain->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
+                        g_sc.cache3_ref()[pSwapChain] = sc3;
+                    }
+                    s_cached_sc3 = sc3;
+                } else {
+                    s_cached_sc3 = it->second;
+                }
+            }
+        } else {
+            re_log::info("swap chain changed (0x{:X} -> 0x{:X}); reinitializing overlay",
+                         reinterpret_cast<uintptr_t>(s_current_swapchain),
+                         reinterpret_cast<uintptr_t>(pSwapChain));
+            wait_for_all_overlay_work();
+            ImGui_ImplDX12_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            ImGui::DestroyContext();
+            cleanup_imgui_resources();
+            g_ui.is_init = false;
+            s_current_swapchain = nullptr;
+            // Clear the cached sc3 pointer so the backbuffer lookup re-queries
+            // the new swap chain.
+            s_cached_sc3 = nullptr;
+        }
     }
 
     if (!g_ui.is_init) {
@@ -816,32 +1002,9 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
     }
 
     if (g_ui.is_init) {
-        // Query swap chain resolution to detect in-game resolution changes
-        // that don't go through ResizeBuffers.  When the swap chain height
-        // changes, recalculate ui_scale and defer the font reload to next
-        // frame (reloading mid-frame crashes ImGui).
-        DXGI_SWAP_CHAIN_DESC sc_desc;
-        if (SUCCEEDED(pSwapChain->GetDesc(&sc_desc))) {
-            if (g_sc_width != sc_desc.BufferDesc.Width ||
-                g_sc_height != sc_desc.BufferDesc.Height) {
-                g_sc_width  = sc_desc.BufferDesc.Width;
-                g_sc_height = sc_desc.BufferDesc.Height;
-                re_log::info("swap chain resolution changed to {}x{}", g_sc_width, g_sc_height);
-                // Don't override if the user forced a specific scale via the Debug tab.
-                if (g_ui.debug_ui_scale == 0) {
-                    const auto new_scale = compute_ui_scale(g_sc_height);
-                    if (new_scale != g_ui.ui_scale) {
-                        g_ui.pending_ui_scale = new_scale;
-                    }
-                }
-            }
-        }
-
-        // Skip ImGui entirely when all UI panels and the HUD are hidden.
-        if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible &&
-            !g_ui.console_visible && !g_ui.hud_visible && !has_visible_toasts()) {
-            return false;
-        }
+        // Determine the current backbuffer index so we can read its actual
+        // resource dimensions.  Frame-generation wrappers may report a
+        // different resolution in GetDesc() than the backbuffer they wrap.
         UINT backBufferIdx = 0;
         {
             if (s_cached_sc3) {
@@ -867,6 +1030,33 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             re_log::error("backBufferIdx {} is out of bounds or backbuffer is NULL! "
                           "buf_size={}",
                           backBufferIdx, g_dx.fb_bufs.size());
+            return false;
+        }
+
+        ID3D12Resource* bb = g_dx.fb_bufs[backBufferIdx].get();
+
+        // Query the actual backbuffer resolution to detect in-game resolution
+        // changes that don't go through ResizeBuffers.  When the height
+        // changes, recalculate ui_scale and defer the font reload to next frame.
+        D3D12_RESOURCE_DESC bb_desc = bb->GetDesc();
+        const UINT bb_width = static_cast<UINT>(bb_desc.Width);
+        const UINT bb_height = bb_desc.Height;
+        if (g_sc_width != bb_width || g_sc_height != bb_height) {
+            g_sc_width = bb_width;
+            g_sc_height = bb_height;
+            re_log::info("backbuffer resolution changed to {}x{}", g_sc_width, g_sc_height);
+            // Don't override if the user forced a specific scale via the Debug tab.
+            if (g_ui.debug_ui_scale == 0) {
+                const auto new_scale = compute_ui_scale(g_sc_height);
+                if (snap_ui_scale(new_scale) != g_ui.ui_scale) {
+                    request_ui_scale(new_scale, false);
+                }
+            }
+        }
+
+        // Skip ImGui entirely when all UI panels and the HUD are hidden.
+        if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible &&
+            !g_ui.console_visible && !g_ui.hud_visible && !has_visible_toasts()) {
             return false;
         }
 
@@ -902,8 +1092,6 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         ID3D12DescriptorHeap* heaps[] = {g_dx.srv_heap.heap.get()};
         g_dx.cmd_list->SetDescriptorHeaps(1, heaps);
 
-        ID3D12Resource* bb = g_dx.fb_bufs[backBufferIdx].get();
-
         // Transition backbuffer to RENDER_TARGET for ImGui rendering.
         // Use COMMON as the source state — D3D12 swap-chain back buffers
         // decay to COMMON after Present, and COMMON can be implicitly
@@ -935,9 +1123,19 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // resolution change.  Must happen before NewFrame so all windows
         // pick up the new FontScaleMain during their Begin().
         if (g_ui.pending_ui_scale >= 0.0f) {
-            const float scale = g_ui.pending_ui_scale;
-            g_ui.pending_ui_scale = -1.0f;
-            set_font_scale(scale);
+            bool should_apply = false;
+            if (g_ui.pending_ui_scale_immediate) {
+                should_apply = true;
+            } else if (++g_ui.pending_ui_scale_frames >= k_ui_scale_settle_frames) {
+                should_apply = true;
+            }
+            if (should_apply) {
+                const float scale = g_ui.pending_ui_scale;
+                g_ui.pending_ui_scale = -1.0f;
+                g_ui.pending_ui_scale_frames = 0;
+                g_ui.pending_ui_scale_immediate = false;
+                set_font_scale(scale);
+            }
         }
 
         // Render custom dashboard panel UI
@@ -966,6 +1164,21 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
 
         ImGui::Render();
+
+        // ImGui's DX12 backend reuses its vertex/index buffers in a
+        // round-robin of NumFramesInFlight slots without fencing the GPU
+        // read (imgui_impl_dx12.cpp:242 "FIXME: assuming once per frame").
+        // Our allocator pool (32) allows far more overlay frames in flight
+        // than ImGui has buffers, so a slot can be Map-overwritten while
+        // the GPU still reads it from an earlier frame — diagonally tearing
+        // animated widgets (whose verts change frame to frame). Wait for the
+        // GPU to finish the frame that last used the slot we're about to
+        // reuse (the oldest in the ring, NumFramesInFlight frames ago).
+        if (g_dx.frame_fence_ring.size() >= g_dx.fb_bufs.size() && !g_dx.frame_fence_ring.empty()) {
+            const UINT64 slot_fence = g_dx.frame_fence_ring.front();
+            if (slot_fence > 0) wait_for_fence(slot_fence);
+        }
+
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
 
         // Two-frame screenshot:
@@ -999,6 +1212,13 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         const UINT64 fence_value = ++g_dx.fence_value;
         if (SUCCEEDED(active_queue->Signal(g_dx.fence.get(), fence_value))) {
             g_dx.allocator_fence_values[alloc_idx] = fence_value;
+            // Record this frame's fence in the ring so the next
+            // NumFramesInFlight-th frame can wait on it before reusing
+            // its ImGui vertex/index buffer slot.
+            g_dx.frame_fence_ring.push_back(fence_value);
+            if (g_dx.frame_fence_ring.size() > g_dx.fb_bufs.size()) {
+                g_dx.frame_fence_ring.erase(g_dx.frame_fence_ring.begin());
+            }
             // Phase 3: if readback copy was recorded this frame, map and save.
             if (g_shot_phase == 2) {
                 shot_phase3_save_png(fence_value);
@@ -1172,14 +1392,20 @@ bool initialize(AudioSourceManager& mgr, fmod_bridge::DSPBridge& bridge, ConfigS
         return false;
     }
 
-    // CreateSwapChainForHwnd is on IDXGIFactory2, not in kiero's table.
-    // We hook it manually by creating a temporary factory.
+    // CreateSwapChain / CreateSwapChainForHwnd are on IDXGIFactory/IDXGIFactory2,
+    // not in kiero's table. We hook them manually by creating a temporary factory.
     // (MinHook already initialized above before the kiero2 locate calls.)
     {
         wil::com_ptr<IDXGIFactory4> factory;
         if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4),
                                          reinterpret_cast<void**>(factory.put())))) {
             void** factoryVtable = *reinterpret_cast<void***>(factory.get());
+            void* target_CreateSwapChain = factoryVtable[10];
+            if (MH_CreateHook(target_CreateSwapChain,
+                              reinterpret_cast<void*>(&hook_CreateSwapChain),
+                              reinterpret_cast<LPVOID*>(&original_CreateSwapChain)) == MH_OK) {
+                MH_EnableHook(target_CreateSwapChain);
+            }
             void* target_CreateSwapChainForHwnd = factoryVtable[15];
             if (MH_CreateHook(target_CreateSwapChainForHwnd,
                               reinterpret_cast<void*>(&hook_CreateSwapChainForHwnd),
@@ -1208,6 +1434,7 @@ void shutdown() noexcept {
         g_hooks_installed               = false;
         original_Present                = nullptr;
         original_ResizeBuffers          = nullptr;
+        original_CreateSwapChain        = nullptr;
         original_CreateSwapChainForHwnd = nullptr;
     }
 
