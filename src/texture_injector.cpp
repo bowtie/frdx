@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -64,6 +65,104 @@ std::vector<uint8_t> compress_bc7(const unsigned char* rgba, int w, int h) {
         }
     }
     return payload;
+}
+
+// Build BC7 variants from a source image, cover-fitting it into the art
+// area (kArtWidth × kArtHeight) with an optional border frame.  Used by
+// both the station-logo and album-art paths, which differ only in their
+// log message — the pixel pipeline is identical.
+//
+// Takes ownership of img_data (frees it via stbi_image_free).
+// Returns empty if the job was cancelled mid-flight.
+std::vector<TextureInjector::PixelVariant>
+build_cover_variants(unsigned char* img_data, int width, int height,
+                     int kArtWidth, int kArtHeight,
+                     const std::vector<std::pair<int,int>>& targets,
+                     bool border, std::atomic<uint64_t>& latest_job_id,
+                     uint64_t job_id,
+                     const std::function<void()>& cleanup,
+                     const char* log_label)
+{
+    std::vector<TextureInjector::PixelVariant> variants;
+
+    const int border_thickness = border ? std::max(1, kArtWidth / 26) : 0;
+    const int inner_w = kArtWidth - 2 * border_thickness;
+    const int inner_h = kArtHeight - 2 * border_thickness;
+    const int new_w = border ? inner_w : kArtWidth;
+    const int new_h = border ? inner_h : kArtHeight;
+    const int place_x = border ? border_thickness : 0;
+    const int place_y = border ? border_thickness : 0;
+
+    std::vector<unsigned char> resized_data(new_w * new_h * 4);
+    stbir_resize_uint8_linear(img_data, width, height, 0,
+                              resized_data.data(), new_w, new_h, 0, STBIR_RGBA);
+    stbi_image_free(img_data);
+
+    if (job_id != latest_job_id.load(std::memory_order_acquire)) {
+        cleanup();
+        return variants;
+    }
+
+    // Calculate average color for border from the resized image.
+    unsigned char b_r = 0, b_g = 0, b_b = 0;
+    if (border) {
+        uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
+        for (int y = 0; y < new_h; ++y) {
+            for (int x = 0; x < new_w; ++x) {
+                int idx = (y * new_w + x) * 4;
+                r_sum += resized_data[idx];
+                g_sum += resized_data[idx + 1];
+                b_sum += resized_data[idx + 2];
+            }
+        }
+        int pixel_count = new_w * new_h;
+        b_r = static_cast<unsigned char>(static_cast<float>(r_sum) / pixel_count * 0.6f);
+        b_g = static_cast<unsigned char>(static_cast<float>(g_sum) / pixel_count * 0.6f);
+        b_b = static_cast<unsigned char>(static_cast<float>(b_sum) / pixel_count * 0.6f);
+    }
+
+    for (const auto& [tgt_w, tgt_h] : targets) {
+        if (job_id != latest_job_id.load(std::memory_order_acquire)) {
+            cleanup();
+            return variants;
+        }
+
+        // Build the canvas (tgt_w x tgt_h), transparent.
+        // Fill the art area with border color, then place the
+        // resized image inside it.
+        std::vector<unsigned char> padded_data(tgt_w * tgt_h * 4, 0);
+
+        for (int y = 0; y < kArtHeight && y < tgt_h; ++y) {
+            for (int x = 0; x < kArtWidth; ++x) {
+                int dst_idx = (y * tgt_w + x) * 4;
+
+                int sx = x - place_x;
+                int sy = y - place_y;
+                if (sx >= 0 && sx < new_w && sy >= 0 && sy < new_h) {
+                    int src_idx = (sy * new_w + sx) * 4;
+                    padded_data[dst_idx]     = resized_data[src_idx];
+                    padded_data[dst_idx + 1] = resized_data[src_idx + 1];
+                    padded_data[dst_idx + 2] = resized_data[src_idx + 2];
+                    padded_data[dst_idx + 3] = resized_data[src_idx + 3];
+                } else if (border) {
+                    // Border frame area
+                    padded_data[dst_idx]     = b_r;
+                    padded_data[dst_idx + 1] = b_g;
+                    padded_data[dst_idx + 2] = b_b;
+                    padded_data[dst_idx + 3] = 255;
+                }
+                // else: transparent (already zeroed)
+            }
+        }
+
+        auto bc7_payload = compress_bc7(padded_data.data(), tgt_w, tgt_h);
+
+        log::info("[texinject] {} processed: {}x{} -> {}x{} BC7 ({} bytes)",
+                  log_label, width, height, tgt_w, tgt_h, bc7_payload.size());
+        variants.push_back({std::move(bc7_payload), tgt_w, tgt_h});
+    }
+
+    return variants;
 }
 
 } // namespace
@@ -491,76 +590,12 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         // area.  The border fills the gap between the logo and the
         // art area edges.  For transparent logos (border disabled),
         // the logo fills the full art area.
-        const int border_thickness = border ? std::max(1, kArtWidth / 26) : 0;
-        const int inner_w = kArtWidth - 2 * border_thickness;
-        const int inner_h = kArtHeight - 2 * border_thickness;
-        const int new_w = border ? inner_w : kArtWidth;
-        const int new_h = border ? inner_h : kArtHeight;
-        const int place_x = border ? border_thickness : 0;
-        const int place_y = border ? border_thickness : 0;
-
-        std::vector<unsigned char> resized_data(new_w * new_h * 4);
-        stbir_resize_uint8_linear(img_data, width, height, 0,
-                                  resized_data.data(), new_w, new_h, 0, STBIR_RGBA);
-        stbi_image_free(img_data);
-
-        if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
-
-        // Calculate average color for border from the resized logo.
-        unsigned char b_r = 0, b_g = 0, b_b = 0;
-        if (border) {
-            uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
-            for (int y = 0; y < new_h; ++y) {
-                for (int x = 0; x < new_w; ++x) {
-                    int idx = (y * new_w + x) * 4;
-                    r_sum += resized_data[idx];
-                    g_sum += resized_data[idx + 1];
-                    b_sum += resized_data[idx + 2];
-                }
-            }
-            int pixel_count = new_w * new_h;
-            b_r = static_cast<unsigned char>(static_cast<float>(r_sum) / pixel_count * 0.6f);
-            b_g = static_cast<unsigned char>(static_cast<float>(g_sum) / pixel_count * 0.6f);
-            b_b = static_cast<unsigned char>(static_cast<float>(b_sum) / pixel_count * 0.6f);
-        }
-
-        for (const auto& tgt : targets) {
-            if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
-
-            // Build the canvas (tgt.w x tgt.h), transparent.
-            // Fill the art area with border color, then place the
-            // resized logo inside it.
-            std::vector<unsigned char> padded_data(tgt.w * tgt.h * 4, 0);
-
-            for (int y = 0; y < kArtHeight && y < tgt.h; ++y) {
-                for (int x = 0; x < kArtWidth; ++x) {
-                    int dst_idx = (y * tgt.w + x) * 4;
-
-                    int sx = x - place_x;
-                    int sy = y - place_y;
-                    if (sx >= 0 && sx < new_w && sy >= 0 && sy < new_h) {
-                        int src_idx = (sy * new_w + sx) * 4;
-                        padded_data[dst_idx]     = resized_data[src_idx];
-                        padded_data[dst_idx + 1] = resized_data[src_idx + 1];
-                        padded_data[dst_idx + 2] = resized_data[src_idx + 2];
-                        padded_data[dst_idx + 3] = resized_data[src_idx + 3];
-                    } else if (border) {
-                        // Border frame area
-                        padded_data[dst_idx]     = b_r;
-                        padded_data[dst_idx + 1] = b_g;
-                        padded_data[dst_idx + 2] = b_b;
-                        padded_data[dst_idx + 3] = 255;
-                    }
-                    // else: transparent (already zeroed)
-                }
-            }
-
-            auto bc7_payload = compress_bc7(padded_data.data(), tgt.w, tgt.h);
-
-            log::info("[texinject] logo processed: {}x{} -> {}x{} BC7 ({} bytes)",
-                      width, height, tgt.w, tgt.h, bc7_payload.size());
-            variants.push_back({std::move(bc7_payload), tgt.w, tgt.h});
-        }
+        std::vector<std::pair<int,int>> tgt_list;
+        for (const auto& tgt : targets) tgt_list.emplace_back(tgt.w, tgt.h);
+        variants = build_cover_variants(img_data, width, height,
+                                        kArtWidth, kArtHeight, tgt_list,
+                                        border, latest_job_id_, job_id,
+                                        cleanup, "logo");
     } else {
         // ── Album art mode: stretch to fill art area (same as logos) ──
         // The art area is kArtWidth × kArtHeight (96×104 at 1080p), which
@@ -569,73 +604,12 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         // We stretch to fill (ignoring source aspect ratio) — the game's
         // vertical squish un-distorts it, producing a square on screen.
         // This is the same approach as logo mode, which is known to work.
-        const int border_thickness = border ? std::max(1, kArtWidth / 26) : 0;
-        const int inner_w = kArtWidth - 2 * border_thickness;
-        const int inner_h = kArtHeight - 2 * border_thickness;
-        const int new_w = border ? inner_w : kArtWidth;
-        const int new_h = border ? inner_h : kArtHeight;
-        const int place_x = border ? border_thickness : 0;
-        const int place_y = border ? border_thickness : 0;
-
-        std::vector<unsigned char> resized_data(new_w * new_h * 4);
-        stbir_resize_uint8_linear(img_data, width, height, 0,
-                                  resized_data.data(), new_w, new_h, 0, STBIR_RGBA);
-        stbi_image_free(img_data);
-
-        if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
-
-        // Calculate average color for border from the resized image.
-        unsigned char b_r = 0, b_g = 0, b_b = 0;
-        if (border) {
-            uint64_t r_sum = 0, g_sum = 0, b_sum = 0;
-            for (int y = 0; y < new_h; ++y) {
-                for (int x = 0; x < new_w; ++x) {
-                    int idx = (y * new_w + x) * 4;
-                    r_sum += resized_data[idx];
-                    g_sum += resized_data[idx + 1];
-                    b_sum += resized_data[idx + 2];
-                }
-            }
-            int pixel_count = new_w * new_h;
-            b_r = static_cast<unsigned char>(static_cast<float>(r_sum) / pixel_count * 0.6f);
-            b_g = static_cast<unsigned char>(static_cast<float>(g_sum) / pixel_count * 0.6f);
-            b_b = static_cast<unsigned char>(static_cast<float>(b_sum) / pixel_count * 0.6f);
-        }
-
-        for (const auto& tgt : targets) {
-            if (job_id != latest_job_id_.load(std::memory_order_acquire)) { cleanup(); return; }
-
-            std::vector<unsigned char> padded_data(tgt.w * tgt.h * 4, 0);
-
-            for (int y = 0; y < kArtHeight && y < tgt.h; ++y) {
-                for (int x = 0; x < kArtWidth; ++x) {
-                    int dst_idx = (y * tgt.w + x) * 4;
-
-                    int sx = x - place_x;
-                    int sy = y - place_y;
-                    if (sx >= 0 && sx < new_w && sy >= 0 && sy < new_h) {
-                        int src_idx = (sy * new_w + sx) * 4;
-                        padded_data[dst_idx]     = resized_data[src_idx];
-                        padded_data[dst_idx + 1] = resized_data[src_idx + 1];
-                        padded_data[dst_idx + 2] = resized_data[src_idx + 2];
-                        padded_data[dst_idx + 3] = resized_data[src_idx + 3];
-                    } else if (border) {
-                        padded_data[dst_idx]     = b_r;
-                        padded_data[dst_idx + 1] = b_g;
-                        padded_data[dst_idx + 2] = b_b;
-                        padded_data[dst_idx + 3] = 255;
-                    }
-                    // else: transparent (already zeroed)
-                }
-            }
-
-            auto bc7_payload = compress_bc7(padded_data.data(), tgt.w, tgt.h);
-
-            log::info("[texinject] artwork processed: {}x{} -> {}x{} BC7 ({} bytes)",
-                      width, height, tgt.w, tgt.h, bc7_payload.size());
-
-            variants.push_back({std::move(bc7_payload), tgt.w, tgt.h});
-        }
+        std::vector<std::pair<int,int>> tgt_list;
+        for (const auto& tgt : targets) tgt_list.emplace_back(tgt.w, tgt.h);
+        variants = build_cover_variants(img_data, width, height,
+                                        kArtWidth, kArtHeight, tgt_list,
+                                        border, latest_job_id_, job_id,
+                                        cleanup, "artwork");
     } // end if (raw) / else
 
     if (variants.empty()) {
