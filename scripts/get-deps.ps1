@@ -45,13 +45,68 @@ foreach ($file in $imgui_files) {
     # misc/freetype/ files keep their path (used as misc/freetype/ in CMake).
     $local = if ($file.StartsWith("backends/")) { $file.Substring(9) } else { $file }
     $dest = Join-Path $tp "imgui/$local"
-    # Skip files with local patches (imconfig.h has IMGUI_ENABLE_FREETYPE,
-    # imgui_freetype.cpp has variable-font-weight axis support).
-    if ((Test-Path $dest) -and ($local -eq "imconfig.h" -or $local -eq "misc/freetype/imgui_freetype.cpp")) {
-        Write-Host "  skip (locally patched): $local" -ForegroundColor DarkGray
-        continue
-    }
     Fetch-File $url $dest
+}
+
+# ── Apply local patches to ImGui files ────────────────────────────────────
+# imconfig.h: enable FreeType font rasterizer
+$imconfig = Join-Path $tp "imgui/imconfig.h"
+$content = Get-Content $imconfig -Raw
+$content = $content -replace '//#define IMGUI_ENABLE_FREETYPE', '#define IMGUI_ENABLE_FREETYPE'
+Set-Content $imconfig $content -NoNewline
+Write-Host "  patched: imconfig.h (IMGUI_ENABLE_FREETYPE)" -ForegroundColor Yellow
+
+# imgui_freetype.cpp: add variable-font-weight axis support.
+# Inserts a block after FT_Select_Charmap that reads the 'wght' axis
+# weight from the upper 16 bits of FontLoaderFlags and applies it via
+# FT_Set_Var_Design_Coordinates.
+$freetype_cpp = Join-Path $tp "imgui/misc/freetype/imgui_freetype.cpp"
+$content = Get-Content $freetype_cpp -Raw
+$patch = @"
+    // Variable font weight axis support: if the font has a 'wght' axis,
+    // set it to the requested weight from FontLoaderFlags (bits 16-31).
+    // This allows selecting semibold (600) etc. from variable fonts without
+    // needing separate static TTF files.
+    if (FT_HAS_MULTIPLE_MASTERS(FtFace))
+    {
+        FT_MM_Var* amaster = nullptr;
+        if (FT_Get_MM_Var(FtFace, &amaster) == 0)
+        {
+            FT_UInt wght_axis_index = 0xFFFFFFFF;
+            for (FT_UInt i = 0; i < amaster->num_axis; i++)
+            {
+                if (amaster->axis[i].tag == FT_MAKE_TAG('w', 'g', 'h', 't'))
+                {
+                    wght_axis_index = i;
+                    break;
+                }
+            }
+            if (wght_axis_index != 0xFFFFFFFF)
+            {
+                // Extract weight from upper 16 bits of FontLoaderFlags.
+                // Lower 16 bits are the standard ImGuiFreeTypeLoaderFlags.
+                FT_Fixed requested_weight = (FT_Fixed)((src->FontLoaderFlags >> 16) & 0xFFFF);
+                if (requested_weight > 0)
+                {
+                    FT_Fixed coords[16] = {};
+                    for (FT_UInt i = 0; i < amaster->num_axis && i < 16; i++)
+                        coords[i] = amaster->axis[i].def;
+                    coords[wght_axis_index] = requested_weight << 16;
+                    FT_Set_Var_Design_Coordinates(FtFace, amaster->num_axis, coords);
+                }
+            }
+            FT_Done_MM_Var(ft_library, amaster);
+        }
+    }
+
+"@
+$anchor = "    // Convert to FreeType flags (NB: Bold and Oblique are processed separately)"
+if ($content.Contains($anchor)) {
+    $content = $content.Replace($anchor, $patch + $anchor)
+    Set-Content $freetype_cpp $content -NoNewline
+    Write-Host "  patched: imgui_freetype.cpp (variable font weight axis)" -ForegroundColor Yellow
+} else {
+    Write-Host "  WARNING: could not find anchor in imgui_freetype.cpp — patch skipped" -ForegroundColor Red
 }
 
 # ── IconFontCppHeaders ────────────────────────────────────────────────────
