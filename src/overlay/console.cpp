@@ -346,7 +346,7 @@ void draw_console_window() {
         static float        s_last_font_scale = -1.0f;
         static float        s_cached_w   = 0.0f;
         const ImFont*       cur_font     = ImGui::GetFont();
-        const float         cur_font_scale = ImGui::GetIO().FontGlobalScale;
+        const float         cur_font_scale = ImGui::GetStyle().FontScaleMain;
         if (s_last_shown != shown_count ||
             s_last_total != total_lines ||
             s_last_font  != cur_font ||

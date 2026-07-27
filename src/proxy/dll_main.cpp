@@ -8,6 +8,7 @@
 #include <frdx/log.hpp>
 
 #include <dbghelp.h>
+#include <windows.h>
 
 #include <array>
 #include <atomic>
@@ -159,6 +160,28 @@ DWORD WINAPI bridge_thread(LPVOID self) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
+        // Per-monitor DPI awareness so GetDpiForWindow returns the real DPI
+        // instead of 96.  Must be set before the game creates its swap chain.
+        // Use dynamic resolution with fallbacks (same pattern as ImGui's
+        // ImGui_ImplWin32_EnableDpiAwareness) since SetProcessDpiAwarenessContext
+        // is only available on Windows 10 v1703+.
+        {
+            // Local enum + typedefs to avoid needing <ShellScalingApi.h>.
+            enum { PROCESS_PER_MONITOR_DPI_AWARE = 2 };
+            using PFN_SetProcessDpiAwarenessContext = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+            using PFN_SetProcessDpiAwareness = HRESULT(WINAPI*)(int);
+            if (auto* fn = reinterpret_cast<PFN_SetProcessDpiAwarenessContext>(
+                    GetProcAddress(GetModuleHandleW(L"user32.dll"),
+                                   "SetProcessDpiAwarenessContext"))) {
+                fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            } else if (auto* fn2 = reinterpret_cast<PFN_SetProcessDpiAwareness>(
+                           GetProcAddress(GetModuleHandleW(L"shcore.dll"),
+                                          "SetProcessDpiAwareness"))) {
+                fn2(PROCESS_PER_MONITOR_DPI_AWARE);
+            } else {
+                SetProcessDPIAware();
+            }
+        }
         // Enable the D3D12 debug layer + DRED before the game creates its
         // device.  No-op unless FRDX_DX12_DEBUG=1 is set in the environment.
         frdx::d3d12_debug::enable_debug_layer_if_requested();

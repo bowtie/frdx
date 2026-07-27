@@ -81,6 +81,10 @@ struct OverlayConfig {
     // Grace period (seconds) after station selection: hold the station
     // logo + name on-screen before the first track metadata overwrites it.
     float metadata_grace_period = 2.5f;
+    // Font rendering mode:
+    //   "pixel"    — Fusion Pixel 12px bitmap font, integer 1x/2x scaling
+    //   "modern"   — Geist + Source Han Sans CJK, fractional scaling
+    std::string font_mode = "pixel";
 };
 
 struct DualSenseConfig {

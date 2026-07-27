@@ -10,7 +10,7 @@ using namespace frdx;
 bool has_visible_toasts() {
     const auto now = std::chrono::steady_clock::now();
     return std::ranges::any_of(g_ui.toasts, [&](const Toast& toast) {
-        return now - toast.created < std::chrono::duration<float>(toast.lifetime);
+        return toast.sticky || now - toast.created < std::chrono::duration<float>(toast.lifetime);
     });
 }
 
@@ -75,8 +75,10 @@ bool should_notify_song_change(IAudioSource* active, const TrackInfo& track, std
 
 void draw_toasts() {
     const auto now = std::chrono::steady_clock::now();
-    while (!g_ui.toasts.empty() && now - g_ui.toasts.front().created >=
-                                       std::chrono::duration<float>(g_ui.toasts.front().lifetime)) {
+    while (!g_ui.toasts.empty()) {
+        const auto& front = g_ui.toasts.front();
+        if (front.sticky) break;
+        if (now - front.created < std::chrono::duration<float>(front.lifetime)) break;
         g_ui.toasts.pop_front();
     }
     if (g_ui.toasts.empty()) return;
@@ -124,7 +126,7 @@ void draw_toasts() {
     for (auto it = g_ui.toasts.rbegin(); it != g_ui.toasts.rend(); ++it, ++idx) {
         const float age     = std::chrono::duration<float>(now - it->created).count();
         const float enter_t = std::clamp(age / 0.60f, 0.0f, 1.0f);
-        const float exit_t  = std::clamp((it->lifetime - age) / 0.60f, 0.0f, 1.0f);
+        const float exit_t  = it->sticky ? 1.0f : std::clamp((it->lifetime - age) / 0.60f, 0.0f, 1.0f);
         const float enter   = iam_eval_preset(iam_ease_out_back, enter_t);
         const float exit    = iam_eval_preset(iam_ease_out_quad, exit_t);
         const float alpha   = std::clamp(std::min(enter, exit), 0.0f, 1.0f);

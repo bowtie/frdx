@@ -1,5 +1,6 @@
 #include "frdx/overlay/overlay.hpp"
 #include "frdx/overlay/overlay_priv.hpp"
+#include <IconsKenney.h>
 #include <array>
 #include <fstream>
 #include <utility>
@@ -391,7 +392,11 @@ void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
         ImGui::TextDisabled("%s", text);
     };
 
-    center_column_label("\xEE\x83\x97");
+    // Use the larger Kenney font for L2/R2 button badge icons (loaded at
+    // modern_icon_lg_size).  PushFont(font, size) sets the unscaled base size.
+    if (font_mode_is_modern() && g_ui.font_kenney_lg) ImGui::PushFont(g_ui.font_kenney_lg, g_ui.modern_icon_lg_size);
+    center_column_label(font_mode_is_modern() && g_ui.font_kenney_lg ? ICON_KI_BUTTON_L2 : "L2");
+    if (font_mode_is_modern() && g_ui.font_kenney_lg) ImGui::PopFont();
     dualsense_toggle("L2 Shift Thump", ds.enable_gear_shift_brake,
                      &DualSenseConfig::enable_gear_shift_brake);
     dualsense_toggle("ABS Rumble", ds.enable_abs, &DualSenseConfig::enable_abs);
@@ -403,7 +408,9 @@ void draw_dualsense_controls_tab(const DualSenseConfig& ds) {
                      &DualSenseConfig::enable_handbrake_bonus);
 
     ImGui::NextColumn();
-    center_column_label("\xEE\x83\x98");
+    if (font_mode_is_modern() && g_ui.font_kenney_lg) ImGui::PushFont(g_ui.font_kenney_lg, g_ui.modern_icon_lg_size);
+    center_column_label(font_mode_is_modern() && g_ui.font_kenney_lg ? ICON_KI_BUTTON_R2 : "R2");
+    if (font_mode_is_modern() && g_ui.font_kenney_lg) ImGui::PopFont();
     dualsense_toggle("R2 Shift Thump", ds.enable_gear_shift, &DualSenseConfig::enable_gear_shift);
     dualsense_toggle("Redline Buzz", ds.enable_rev_limiter, &DualSenseConfig::enable_rev_limiter);
     dualsense_toggle("Wheelspin Buzz", ds.enable_wheelspin_buzz,
@@ -795,8 +802,9 @@ bool draw_dualsense_tab_strip() {
 
 void draw_dualsense_tab_header(const DualSenseConfig& ds) {
     const float ui_s    = g_ui.ui_scale;
+    const float ls      = layout_scale();
     const float row_y    = ImGui::GetCursorPosY();
-    const float toggle_w = 132.0f * ui_s;
+    const float toggle_w = 132.0f * ui_s * ls;
     const float tab_h    = ImGui::GetFrameHeight() + 4.0f * ui_s;
     const float toggle_h = ImGui::GetTextLineHeight() + 4.0f * ui_s;
 

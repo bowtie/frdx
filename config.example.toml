@@ -26,6 +26,7 @@ blur_tint_g = 0.08
 blur_tint_b = 0.10
 blur_tint_opacity = 0.35         # 0 = pure blur, 1 = solid tint colour
 blur_widget_opacity = 0.6        # widget bg alpha scale when blur is on (1 = opaque, 0 = invisible)
+font_mode = "pixel"             # pixel (Fusion Pixel bitmap, integer 1x/2x) or modern (Geist + Source Han Sans CJK, fractional scaling)
 
 [dualsense]
 enabled = false             # native HID adaptive triggers; set Forza Data Out to this UDP port

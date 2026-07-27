@@ -4,6 +4,8 @@
 #include "frdx/platform/windows/subprocess.hpp"
 #include "frdx/re_log.hpp"
 
+#include <IconsKenney.h>
+
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -14,6 +16,7 @@
 #include <vector>
 
 #include <imgui.h>
+#include <imgui_freetype.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -23,11 +26,11 @@
 namespace frdx::overlay {
 using namespace frdx;
 
-void load_overlay_font(float scale) {
-    auto& io             = ImGui::GetIO();
+// ── Mode A: pixel font loading (Fusion Pixel 12px, integer 1x/2x) ────────
+static void load_pixel_font(float scale) {
+    auto& io = ImGui::GetIO();
     auto font_path = module_directory() / "mods" / "frdx" / "fonts" / "FusionPixel12-ja.ttf";
     if (!std::filesystem::exists(font_path)) {
-        // Fallback: running from a build directory — look up to project assets/
         auto fb = module_directory() / ".." / "assets" / "fonts" / "FusionPixel12-ja.ttf";
         std::error_code ec;
         if (std::filesystem::exists(fb, ec)) {
@@ -40,27 +43,6 @@ void load_overlay_font(float scale) {
         }
     }
 
-    // Load TWO fonts up front — 16px (1x) and 32px (2x) — and switch between
-    // them via io.FontDefault on a scale change. Both are loaded with
-    // ImFontFlags_LockBakedSizes so their baked sizes are pinned to their
-    // load size and ImGui 1.92's dynamic font baking never creates a new
-    // baked font / texture when we switch.
-    //
-    // The previous approach loaded one 32px font and scaled 1x/2x via
-    // io.FontGlobalScale (0.5 / 1.0). But our DX12 backend sets
-    // ImGuiBackendFlags_RendererHasTextures, which activates the dynamic
-    // baker, and the baked-font cache key includes the *rounded* final
-    // font size (which FontGlobalScale feeds). So flipping FontGlobalScale
-    // 0.5<->1.0 changed the rounded baked size 16<->32 and triggered a NEW
-    // baked font + texture on the transition frame, uploaded async inside
-    // RenderDrawData — producing a one-frame "2x font flash" where vertices
-    // were sized at the new scale but sampled the old/not-yet-uploaded bake.
-    //
-    // Switching FontDefault between two pre-baked fonts hits the baker's
-    // fast path (exact-size match) with no new bake, so scale transitions
-    // are flash-free. FontGlobalScale stays 1.0. Each font bakes once on
-    // its first used frame (a one-time cost at first 1x / first 2x display),
-    // not on every transition.
     const int int_scale  = snap_ui_scale(scale);
     const auto effective_scale    = static_cast<float>(int_scale);
 
@@ -68,13 +50,17 @@ void load_overlay_font(float scale) {
     cfg.OversampleH = 1;
     cfg.OversampleV = 1;
     cfg.PixelSnapH  = true;
-    cfg.Flags      |= ImFontFlags_LockBakedSizes;  // pin baked size to load size
+    cfg.Flags      |= ImFontFlags_LockBakedSizes;
 
     g_ui.font_1x = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 16.0f, &cfg);
     g_ui.font_2x = io.Fonts->AddFontFromFileTTF(font_path.string().c_str(), 32.0f, &cfg);
 
     if (g_ui.font_1x && g_ui.font_2x) {
-        io.FontGlobalScale = 1.0f;  // baked size already encodes the scale; no global scaling
+        // Pixel mode: use legacy font switching (pre-baked 16px/32px).
+        // Reset 1.92 scale fields to neutral so they don't interfere.
+        auto& style = ImGui::GetStyle();
+        style.FontScaleMain = 1.0f;
+        style.FontSizeBase  = 16.0f;
         io.FontDefault     = (effective_scale >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
         g_ui.ui_scale      = effective_scale;
         log::info("[overlay] loaded Fusion Pixel font at 16px (1x) + 32px (2x), int_scale={}x, FontDefault={} from {}",
@@ -85,22 +71,282 @@ void load_overlay_font(float scale) {
     }
 }
 
+// ── Mode B: modern font loading (Geist Variable + Kenney Game Icons) ─────
+// Loads Geist Variable as the primary font, then merges Kenney Game Icons
+// into the same ImFont* via MergeMode so icon glyphs are accessible from
+// the same font handle without PushFont/PopFont.  Source Han Sans JP/KR
+// is merged as CJK fallback.  FreeType rasterizes all with anti-aliasing.
+// Scaling is done via style.FontScaleMain (fractional), relying on ImGui
+// 1.92's dynamic baker for smooth continuous rescaling.
+static void load_modern_font(float scale) {
+    auto& io = ImGui::GetIO();
+    auto fonts_dir = module_directory() / "mods" / "frdx" / "fonts";
+
+    // Select the modern font file based on modern_font setting.
+    // Using variable TTFs with the wght axis set to 600 (semibold) via
+    // FreeType's FT_Set_Var_Design_Coordinates (patched into imgui_freetype).
+    struct FontEntry { const char* setting; const char* filename; };
+    static constexpr FontEntry font_entries[] = {
+        {"geist",     "Geist-Variable.ttf"},
+    };
+    std::filesystem::path font_path;
+    for (const auto& e : font_entries) {
+        if (g_ui.modern_font == e.setting) {
+            font_path = fonts_dir / e.filename;
+            break;
+        }
+    }
+    if (font_path.empty()) font_path = fonts_dir / font_entries[0].filename;
+
+    if (!std::filesystem::exists(font_path)) {
+        auto fb = module_directory() / ".." / "assets" / "fonts" / font_path.filename();
+        std::error_code ec;
+        if (std::filesystem::exists(fb, ec)) {
+            font_path = fb.lexically_normal();
+        } else {
+            // Try other available modern fonts before giving up.
+            for (const auto& e : font_entries) {
+                auto alt = fonts_dir / e.filename;
+                if (std::filesystem::exists(alt)) {
+                    log::warn("[overlay] {} not found; falling back to {}",
+                              font_path.filename().string(), e.filename);
+                    font_path = alt;
+                    g_ui.modern_font = e.setting;
+                    break;
+                }
+            }
+            if (!std::filesystem::exists(font_path)) {
+                log::warn("[overlay] no modern font found; modern mode will be unavailable");
+                g_ui.font_modern = nullptr;
+                return;
+            }
+        }
+    }
+
+    // Modern font with FreeType anti-aliasing.
+    // In ImGui 1.92 with the dynamic font system (RendererHasTextures),
+    // glyphs are rasterized on demand at whatever size is needed.
+    // The base size is controlled by style.FontSizeBase, and scaling by
+    // style.FontScaleMain (replacing the legacy io.FontGlobalScale).
+    ImFontConfig font_cfg{};
+    font_cfg.OversampleH = 2;
+    font_cfg.OversampleV = 1;
+    font_cfg.PixelSnapH  = false;
+    // Set variable font weight via upper 16 bits of FontLoaderFlags.
+    // The imgui_freetype patch extracts this and calls
+    // FT_Set_Var_Design_Coordinates on the 'wght' axis.
+    // CJK fonts (Noto/Source) default to very thin weights (100/250), so
+    // they need a higher value to match Latin fonts visually.
+    if (g_ui.modern_semibold) {
+        font_cfg.FontLoaderFlags |= (500u << 16);
+    }
+
+    g_ui.font_modern = io.Fonts->AddFontFromFileTTF(
+        font_path.string().c_str(), g_ui.modern_base_size, &font_cfg);
+
+    if (!g_ui.font_modern) {
+        log::warn("[overlay] failed to load modern font; modern mode will be unavailable");
+        return;
+    }
+
+    // CJK fallback: merge Source Han Sans JP + KR so Japanese/Korean text
+    // renders.  The dynamic font system loads glyphs on demand, so no glyph
+    // ranges are needed.
+    {
+        const char* cjk_files[] = {
+            "SourceHanSansJP-Variable.ttf",
+            "SourceHanSansKR-Variable.ttf",
+        };
+        for (const char* name : cjk_files) {
+            auto p = fonts_dir / name;
+            if (!std::filesystem::exists(p)) {
+                auto fb = module_directory() / ".." / "assets" / "fonts" / name;
+                std::error_code ec;
+                if (std::filesystem::exists(fb, ec)) p = fb.lexically_normal();
+                else { log::warn("[overlay] {} not found; CJK fallback incomplete", name); continue; }
+            }
+            ImFontConfig cjk_cfg{};
+            cjk_cfg.MergeMode   = true;
+            cjk_cfg.OversampleH = 2;
+            cjk_cfg.OversampleV = 1;
+            cjk_cfg.PixelSnapH  = false;
+            if (g_ui.modern_semibold) {
+                cjk_cfg.FontLoaderFlags |= (500u << 16);
+            }
+            io.Fonts->AddFontFromFileTTF(p.string().c_str(), g_ui.modern_base_size, &cjk_cfg);
+            log::info("[overlay] merged CJK fallback: {}", p.filename().string());
+        }
+    }
+
+    // Kenney Game Icons: merge into the Inter font so ICON_KI_* glyphs are
+    // accessible from the same ImFont*.  In 1.92 glyph ranges are not needed
+    // — the dynamic font system loads glyphs on demand.
+    auto kenney_path = fonts_dir / "kenney-icon-font.ttf";
+    if (!std::filesystem::exists(kenney_path)) {
+        auto fb = module_directory() / ".." / "assets" / "fonts" / "kenney-icon-font.ttf";
+        std::error_code ec;
+        if (std::filesystem::exists(fb, ec)) {
+            kenney_path = fb.lexically_normal();
+        } else {
+            log::warn("[overlay] Kenney icon font not found at {}; icons will be missing",
+                      kenney_path.string());
+            kenney_path.clear();
+        }
+    }
+    if (!kenney_path.empty()) {
+        ImFontConfig icon_cfg{};
+        icon_cfg.MergeMode        = true;
+        icon_cfg.OversampleH      = 2;
+        icon_cfg.OversampleV      = 1;
+        icon_cfg.PixelSnapH       = false;
+        icon_cfg.FontLoaderFlags  = ImGuiFreeTypeLoaderFlags_NoAutoHint;
+        // Kenney icon font has very different vertical metrics than Geist
+        // (ascent ratio 0.938 vs 1.005, almost no descent).  When merged,
+        // its glyphs sit too high relative to the text baseline.  Use
+        // GlyphOffset.y to push them down to align.
+        // Offset = (primary_ascent - kenney_ascent) * kenney_size
+        //        = (1.005 - 0.938) * 15 ≈ 1.0px, plus extra descent
+        //        compensation ≈ 2.5px total at 15px/18px combo.
+        icon_cfg.GlyphOffset.y    = 1.5f;
+        io.Fonts->AddFontFromFileTTF(
+            kenney_path.string().c_str(), g_ui.modern_icon_size, &icon_cfg);
+        log::info("[overlay] merged Kenney Game Icons into modern font (offset y={:.1f})",
+                  icon_cfg.GlyphOffset.y);
+    }
+
+    // Apply fractional scale via style.FontScaleMain (the 1.92 replacement
+    // for the legacy io.FontGlobalScale).  In modern mode, ui_scale is the
+    // raw float (e.g. 1.33 for 1440p) and FontScaleMain multiplies the base
+    // font size to get the effective rendered size.
+    const float eff_scale = effective_ui_scale(scale);
+    g_ui.ui_scale = eff_scale;
+    ImGui::GetStyle().FontScaleMain = eff_scale;
+    ImGui::GetStyle().FontSizeBase  = g_ui.modern_base_size;
+    io.FontDefault = g_ui.font_modern;
+
+    // Standalone Kenney font for larger icons (L2/R2 button badges).
+    // Loaded at modern_icon_lg_size (20px); PushFont with that size sets
+    // the unscaled base size for the badge icons.
+    if (!kenney_path.empty()) {
+        g_ui.font_kenney_lg = io.Fonts->AddFontFromFileTTF(
+            kenney_path.string().c_str(), g_ui.modern_icon_lg_size);
+        log::info("[overlay] loaded standalone Kenney font at {}px for large icons",
+                  g_ui.modern_icon_lg_size);
+    }
+
+    log::info("[overlay] loaded {} + Kenney at {}px base, FontScaleMain={:.2f}x from {}",
+              g_ui.modern_font, g_ui.modern_base_size, eff_scale, font_path.string());
+}
+
+// Preload both pixel and modern fonts into the atlas at init so mode
+// switching is instant (just swap io.FontDefault, no atlas rebuild).
+// Each loader sets its own font handles, io.FontDefault, g_ui.ui_scale,
+// and style fields; the second loader's values win, so we restore the
+// correct mode's state afterwards.
+void load_all_fonts(float scale) {
+    // Load pixel fonts first (font_1x, font_2x).
+    load_pixel_font(scale);
+    // Load modern fonts (font_modern, font_kenney_lg + CJK/Kenney merges).
+    // This overwrites io.FontDefault / g_ui.ui_scale / style fields.
+    load_modern_font(scale);
+    // Restore the correct mode's FontDefault, ui_scale, and style fields.
+    // If the modern font failed to load, fall back to pixel mode.
+    if (g_ui.font_mode == "modern" && g_ui.font_modern) {
+        const float eff_scale = effective_ui_scale(scale);
+        g_ui.ui_scale = eff_scale;
+        ImGui::GetStyle().FontScaleMain = eff_scale;
+        ImGui::GetStyle().FontSizeBase  = g_ui.modern_base_size;
+        ImGui::GetIO().FontDefault = g_ui.font_modern;
+    } else {
+        if (g_ui.font_mode == "modern" && !g_ui.font_modern) {
+            log::warn("[overlay] modern font unavailable; staying in pixel mode");
+            g_ui.font_mode = "pixel";
+        }
+        const int int_scale = snap_ui_scale(scale);
+        const auto eff = static_cast<float>(int_scale);
+        g_ui.ui_scale = eff;
+        ImGui::GetStyle().FontScaleMain = 1.0f;
+        ImGui::GetStyle().FontSizeBase  = 16.0f;
+        ImGui::GetIO().FontDefault =
+            (eff >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
+    }
+}
+
+// Instant mode switch: swap io.FontDefault + style values without
+// rebuilding the font atlas.  Both font sets must already be loaded
+// (call load_all_fonts at init).
+void switch_font_mode(float scale) {
+    auto& io    = ImGui::GetIO();
+    auto& style = ImGui::GetStyle();
+
+    if (g_ui.font_mode == "modern" && !g_ui.font_modern) {
+        log::warn("[overlay] cannot switch to modern mode (font not loaded); staying in pixel");
+        g_ui.font_mode = "pixel";
+    }
+
+    if (g_ui.font_mode == "modern") {
+        const float eff_scale = effective_ui_scale(scale);
+        g_ui.ui_scale = eff_scale;
+        ApplyTheme(g_ui.theme_idx);
+        style.FontScaleMain = eff_scale;
+        style.FontSizeBase  = g_ui.modern_base_size;
+        io.FontDefault      = g_ui.font_modern;
+        log::info("[overlay] switched to modern mode (FontScaleMain={:.2f})", eff_scale);
+    } else {
+        const int int_scale = snap_ui_scale(scale);
+        const auto eff = static_cast<float>(int_scale);
+        g_ui.ui_scale = eff;
+        ApplyTheme(g_ui.theme_idx);
+        style.FontScaleMain = 1.0f;
+        style.FontSizeBase  = 16.0f;
+        io.FontDefault      = (eff >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
+        log::info("[overlay] switched to pixel mode (int_scale={}x)", int_scale);
+    }
+}
+
 // Apply a new UI scale (style values + hardcoded pixel multipliers).
-// Switches io.FontDefault between the pre-baked 16px (1x) and 32px (2x)
-// fonts — bake-free, so no transition-frame flash. Honors the Debug-tab
-// font override (debug_font_scale: 0=auto, 1=force 1x, 2=force 2x).
+// Mode A: switches io.FontDefault between the pre-baked 16px (1x) and 32px
+//         (2x) fonts — bake-free, so no transition-frame flash.
+// Mode B: sets style.FontScaleMain to the fractional scale value (the 1.92
+//         replacement for the legacy io.FontGlobalScale).  ImGui's dynamic
+//         font baker handles the continuous size change smoothly.
+// Honors the Debug-tab overrides (debug_font_scale / debug_ui_scale).
 // Deferred to next frame via pending_ui_scale since style values are read
 // during Begin().
 void set_font_scale(float scale) {
-    const int int_scale = snap_ui_scale(scale);
-    const auto effective_scale = static_cast<float>(int_scale);
-    g_ui.ui_scale = effective_scale;
-    // Pick the active font: debug override wins over auto scale.
-    const int font_sel = (g_ui.debug_font_scale != 0) ? g_ui.debug_font_scale : int_scale;
-    ImFont* wanted = (font_sel >= 2) ? g_ui.font_2x : g_ui.font_1x;
-    if (wanted) ImGui::GetIO().FontDefault = wanted;
-    ApplyTheme(g_ui.theme_idx);
-    log::info("[overlay] set UI scale to {}x (font={}px)", int_scale, wanted == g_ui.font_2x ? 32 : 16);
+    if (font_mode_is_modern() && !g_ui.font_modern) {
+        log::warn("[overlay] modern font not loaded; falling back to pixel scale");
+        g_ui.font_mode = "pixel";
+    }
+    if (font_mode_is_modern()) {
+        // Mode B: fractional scaling via style.FontScaleMain (1.92 API).
+        float eff_scale = effective_ui_scale(scale);
+        g_ui.ui_scale = eff_scale;
+        ImGui::GetIO().FontDefault = g_ui.font_modern;
+        // ApplyTheme resets the entire ImGuiStyle (via `style = ImGuiStyle()`),
+        // so FontScaleMain / FontSizeBase must be set AFTER it, not before.
+        ApplyTheme(g_ui.theme_idx);
+        auto& style = ImGui::GetStyle();
+        style.FontScaleMain = eff_scale;
+        style.FontSizeBase  = g_ui.modern_base_size;
+        log::info("[overlay] set UI scale to {:.2f}x (modern, FontScaleMain={:.2f})",
+                  eff_scale, eff_scale);
+    } else {
+        // Mode A: integer scaling via font switching.
+        const int int_scale = snap_ui_scale(scale);
+        const auto effective_scale = static_cast<float>(int_scale);
+        g_ui.ui_scale = effective_scale;
+        const int font_sel = (g_ui.debug_font_scale != 0) ? g_ui.debug_font_scale : int_scale;
+        ImFont* wanted = (font_sel >= 2) ? g_ui.font_2x : g_ui.font_1x;
+        if (wanted) ImGui::GetIO().FontDefault = wanted;
+        // ApplyTheme resets the entire ImGuiStyle (via `style = ImGuiStyle()`),
+        // so FontScaleMain / FontSizeBase must be set AFTER it, not before.
+        ApplyTheme(g_ui.theme_idx);
+        auto& style = ImGui::GetStyle();
+        style.FontScaleMain = 1.0f;
+        style.FontSizeBase  = 16.0f;
+        log::info("[overlay] set UI scale to {}x (font={}px)", int_scale, wanted == g_ui.font_2x ? 32 : 16);
+    }
 }
 
 void load_background_texture(ID3D12CommandQueue* queue) {

@@ -189,6 +189,7 @@ struct Toast {
     std::string title, detail;
     std::chrono::steady_clock::time_point created{};
     float lifetime = 8.0f;
+    bool sticky = false;  // sticky toasts never auto-expire
 };
 
 struct UiState {
@@ -203,14 +204,59 @@ struct UiState {
     // Debug overrides: 0 = auto, 1 = force 1x, 2 = force 2x.
     int debug_ui_scale = 0;
     int debug_font_scale = 0;
+    // Modern-mode fractional scale override: 0.0 = auto (follow monitor),
+    // otherwise the explicit scale (e.g. 1.5).  When non-zero this takes
+    // priority over debug_ui_scale / debug_font_scale in modern mode.
+    float debug_scale_float = 0.0f;
     // Pre-baked font handles for the two UI scales. Both are loaded once at
     // init with ImFontFlags_LockBakedSizes so their baked sizes are pinned
     // (16px for 1x, 32px for 2x) and ImGui 1.92's dynamic font baking never
     // creates a new baked font / texture on a scale switch — that creation
     // is what caused the one-frame "2x font flash" on transitions. Switching
-    // io.FontDefault between these is bake-free; FontGlobalScale stays 1.0.
+    // io.FontDefault between these is bake-free; FontScaleMain stays 1.0.
     ImFont* font_1x = nullptr;  // 16px baked
     ImFont* font_2x = nullptr;  // 32px baked
+    // Font rendering mode: "pixel" (Mode A) or "modern" (Mode B).
+    // Mode A: Fusion Pixel bitmap font, integer 1x/2x scaling, two pre-baked
+    //         fonts switched via FontDefault (flash-free).
+    // Mode B: Geist Variable + Kenney Game Icons merged, FreeType-rasterized,
+    //         fractional scaling via style.FontScaleMain. ImGui 1.92's dynamic
+    //         baker handles continuous size changes smoothly.
+    std::string font_mode = "pixel";
+    // Mode B: single font handle (Geist + Kenney + CJK merged at load).
+    // Scaling is done via style.FontScaleMain, not font switching.
+    ImFont* font_modern = nullptr;
+    // Mode B: which modern font to use.  Currently "geist" only.
+    // Source Han Sans JP + KR is always merged as CJK fallback.
+    std::string modern_font = "geist";
+    // Mode B: base font size in pixels (before FontScaleMain).
+    // 16px matches pixel mode's baked size — Geist at 16px with anti-aliasing
+    // looks sharp and compact, similar visual weight to Fusion Pixel 12px.
+    float modern_base_size = 16.0f;
+    // Mode B: set variable font weight via the 'wght' axis.  The patched
+    // imgui_freetype.cpp extracts the weight from the upper 16 bits of
+    // FontLoaderFlags and calls FT_Set_Var_Design_Coordinates.  500 is a
+    // medium weight — CJK fonts (Noto/Source) default to very thin weights
+    // (100/250), so this gives them similar visual weight to Latin fonts.
+    bool modern_semibold = true;
+    // Mode B: icon font size.  Kenney icons fill their em square completely,
+    // so they look bigger than text at the same size.  Loading them at a
+    // slightly smaller size keeps icons proportional to the 16px base text.
+    float modern_icon_size = 13.0f;
+    // Mode B: standalone Kenney font at a larger size for button badge icons
+    // (L2, R2, etc.) that have internal padding and render too small at the
+    // default icon size.  Use via PushFont/PopFont around those labels.
+    ImFont* font_kenney_lg = nullptr;
+    float modern_icon_lg_size = 20.0f;
+    // Mode B: layout scale multiplier for hardcoded pixel values.
+    // Geist at 16px has similar visual weight to Fusion Pixel, so we use
+    // 1.0 — the hardcoded UI values (btn_w=27, btn_h=24, etc.) work as-is.
+    float modern_layout_scale = 1.0f;
+    // Set by the settings tab when the user toggles font_mode.  The render
+    // loop checks this and calls switch_font_mode on the next frame, which
+    // swaps io.FontDefault + style values instantly (both font sets are
+    // preloaded at init, so no atlas rebuild is needed).
+    bool font_reload_requested = false;
     // Pending font/UI scale change. -1.0f = no pending reload.
     // pending_ui_scale_frames counts how many consecutive frames the same
     // pending value has been queued; values are only committed after a short
@@ -373,8 +419,58 @@ inline constexpr int k_ui_scale_settle_frames = 0;
 // Snap a continuous UI scale to an integer multiple.  Small hysteresis
 // (ceil(scale - 0.05f)) avoids jumping to 2x for swap-chain heights barely
 // above 1080p (e.g. 1081/1082).  1440p/4K still snap to 2x as intended.
+// In "modern" font mode, fractional scaling is used and this is only called
+// for the debug-tab integer overrides.
 inline int snap_ui_scale(float scale) {
     return std::max(1, static_cast<int>(std::ceil(scale - 0.05f)));
+}
+
+// Returns true when the overlay is in "modern" font mode (Inter Variable +
+// Material Symbols + fractional scaling).  In this mode, ui_scale is a
+// float (e.g. 1.33 for 1440p) and FontScaleMain encodes it.
+inline bool font_mode_is_modern() {
+    return g_ui.font_mode == "modern";
+}
+
+// Effective UI scale: integer-snapped in pixel mode, raw float in modern mode.
+// In modern mode, debug_scale_float (fractional slider) takes priority, then
+// falls back to debug_ui_scale / debug_font_scale (legacy integer overrides).
+// Auto scale follows monitor height / 1080, clamped to [0.50, 3.0] so
+// sub-1080p resolutions get a proportional (sub-1x) scale.
+inline float effective_ui_scale(float raw_scale) {
+    if (font_mode_is_modern()) {
+        if (g_ui.debug_scale_float > 0.0f)
+            return g_ui.debug_scale_float;
+        if (g_ui.debug_font_scale != 0)
+            return static_cast<float>(g_ui.debug_font_scale);
+        if (g_ui.debug_ui_scale != 0)
+            return static_cast<float>(g_ui.debug_ui_scale);
+        return std::clamp(raw_scale, 0.50f, 3.0f);
+    }
+    return static_cast<float>(snap_ui_scale(raw_scale));
+}
+
+// Layout scale: the multiplier for hardcoded pixel values (button sizes,
+// padding offsets, etc.).  In pixel mode this is 1.0 — the hardcoded values
+// were designed for Fusion Pixel's compact glyphs.  In modern mode it's
+// modern_layout_scale (1.0 by default — Geist at 16px has similar visual
+// weight to Fusion Pixel, so the hardcoded values work as-is).  Use this
+// alongside ui_scale at hardcoded pixel use sites:
+//   const float ls = layout_scale();  // 1.0 in both modes (adjustable)
+//   btn_w = 27.0f * ui_s * ls;
+inline float layout_scale() {
+    return font_mode_is_modern() ? g_ui.modern_layout_scale : 1.0f;
+}
+
+// Returns true when no manual scale override is active and the auto scale
+// should follow monitor/resolution changes.  In pixel mode this is
+// debug_ui_scale == 0; in modern mode it also checks debug_scale_float.
+inline bool scale_is_auto() {
+    if (font_mode_is_modern())
+        return g_ui.debug_scale_float <= 0.0f &&
+               g_ui.debug_ui_scale == 0 &&
+               g_ui.debug_font_scale == 0;
+    return g_ui.debug_ui_scale == 0;
 }
 
 // Queue a UI scale change. By default the change is applied immediately on
@@ -447,7 +543,10 @@ void start_action_worker();
 void stop_action_worker();
 void enqueue_station_switch(std::string station_id, std::string stream_id);
 bool wait_for_fence(UINT64 fence_value);
-void load_overlay_font(float scale = 1.0f);
+// Preload both pixel + modern fonts into the atlas at init.
+void load_all_fonts(float scale = 1.0f);
+// Instant mode switch (no atlas rebuild).  Requires load_all_fonts at init.
+void switch_font_mode(float scale = 1.0f);
 void set_font_scale(float scale);
 float compute_ui_scale_for_current_monitor();
 void load_background_texture(ID3D12CommandQueue* queue);

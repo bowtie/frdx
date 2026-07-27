@@ -126,6 +126,8 @@ Config load_config(const std::filesystem::path& path) {
         static_cast<int>(pick<int64_t>(ov, "metadata_max_length", cfg.overlay.metadata_max_length));
     cfg.overlay.metadata_grace_period =
         static_cast<float>(pick<double>(ov, "metadata_grace_period", cfg.overlay.metadata_grace_period));
+    cfg.overlay.font_mode =
+        pick<std::string>(ov, "font_mode", cfg.overlay.font_mode);
 
     const auto& ds        = section(root, "dualsense");
     cfg.dualsense.enabled = pick<bool>(ds, "enabled", cfg.dualsense.enabled);
@@ -390,6 +392,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     e.kv("metadata_truncation_enabled", cfg.overlay.metadata_truncation_enabled);
     e.kv("metadata_max_length", static_cast<int64_t>(cfg.overlay.metadata_max_length));
     e.kv("metadata_grace_period", static_cast<double>(cfg.overlay.metadata_grace_period));
+    e.kv("font_mode", cfg.overlay.font_mode);
 
     e.header("dualsense");
     e.kv("enabled", cfg.dualsense.enabled);

@@ -6,6 +6,8 @@
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/texture_injector.hpp"
 
+#include <IconsKenney.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <string>
@@ -73,6 +75,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     const float vp_w    = viewport->WorkSize.x;
     const ImVec2 vp_pos = viewport->WorkPos;
     const float ui_s = g_ui.ui_scale;
+    const float ls   = layout_scale();  // 1.0 in both modes (adjustable)
     ImGui::SetNextWindowPos(ImVec2(vp_pos.x + vp_w * 0.5f, vp_pos.y + 20.0f * ui_s), ImGuiCond_Always,
                             ImVec2(0.5f, 0));
     ImGui::SetNextWindowBgAlpha(0.96f * g_ui.interactive_draw_alpha);
@@ -111,8 +114,8 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // In sandbox mode there's no FMOD — WASAPI handles output directly.
     const bool fmod_ready = g_ctx.is_sandbox ||
                             (g_ctx.bridge && g_ctx.bridge->dsp_installed());
-    const float btn_w     = 27.0f * ui_s;
-    const float btn_h     = 24.0f * ui_s;
+    const float btn_w     = 27.0f * ui_s * ls;
+    const float btn_h     = 24.0f * ui_s * ls;
 
     // ── Station selector button ──
     auto* sc = (active && active->type() == SourceType::shoutcast)
@@ -191,7 +194,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
                 std::min(1.0f, g_ui.combo_switch_anim + ImGui::GetIO().DeltaTime / 0.28f);
             const float combo_t = iam_eval_preset(iam_ease_out_cubic, g_ui.combo_switch_anim);
             const int combo_dir = g_ui.combo_switch_dir >= 0 ? 1 : -1;
-            const ImVec2 combo_size(130.0f * ui_s, btn_h);
+            const ImVec2 combo_size(130.0f * ui_s * ls, btn_h);
             ImGui::InvisibleButton("##station_preview", combo_size);
             const bool preview_clicked = ImGui::IsItemClicked();
             const bool preview_hovered = ImGui::IsItemHovered();
@@ -214,7 +217,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             const ImVec2 preview_text_size = ImGui::CalcTextSize(preview);
             const float text_y    = pmin.y + (combo_size.y - ImGui::GetTextLineHeight()) * 0.5f;
             const float settled_x = pmin.x + (combo_size.x - preview_text_size.x) * 0.5f;
-            const float travel    = 34.0f * ui_s;
+            const float travel    = 34.0f * ui_s * ls;
             if (!g_ui.combo_prev_label.empty() && combo_t < 0.995f) {
                 ImVec4 old_col             = base_preview_col;
                 old_col.w                 *= 1.0f - combo_t;
@@ -253,35 +256,52 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
 
     // Shared helper for icon buttons: InvisibleButton + rounded rect background + centered glyph.
     // active_col / hover_col override the resting/hover colors (0 = use default theme colors).
-    // Pre-computed glyph text sizes for the 4 icon buttons (prev, play, next, gear).
-    // The glyph strings are compile-time constants, so we can store their sizes in
-    // a simple static array indexed by a small enum for O(1) lookup.
-    const char* s_glyph_strs[4] = {"\u23EE", "\u23F8", "\u23F5", "\u23ED"};
-    static ImVec2 s_glyph_sz[4] = {};
+    // Glyph strings are mode-aware: Material Symbols icons in modern mode,
+    // Unicode media symbols in pixel mode.
+    enum IconGlyph { G_PREV = 0, G_PAUSE = 1, G_PLAY = 2, G_NEXT = 3, G_GEAR = 4, G_COUNT };
+    static const char* s_glyph_strs[G_COUNT] = {};
+    static ImVec2 s_glyph_sz[G_COUNT] = {};
     static float s_glyph_font_scale = -1.0f;
-    // Recompute glyph sizes when the font scale changes (e.g. 1x -> 2x).
-    // The glyph strings are constants, but their rendered sizes depend on
-    // the active font scale (FontGlobalScale), so stale cache values cause
-    // misaligned icons.  Track FontGlobalScale directly since font scaling
-    // is now independent of ui_scale.
-    const float cur_font_scale = ImGui::GetIO().FontGlobalScale;
-    if (s_glyph_font_scale != cur_font_scale) {
-        for (int i = 0; i < 4; ++i) s_glyph_sz[i] = ImGui::CalcTextSize(s_glyph_strs[i]);
-        s_glyph_font_scale = cur_font_scale;
+    static ImFont* s_glyph_font = nullptr;
+    static std::string s_glyph_mode;
+    // (Re)initialize glyph strings when the font mode changes.
+    if (s_glyph_mode != g_ui.font_mode) {
+        s_glyph_mode = g_ui.font_mode;
+        if (g_ui.font_mode == "modern") {
+            s_glyph_strs[G_PREV]  = ICON_KI_BACKWARD;
+            s_glyph_strs[G_PAUSE] = ICON_KI_PAUSE;
+            s_glyph_strs[G_PLAY]  = ICON_KI_CARET_RIGHT;
+            s_glyph_strs[G_NEXT]  = ICON_KI_FORWARD;
+            s_glyph_strs[G_GEAR]  = ICON_KI_WRENCH;
+        } else {
+            s_glyph_strs[G_PREV]  = "\u23EE";
+            s_glyph_strs[G_PAUSE] = "\u23F8";
+            s_glyph_strs[G_PLAY]  = "\u23F5";
+            s_glyph_strs[G_NEXT]  = "\u23ED";
+            s_glyph_strs[G_GEAR]  = "\uF8F0";
+        }
+        s_glyph_font_scale = -1.0f;  // force size recompute
+        s_glyph_font = nullptr;
     }
-    // Helper: returns index into the glyph cache for a known glyph, or -1.
-    auto glyph_idx = [&](const char* g) -> int {
-        if (g == s_glyph_strs[0]) return 0;  // prev
-        if (g == s_glyph_strs[1]) return 1;  // pause
-        if (g == s_glyph_strs[2]) return 2;  // play
-        if (g == s_glyph_strs[3]) return 3;  // next
-        return -1;
-    };
+    // Recompute glyph sizes when the font scale changes (e.g. 1x -> 2x)
+    // or after a mode switch.  In pixel mode, FontScaleMain is always 1.0
+    // but FontDefault switches between 16px/32px fonts — so track the font
+    // pointer too.  In modern mode, FontScaleMain encodes the fractional
+    // scale and FontDefault stays the same.
+    const float cur_font_scale = ImGui::GetStyle().FontScaleMain;
+    ImFont*       cur_font      = ImGui::GetFont();
+    if (s_glyph_font_scale != cur_font_scale || s_glyph_font != cur_font) {
+        for (int i = 0; i < G_COUNT; ++i) {
+            s_glyph_sz[i] = ImGui::CalcTextSize(s_glyph_strs[i]);
+        }
+        s_glyph_font_scale = cur_font_scale;
+        s_glyph_font       = cur_font;
+    }
 
     const float frame_rounding = ImGui::GetStyle().FrameRounding;
     const ImU32 col_text       = ImGui::GetColorU32(ImGuiCol_Text);
 
-    auto draw_icon_btn = [&](const char* id, const char* glyph, ImU32 active_col = 0,
+    auto draw_icon_btn = [&](const char* id, IconGlyph glyph, ImU32 active_col = 0,
                              ImU32 hover_col = 0) -> bool {
         ImGui::InvisibleButton(id, ImVec2(btn_w, btn_h));
         const bool hovered = ImGui::IsItemHovered();
@@ -305,21 +325,27 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         ImVec2 min = ImGui::GetItemRectMin();
         ImVec2 max = ImGui::GetItemRectMax();
         dl->AddRectFilled(min, max, bg_col, frame_rounding);
-        // O(1) glyph size lookup via pointer identity
-        ImVec2 gsz;
-        int idx = glyph_idx(glyph);
-        if (idx >= 0) {
-            gsz = s_glyph_sz[idx];
-        } else {
-            gsz = ImGui::CalcTextSize(glyph);
-        }
-        float gx = min.x + (btn_w - gsz.x) * 0.5f + 0.5f * ui_s;
+        const ImVec2& gsz = s_glyph_sz[glyph];
+        const char* gp     = s_glyph_strs[glyph];
+        // Center the glyph in the button.  CalcTextSize returns the advance
+        // width and full line height.  Kenney icon glyphs are metrically
+        // symmetric, but some look optically off-center due to their shape
+        // (e.g. a right-pointing triangle's visual weight is on the left).
+        // Apply per-glyph optical nudges to compensate.
+        static const float s_icon_nudge_x[G_COUNT] = {
+            -1.0f,  // G_PREV  — backward (<<), shift left slightly
+            0.0f,   // G_PAUSE — symmetric
+            1.5f,   // G_PLAY  — caret right, shift right (visual weight on left)
+            1.0f,   // G_NEXT  — forward (>>), shift right slightly
+            0.0f,   // G_GEAR  — wrench, nearly symmetric
+        };
+        float gx = min.x + (btn_w - gsz.x) * 0.5f + s_icon_nudge_x[glyph] * ui_s;
         float gy = min.y + (btn_h - gsz.y) * 0.5f;
-        dl->AddText(ImVec2(gx, gy), col_text, glyph);
+        dl->AddText(ImVec2(gx, gy), col_text, gp);
         return pressed;
     };
 
-    ImGui::SameLine(0, 20.0f * ui_s);
+    ImGui::SameLine(0, 20.0f * ui_s * ls);
 
     // ── Transport buttons ──
     // Play/pause is disabled until FMOD connects — without the DSP bridge
@@ -328,7 +354,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // which defers playback until FMOD is ready.  The overlay loop auto-plays
     // the selected station once FMOD connects (overlay.cpp auto-play hook).
     if (!active) ImGui::BeginDisabled(true);
-    if (draw_icon_btn("##prev", "\u23EE") && active) {
+    if (draw_icon_btn("##prev", G_PREV) && active) {
         g_ui.combo_switch_dir = -1;
         animate_station_combo_by(-1);
         const int sel = g_ui.combo_sel;
@@ -341,7 +367,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     if (!active) ImGui::EndDisabled();
 
     if (!fmod_ready) ImGui::BeginDisabled(true);
-    if (draw_icon_btn("##play", is_playing ? "\u23F8" : "\u23F5") && active && fmod_ready) {
+    if (draw_icon_btn("##play", is_playing ? G_PAUSE : G_PLAY) && active && fmod_ready) {
         if (is_playing) {
             // Pause immediately on the UI thread for instant button feedback.
             // pause() just sets state + stops the stream — no blocking I/O.
@@ -356,7 +382,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::SameLine(0, 3.0f * ui_s);
 
     if (!active) ImGui::BeginDisabled(true);
-    if (draw_icon_btn("##next", "\u23ED") && active) {
+    if (draw_icon_btn("##next", G_NEXT) && active) {
         g_ui.combo_switch_dir = 1;
         animate_station_combo_by(1);
         const int sel = g_ui.combo_sel;
@@ -367,7 +393,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     }
     if (!active) ImGui::EndDisabled();
 
-    ImGui::SameLine(0, 20.0f * ui_s);
+    ImGui::SameLine(0, 20.0f * ui_s * ls);
 
     // ── Volume progress bar (clickable + scroll) ──
     // Read the configured gain from the config store, NOT bridge->gain().
@@ -386,7 +412,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         float gain_pct         = configured_gain * 100.0f;
         char label[16];
         std::snprintf(label, sizeof(label), "%.0f%%", gain_pct);
-        ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(100.0f * ui_s, btn_h), label);
+        ImGui::ProgressBar(gain_pct / 100.0f, ImVec2(100.0f * ui_s * ls, btn_h), label);
 
         if (ImGui::IsItemHovered()) {
             float wheel = ImGui::GetIO().MouseWheel;
@@ -424,7 +450,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         const ImU32 hl_u32 = ImGui::GetColorU32(hl_col);
         const ImU32 gear_rest =
             g_ui.settings_visible ? hl_u32 : ImGui::GetColorU32(ImGuiCol_Button);
-        if (draw_icon_btn("##gear", "\uF8F0", gear_rest, hl_u32)) {
+        if (draw_icon_btn("##gear", G_GEAR, gear_rest, hl_u32)) {
             const bool show = !g_ui.settings_visible;
             if (show) {
                 close_player_children_except(true, false);
@@ -472,11 +498,12 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
     if (!sc_st) return;
 
     const float ui_s          = g_ui.ui_scale;
+    const float ls            = layout_scale();
     const float st_tb         = ImGui::GetFrameHeight();
     const auto* vp            = ImGui::GetMainViewport();
     const float win_top       = layout.pos.y + layout.size.y - st_tb;
-    const float vp_room       = std::max(180.0f * ui_s, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f * ui_s);
-    const float target_w      = std::clamp(layout.size.x - 28.0f * ui_s, 320.0f * ui_s, 480.0f * ui_s);
+    const float vp_room       = std::max(180.0f * ui_s * ls, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f * ui_s);
+    const float target_w      = std::clamp(layout.size.x - 28.0f * ui_s, 320.0f * ui_s * ls, 480.0f * ui_s * ls);
     const float target_x      = layout.pos.x + (layout.size.x - target_w) * 0.5f;
     const float target_y      = win_top;
     const auto& st_style      = ImGui::GetStyle();
@@ -535,7 +562,7 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
                     const bool is_act = (st.id == active_st && str.id == active_str);
                     ImGui::PushID(stream_idx++);
 
-                    const float play_w = 30.0f * ui_s;
+                    const float play_w = 30.0f * ui_s * ls;
                     const float play_x = ImGui::GetWindowContentRegionMax().x - play_w -
                                          ImGui::GetStyle().FramePadding.x;
                     ImGui::AlignTextToFramePadding();
@@ -548,7 +575,8 @@ void draw_stations_browser(IAudioSource* active, const PlayerBarLayout& layout) 
 
                     if (ImGui::GetCursorPosX() < play_x) ImGui::SameLine(play_x);
                     if (is_act) ImGui::BeginDisabled();
-                    if (ImGui::Button("\u23F5", ImVec2(play_w, 0.0f))) {
+                    if (ImGui::Button(font_mode_is_modern() ? ICON_KI_CARET_RIGHT : "\u23F5",
+                                      ImVec2(play_w, 0.0f))) {
                         for (size_t combo_idx = 0; combo_idx < g_ui.combo_cache.sids.size();
                              ++combo_idx) {
                             if (g_ui.combo_cache.sids[combo_idx] == st.id &&

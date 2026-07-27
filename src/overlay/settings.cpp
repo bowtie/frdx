@@ -123,8 +123,41 @@ void draw_display_settings_tab() {
     if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
                      IM_ARRAYSIZE(g_ui.theme_names))) {
         ApplyTheme(g_ui.theme_idx);
+        // ApplyTheme resets the entire style; restore font scale fields.
+        if (font_mode_is_modern()) {
+            ImGui::GetStyle().FontScaleMain = g_ui.ui_scale;
+            ImGui::GetStyle().FontSizeBase  = g_ui.modern_base_size;
+        }
         const char* theme = theme_value(g_ui.theme_idx);
         g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });
+    }
+
+    // ── Font mode toggle ──
+    // Pixel: Fusion Pixel bitmap, integer 1x/2x scaling (Mode A)
+    // Modern: variable font + Kenney icons, fractional scaling (Mode B)
+    settings_label_row("Font");
+    {
+        const bool is_pixel  = (g_ui.font_mode == "pixel");
+        const bool is_modern = (g_ui.font_mode == "modern");
+        if (ImGui::RadioButton("Pixel##fontmode", is_pixel)) {
+            g_ui.font_mode = "pixel";
+            if (g_ctx.store) {
+                g_ctx.store->patch([](Config& c) { c.overlay.font_mode = "pixel"; });
+            }
+            g_ui.font_reload_requested = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Modern##fontmode", is_modern)) {
+            g_ui.font_mode = "modern";
+            if (g_ctx.store) {
+                g_ctx.store->patch([](Config& c) { c.overlay.font_mode = "modern"; });
+            }
+            g_ui.font_reload_requested = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Pixel: Fusion Pixel 12px bitmap, integer 1x/2x scaling.\n"
+                              "Modern: Geist + Source Han Sans CJK, fractional scaling.");
+        }
     }
 
     settings_label_row("Always Show Player Bar");
@@ -393,58 +426,151 @@ void draw_debug_tab() {
                           "Check the log for the exact path.");
     }
 
+    // ── CJK test notifications ──
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextWrapped("Show test notifications with Latin/Japanese/Korean text for font testing.");
+    {
+        static bool s_test_toasts_active = false;
+        const char* btn_label = s_test_toasts_active ? "Destroy Test Notifications" : "Show Test Notifications";
+        if (ImGui::Button(btn_label)) {
+            if (s_test_toasts_active) {
+                // Clear all sticky toasts
+                g_ui.toasts.clear();
+                s_test_toasts_active = false;
+            } else {
+                // Push 4 sticky test toasts: Latin, Japanese, Korean, Mixed
+                auto push_sticky = [](ToastKind kind, const char* title, const char* detail) {
+                    Toast t;
+                    t.kind    = kind;
+                    t.title   = title;
+                    t.detail  = detail;
+                    t.created = std::chrono::steady_clock::now();
+                    t.sticky  = true;
+                    g_ui.toasts.push_back(std::move(t));
+                };
+                push_sticky(ToastKind::info,
+                    "Midnight City",
+                    "M83");
+                push_sticky(ToastKind::success,
+                    "夜に駆ける (Yoru ni Kakeru)",
+                    "YOASOBI");
+                push_sticky(ToastKind::warn,
+                    "봄날 (Spring Day)",
+                    "방탄소년단 (BTS)");
+                push_sticky(ToastKind::info,
+                    "Lights / 光 / 빛",
+                    "Ellie Goulding, 宇多田ヒカル, 이효리");
+                s_test_toasts_active = true;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Toggles 4 sticky test notifications:\n"
+                              "1. Latin: Midnight City - M83\n"
+                              "2. Japanese: 夜に駆ける - YOASOBI\n"
+                              "3. Korean: 봄날 - 방탄소년단 (BTS)\n"
+                              "4. Mixed: Lights / 光 / 빛\n"
+                              "Notifications stay on screen until toggled off.");
+        }
+    }
+
     // ── Debug scale selectors ──
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextWrapped("Debug scaling (independent):");
-    ImGui::Spacing();
-    // UI scale: controls style values (padding, spacing, sizes) + hardcoded pixels.
-    {
-        if (ImGui::RadioButton("Auto##ui", g_ui.debug_ui_scale == 0)) {
-            g_ui.debug_ui_scale = 0;
-            request_ui_scale(compute_ui_scale_for_current_monitor(), true);
+
+    if (font_mode_is_modern()) {
+        // Modern mode: combo with preset fractional scales.  Using a combo
+        // instead of a slider avoids the layout-shift problem where dragging
+        // a slider causes the UI (including the slider itself) to resize.
+        ImGui::TextWrapped("Scale:");
+        ImGui::Spacing();
+        bool is_auto = (g_ui.debug_scale_float <= 0.0f &&
+                        g_ui.debug_ui_scale == 0 &&
+                        g_ui.debug_font_scale == 0);
+        if (ImGui::Checkbox("Auto (follow monitor)", &is_auto)) {
+            if (is_auto) {
+                g_ui.debug_scale_float = 0.0f;
+                g_ui.debug_ui_scale = 0;
+                g_ui.debug_font_scale = 0;
+                request_ui_scale(compute_ui_scale_for_current_monitor(), true);
+            } else {
+                g_ui.debug_scale_float = g_ui.ui_scale;
+                request_ui_scale(g_ui.debug_scale_float, true);
+            }
         }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("1x##ui", g_ui.debug_ui_scale == 1)) {
-            g_ui.debug_ui_scale = 1;
-            request_ui_scale(1.0f, true);
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("2x##ui", g_ui.debug_ui_scale == 2)) {
-            g_ui.debug_ui_scale = 2;
-            request_ui_scale(2.0f, true);
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("UI: style values (padding, spacing, scrollbar,\n"
-                              "rounding) and hardcoded pixel values.\n"
-                              "Auto: follows monitor resolution (ceil-snapped).");
-        }
-    }
-    ImGui::Spacing();
-    // Font scale: switches io.FontDefault between the pre-baked 16px (1x)
-    // and 32px (2x) fonts. Both are LockBakedSizes, so switching is
-    // bake-free (no transition-frame flash).
-    {
-        if (ImGui::RadioButton("Auto##font", g_ui.debug_font_scale == 0)) {
-            g_ui.debug_font_scale = 0;
-            ImFont* wanted = (g_ui.ui_scale >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
-            if (wanted) ImGui::GetIO().FontDefault = wanted;
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("1x##font", g_ui.debug_font_scale == 1)) {
-            g_ui.debug_font_scale = 1;
-            if (g_ui.font_1x) ImGui::GetIO().FontDefault = g_ui.font_1x;
-        }
-        ImGui::SameLine();
-        if (ImGui::RadioButton("2x##font", g_ui.debug_font_scale == 2)) {
-            g_ui.debug_font_scale = 2;
-            if (g_ui.font_2x) ImGui::GetIO().FontDefault = g_ui.font_2x;
+        if (!is_auto) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f * g_ui.ui_scale);
+            const float presets[] = {0.50f, 0.67f, 0.75f, 0.85f, 1.0f, 1.25f, 1.33f, 1.5f, 1.75f, 2.0f};
+            const char* labels[]   = {"0.50x", "0.67x", "0.75x", "0.85x", "1.00x", "1.25x", "1.33x", "1.50x", "1.75x", "2.00x"};
+            int sel = 4; // default 1.00x
+            float cur = g_ui.debug_scale_float > 0.0f ? g_ui.debug_scale_float : g_ui.ui_scale;
+            for (int i = 0; i < 10; ++i) {
+                if (std::abs(presets[i] - cur) < 0.01f) { sel = i; break; }
+            }
+            if (ImGui::Combo("##scalepreset", &sel, labels, 10)) {
+                g_ui.debug_scale_float = presets[sel];
+                g_ui.debug_ui_scale = 0;
+                g_ui.debug_font_scale = 0;
+                request_ui_scale(presets[sel], true);
+            }
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Font: pre-baked glyph size (no atlas rebuild on switch).\n"
-                              "1x = 16px, 2x = 32px.\n"
-                              "Auto: follows current UI scale.");
+            ImGui::SetTooltip("Fractional scaling (modern mode).\n"
+                              "Controls both font size and UI spacing together.\n"
+                              "Auto: follows monitor resolution.");
+        }
+    } else {
+        // Pixel mode: separate integer UI and font scale radio buttons.
+        ImGui::TextWrapped("Debug scaling (independent):");
+        ImGui::Spacing();
+        // UI scale: controls style values (padding, spacing, sizes) + hardcoded pixels.
+        {
+            if (ImGui::RadioButton("Auto##ui", g_ui.debug_ui_scale == 0)) {
+                g_ui.debug_ui_scale = 0;
+                request_ui_scale(compute_ui_scale_for_current_monitor(), true);
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("1x##ui", g_ui.debug_ui_scale == 1)) {
+                g_ui.debug_ui_scale = 1;
+                request_ui_scale(1.0f, true);
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("2x##ui", g_ui.debug_ui_scale == 2)) {
+                g_ui.debug_ui_scale = 2;
+                request_ui_scale(2.0f, true);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("UI: style values (padding, spacing, scrollbar,\n"
+                                  "rounding) and hardcoded pixel values.\n"
+                                  "Auto: follows monitor resolution (ceil-snapped).");
+            }
+        }
+        ImGui::Spacing();
+        // Font scale: switches io.FontDefault between pre-baked 16px/32px fonts.
+        {
+            if (ImGui::RadioButton("Auto##font", g_ui.debug_font_scale == 0)) {
+                g_ui.debug_font_scale = 0;
+                ImFont* wanted = (g_ui.ui_scale >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
+                if (wanted) ImGui::GetIO().FontDefault = wanted;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("1x##font", g_ui.debug_font_scale == 1)) {
+                g_ui.debug_font_scale = 1;
+                if (g_ui.font_1x) ImGui::GetIO().FontDefault = g_ui.font_1x;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("2x##font", g_ui.debug_font_scale == 2)) {
+                g_ui.debug_font_scale = 2;
+                if (g_ui.font_2x) ImGui::GetIO().FontDefault = g_ui.font_2x;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Font: pre-baked glyph size (no atlas rebuild on switch).\n"
+                                  "1x = 16px, 2x = 32px.\n"
+                                  "Auto: follows current UI scale.");
+            }
         }
     }
 }
@@ -461,9 +587,10 @@ void draw_settings_window(const PlayerBarLayout& layout) {
     const auto* vp        = ImGui::GetMainViewport();
     const float win_top   = layout.pos.y + layout.size.y - set_tb;
     const float ui_s      = g_ui.ui_scale;
-    const float vp_room   = std::max(220.0f * ui_s, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f * ui_s);
-    const float target_w  = std::clamp(layout.size.x - 28.0f * ui_s, 360.0f * ui_s, 480.0f * ui_s);
-    const float target_h  = std::clamp(g_ui.settings_content_height, set_tb + 130.0f * ui_s, vp_room);
+    const float ls        = layout_scale();
+    const float vp_room   = std::max(220.0f * ui_s * ls, vp->WorkPos.y + vp->WorkSize.y - win_top - 8.0f * ui_s);
+    const float target_w  = std::clamp(layout.size.x - 28.0f * ui_s, 360.0f * ui_s * ls, 560.0f * ui_s * ls);
+    const float target_h  = std::clamp(g_ui.settings_content_height, set_tb + 130.0f * ui_s * ls, vp_room);
     const float current_h = std::max(set_tb + 4.0f, target_h * eased);
     const float target_x  = layout.pos.x + (layout.size.x - target_w) * 0.5f;
     ImGui::SetNextWindowPos(ImVec2(target_x, win_top), ImGuiCond_Always);
@@ -493,7 +620,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
         if (current_h > set_tb * 2.0f) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {
-                    ImGui::PushItemWidth(180.0f);
+                    ImGui::PushItemWidth(180.0f * g_ui.ui_scale);
                     const auto cfg = g_ctx.store->snapshot();
                     draw_dualsense_settings(cfg.dualsense);
                     ImGui::PopItemWidth();

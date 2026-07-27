@@ -36,14 +36,22 @@ $imgui_files = @(
     "imgui_draw.cpp", "imgui_widgets.cpp", "imgui_tables.cpp",
     "imgui_demo.cpp", "imconfig.h",
     "backends/imgui_impl_win32.h", "backends/imgui_impl_win32.cpp",
-    "backends/imgui_impl_dx12.h", "backends/imgui_impl_dx12.cpp"
+    "backends/imgui_impl_dx12.h", "backends/imgui_impl_dx12.cpp",
+    "misc/freetype/imgui_freetype.h", "misc/freetype/imgui_freetype.cpp"
 )
 foreach ($file in $imgui_files) {
     $url = "https://raw.githubusercontent.com/ocornut/imgui/master/$file"
-    # Map backends/ to root of imgui for simple compilation includes
+    # Map backends/ to root of imgui for simple compilation includes.
+    # misc/freetype/ files keep their path (used as misc/freetype/ in CMake).
     $local = if ($file.StartsWith("backends/")) { $file.Substring(9) } else { $file }
     Fetch-File $url (Join-Path $tp "imgui/$local")
 }
+
+# ── IconFontCppHeaders ────────────────────────────────────────────────────
+Write-Host "-> IconFontCppHeaders" -ForegroundColor Green
+Fetch-File `
+    "https://raw.githubusercontent.com/juliettef/IconFontCppHeaders/main/IconsKenney.h" `
+    (Join-Path $tp "IconFontCppHeaders/IconsKenney.h")
 
 # ── MinHook ───────────────────────────────────────────────────────────────
 Write-Host "-> MinHook" -ForegroundColor Green

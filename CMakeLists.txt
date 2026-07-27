@@ -37,10 +37,28 @@ endif()
 add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
                         _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 
+# ── FreeType: fetch and build as static library for ImGui font rasterizing ─
+# Used by imgui_freetype.cpp for high-quality anti-aliased font rendering
+# (Inter Variable + Material Symbols).  The stb_truetype default rasterizer
+# produces poor results for variable fonts at fractional scales.
+include(FetchContent)
+FetchContent_Declare(
+    freetype
+    GIT_REPOSITORY https://github.com/freetype/freetype.git
+    GIT_TAG        VER-2-13-3
+    GIT_SHALLOW    TRUE
+)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
+FetchContent_MakeAvailable(freetype)
+
 # ── mpg123: fetch source and build as static library ────────────────────
 # Eliminates the runtime DLL dependency by compiling libmpg123 directly
 # into version.dll and frdx_sandbox.exe.
-include(FetchContent)
 FetchContent_Declare(
     mpg123
     GIT_REPOSITORY https://github.com/madebr/mpg123.git
@@ -48,7 +66,6 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
     SOURCE_SUBDIR  ports/cmake
 )
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
 set(BUILD_LIBOUT123 OFF CACHE BOOL "Build libout123" FORCE)
 FetchContent_MakeAvailable(mpg123)
 # Suppress warnings in third-party C code.
@@ -108,6 +125,7 @@ add_library(version SHARED
     third_party/imgui/imgui_tables.cpp
     third_party/imgui/imgui_impl_win32.cpp
     third_party/imgui/imgui_impl_dx12.cpp
+    third_party/imgui/misc/freetype/imgui_freetype.cpp
 
     # MinHook
     third_party/minhook/buffer.c
@@ -126,6 +144,8 @@ target_include_directories(version PRIVATE
     third_party/toml11
     third_party/wil/include
     third_party/imgui
+    third_party/imgui/misc/freetype
+    third_party/IconFontCppHeaders
     third_party/minhook
     third_party/kiero2
     third_party/stb
@@ -138,7 +158,7 @@ target_include_directories(version PRIVATE
 )
 
 target_link_libraries(version PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi cfgmgr32
-                                      user32 dbghelp libmpg123)
+                                      user32 dbghelp libmpg123 freetype)
 
 set_target_properties(version PROPERTIES
     OUTPUT_NAME version
@@ -160,6 +180,13 @@ if(FRDX_AUTO_DEPLOY)
                 -DTO="${FRDX_GAME_DIR}/version.dll"
                 -P ${CMAKE_SOURCE_DIR}/cmake/deploy_copy.cmake
         COMMENT "Deploying version.dll → ${FRDX_GAME_DIR}"
+    )
+    # Deploy font files to the game's mods/frdx/fonts directory.
+    add_custom_command(TARGET version POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/dist/mods/frdx/fonts
+                ${FRDX_GAME_DIR}/mods/frdx/fonts
+        COMMENT "Deploying fonts → ${FRDX_GAME_DIR}/mods/frdx/fonts"
     )
 endif()
 
@@ -293,6 +320,7 @@ add_executable(frdx_sandbox
     third_party/imgui/imgui_tables.cpp
     third_party/imgui/imgui_impl_win32.cpp
     third_party/imgui/imgui_impl_dx12.cpp
+    third_party/imgui/misc/freetype/imgui_freetype.cpp
 
     # MinHook (needed by hooks.cpp for hooked mode)
     third_party/minhook/buffer.c
@@ -318,6 +346,8 @@ target_include_directories(frdx_sandbox PRIVATE
     third_party/toml11
     third_party/wil/include
     third_party/imgui
+    third_party/imgui/misc/freetype
+    third_party/IconFontCppHeaders
     third_party/minhook
     third_party/kiero2
     third_party/stb
@@ -330,7 +360,7 @@ target_include_directories(frdx_sandbox PRIVATE
 )
 
 target_link_libraries(frdx_sandbox PRIVATE ws2_32 bcrypt psapi winhttp d3d12 dxgi hid setupapi
-                                           cfgmgr32 user32 dbghelp libmpg123)
+                                           cfgmgr32 user32 dbghelp libmpg123 freetype)
 
 set_target_properties(frdx_sandbox PROPERTIES
     OUTPUT_NAME frdx_sandbox

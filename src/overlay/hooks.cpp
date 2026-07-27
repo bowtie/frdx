@@ -372,6 +372,7 @@ bool g_hooks_installed    = false;
 // coordinates from Windows are in window space, so we scale them.
 static UINT g_sc_width = 0, g_sc_height = 0;
 static UINT g_win_width = 0, g_win_height = 0;
+static HWND g_game_hwnd = nullptr;
 
 LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     // Suppress focus-loss messages so the game doesn't auto-pause on alt-tab.
@@ -468,13 +469,43 @@ void pre_resize() {
 }
 
 // Compute UI scale from the swap chain (render) resolution.
-// With ceil-based integer snapping in load_overlay_font:
-//   1080p -> 1x (16px), 1440p -> 2x (32px), 4K -> 2x (32px).
 // Using the swap chain (not the monitor) means DSR to 4K on a 1080p
 // monitor correctly produces 2x UI for 4K screenshots.
+// Compute auto UI scale.  Uses Windows DPI as the primary factor (it
+// encodes the user's preferred scale for their monitor size+resolution),
+// but also factors in the render resolution so sub-1080p doesn't make the
+// overlay disproportionately large.
+//   1080p @ 100% DPI → 1.00x
+//   720p  @ 100% DPI → 0.67x  (resolution-capped so UI fits)
+//   720p  @ 150% DPI → 0.67x  (still capped — UI must fit the screen)
+//   1440p @ 100% DPI → 1.33x  (resolution drives scale when DPI is 100%)
+//   4K    @ 100% DPI → 2.00x  (resolution drives scale when DPI is 100%)
+//   4K    @ 150% DPI → 1.50x  (DPI drives scale when it's > 100%)
+// Falls back to height/1080 if DPI is unavailable.
 static float compute_ui_scale(UINT sc_height) {
-    if (sc_height <= 0) return 1.0f;
-    return static_cast<float>(sc_height) / 1080.0f;
+    float dpi_scale = 1.0f;
+    if (g_game_hwnd) {
+        UINT dpi = GetDpiForWindow(g_game_hwnd);
+        if (dpi > 0) {
+            dpi_scale = static_cast<float>(dpi) / 96.0f;
+        }
+    }
+    // Resolution factor: height/1080.  At sub-1080p this is < 1.0 and caps
+    // the scale so the overlay fits.  At ≥1080p it provides a sensible
+    // default when DPI is 100%.
+    float res_factor = 1.0f;
+    if (sc_height > 0) {
+        res_factor = static_cast<float>(sc_height) / 1080.0f;
+    }
+    // Sub-1080p: use the *smaller* of DPI and resolution — the UI must fit.
+    // ≥1080p:   use the *larger* of DPI and resolution — high-res/low-DPI
+    //           monitors (e.g. 4K @ 100%) get the resolution-based scale.
+    float scale;
+    if (res_factor < 1.0f)
+        scale = std::min(dpi_scale, res_factor);
+    else
+        scale = std::max(dpi_scale, res_factor);
+    return std::clamp(scale, 0.50f, 3.0f);
 }
 
 // Queue a new UI scale.  With k_ui_scale_settle_frames=0 the change is
@@ -559,9 +590,9 @@ void post_resize(IDXGISwapChain* swapChain) {
     // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Apply immediately (settle=0)
     // so a resolution change doesn't leave the text at the old scale for
     // multiple frames.
-    if (g_ui.debug_ui_scale == 0) {
+    if (scale_is_auto()) {
         const auto new_scale = compute_ui_scale(g_sc_height);
-        if (snap_ui_scale(new_scale) != g_ui.ui_scale) {
+        if (effective_ui_scale(new_scale) != g_ui.ui_scale) {
             request_ui_scale(new_scale, false);
             re_log::info("ui_scale pending: {:.2f} (backbuffer {}x{})",
                          new_scale, g_sc_width, g_sc_height);
@@ -694,6 +725,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         re_log::error("SwapChain OutputWindow is NULL! Aborting ImGui initialization.");
         return false;
     }
+    g_game_hwnd = desc.OutputWindow;
 
     // Cache window client size for mouse coordinate scaling.
     RECT rc{};
@@ -814,9 +846,15 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
         g_sc_height = bb_desc.Height;
     }
 
-    // Calculate UI scale from the actual backbuffer (render) resolution.
-    // With ceil snapping: 1080p -> 1x, 1440p/4K -> 2x.
-    g_ui.ui_scale = compute_ui_scale(g_sc_height);
+    // Calculate UI scale from Windows DPI (modern mode) or backbuffer
+    // resolution (pixel mode fallback).  DPI gives the correct scale for
+    // any monitor size+resolution combo without manual configuration.
+    if (g_game_hwnd) {
+        UINT dpi = GetDpiForWindow(g_game_hwnd);
+        re_log::info("monitor DPI: {} ({}%), auto scale: {:.2f}x",
+                     dpi, dpi * 100 / 96, static_cast<float>(dpi) / 96.0f);
+    }
+    g_ui.ui_scale = effective_ui_scale(compute_ui_scale(g_sc_height));
 
     // ImGui Win32 + DX12 contexts
     ImGui::CreateContext();
@@ -839,7 +877,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // behaviour global and survives any future window that enables
     // resize by default.
     ImGui::GetIO().ConfigWindowsResizeFromEdges = false;
-    load_overlay_font(g_ui.ui_scale);
+    load_all_fonts(g_ui.ui_scale);
     ImGui_ImplWin32_Init(desc.OutputWindow);
 
     ImGui_ImplDX12_InitInfo init_info;
@@ -990,6 +1028,15 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             install_create_srv_hook(rawDev);
             if (init_imgui(pSwapChain, active_queue)) {
                 ApplyTheme(g_ui.theme_idx);
+                // ApplyTheme resets the entire style (via style = ImGuiStyle()),
+                // so restore font scale fields that load_all_fonts set earlier.
+                if (font_mode_is_modern()) {
+                    ImGui::GetStyle().FontScaleMain = g_ui.ui_scale;
+                    ImGui::GetStyle().FontSizeBase  = g_ui.modern_base_size;
+                } else {
+                    ImGui::GetStyle().FontScaleMain = 1.0f;
+                    ImGui::GetStyle().FontSizeBase  = 16.0f;
+                }
                 g_ui.is_init                   = true;
                 s_current_swapchain            = pSwapChain;
                 ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
@@ -1046,9 +1093,9 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             g_sc_height = bb_height;
             re_log::info("backbuffer resolution changed to {}x{}", g_sc_width, g_sc_height);
             // Don't override if the user forced a specific scale via the Debug tab.
-            if (g_ui.debug_ui_scale == 0) {
+            if (scale_is_auto()) {
                 const auto new_scale = compute_ui_scale(g_sc_height);
-                if (snap_ui_scale(new_scale) != g_ui.ui_scale) {
+                if (effective_ui_scale(new_scale) != g_ui.ui_scale) {
                     request_ui_scale(new_scale, false);
                 }
             }
@@ -1118,6 +1165,15 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         capture_and_blur_backbuffer(g_dx.cmd_list.get(), bb);
 
         g_dx.cmd_list->OMSetRenderTargets(1, &g_dx.fb_rtvs[backBufferIdx], FALSE, nullptr);
+
+        // Handle a font mode change requested from the Settings tab.
+        // Both font sets are preloaded at init, so switching is instant —
+        // just swap io.FontDefault + style values, no atlas rebuild.
+        if (g_ui.font_reload_requested) {
+            g_ui.font_reload_requested = false;
+            switch_font_mode(g_ui.ui_scale);
+            log::info("[overlay] font mode switched to: {}", g_ui.font_mode);
+        }
 
         // Apply a pending font scale change from the Debug tab or a
         // resolution change.  Must happen before NewFrame so all windows
@@ -1300,6 +1356,7 @@ bool configure_overlay_runtime(AudioSourceManager& mgr, fmod_bridge::DSPBridge& 
     g_ctx.dualsense                = dualsense;
     const auto cfg                 = store.snapshot();
     g_ui.theme_idx                 = theme_index(cfg.overlay.theme);
+    g_ui.font_mode                 = cfg.overlay.font_mode;
     g_ui.hud_visible               = cfg.overlay.music_notifications_enabled ||
                                     cfg.overlay.station_notifications_enabled;
     g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
