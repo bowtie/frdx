@@ -44,7 +44,14 @@ foreach ($file in $imgui_files) {
     # Map backends/ to root of imgui for simple compilation includes.
     # misc/freetype/ files keep their path (used as misc/freetype/ in CMake).
     $local = if ($file.StartsWith("backends/")) { $file.Substring(9) } else { $file }
-    Fetch-File $url (Join-Path $tp "imgui/$local")
+    $dest = Join-Path $tp "imgui/$local"
+    # Skip files with local patches (imconfig.h has IMGUI_ENABLE_FREETYPE,
+    # imgui_freetype.cpp has variable-font-weight axis support).
+    if ((Test-Path $dest) -and ($local -eq "imconfig.h" -or $local -eq "misc/freetype/imgui_freetype.cpp")) {
+        Write-Host "  skip (locally patched): $local" -ForegroundColor DarkGray
+        continue
+    }
+    Fetch-File $url $dest
 }
 
 # ── IconFontCppHeaders ────────────────────────────────────────────────────

@@ -174,10 +174,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
                     GetProcAddress(GetModuleHandleW(L"user32.dll"),
                                    "SetProcessDpiAwarenessContext"))) {
                 fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            } else if (auto* fn2 = reinterpret_cast<PFN_SetProcessDpiAwareness>(
-                           GetProcAddress(GetModuleHandleW(L"shcore.dll"),
-                                          "SetProcessDpiAwareness"))) {
-                fn2(PROCESS_PER_MONITOR_DPI_AWARE);
+            } else if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
+                if (auto* fn2 = reinterpret_cast<PFN_SetProcessDpiAwareness>(
+                        GetProcAddress(shcore, "SetProcessDpiAwareness"))) {
+                    fn2(PROCESS_PER_MONITOR_DPI_AWARE);
+                }
             } else {
                 SetProcessDPIAware();
             }

@@ -39,7 +39,7 @@ add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
 
 # ── FreeType: fetch and build as static library for ImGui font rasterizing ─
 # Used by imgui_freetype.cpp for high-quality anti-aliased font rendering
-# (Inter Variable + Material Symbols).  The stb_truetype default rasterizer
+# (Geist Variable + Kenney Game Icons).  The stb_truetype default rasterizer
 # produces poor results for variable fonts at fractional scales.
 include(FetchContent)
 FetchContent_Declare(
