@@ -170,16 +170,21 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
             enum { PROCESS_PER_MONITOR_DPI_AWARE = 2 };
             using PFN_SetProcessDpiAwarenessContext = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
             using PFN_SetProcessDpiAwareness = HRESULT(WINAPI*)(int);
+            bool dpi_aware = false;
             if (auto* fn = reinterpret_cast<PFN_SetProcessDpiAwarenessContext>(
                     GetProcAddress(GetModuleHandleW(L"user32.dll"),
                                    "SetProcessDpiAwarenessContext"))) {
-                fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            } else if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
-                if (auto* fn2 = reinterpret_cast<PFN_SetProcessDpiAwareness>(
-                        GetProcAddress(shcore, "SetProcessDpiAwareness"))) {
-                    fn2(PROCESS_PER_MONITOR_DPI_AWARE);
+                dpi_aware = fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            }
+            if (!dpi_aware) {
+                if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
+                    if (auto* fn2 = reinterpret_cast<PFN_SetProcessDpiAwareness>(
+                            GetProcAddress(shcore, "SetProcessDpiAwareness"))) {
+                        dpi_aware = SUCCEEDED(fn2(PROCESS_PER_MONITOR_DPI_AWARE));
+                    }
                 }
-            } else {
+            }
+            if (!dpi_aware) {
                 SetProcessDPIAware();
             }
         }

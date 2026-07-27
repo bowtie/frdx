@@ -88,11 +88,14 @@ $patch = @"
                 FT_Fixed requested_weight = (FT_Fixed)((src->FontLoaderFlags >> 16) & 0xFFFF);
                 if (requested_weight > 0)
                 {
-                    FT_Fixed coords[16] = {};
+                    FT_Fixed coords[16] = {{}};
                     for (FT_UInt i = 0; i < amaster->num_axis && i < 16; i++)
                         coords[i] = amaster->axis[i].def;
                     coords[wght_axis_index] = requested_weight << 16;
-                    FT_Set_Var_Design_Coordinates(FtFace, amaster->num_axis, coords);
+                    // Clamp num_axis to 16 to avoid reading past the coords
+                    // array when a font has more than 16 variation axes.
+                    FT_Set_Var_Design_Coordinates(FtFace,
+                        ImMin(amaster->num_axis, static_cast<FT_UInt>(16)), coords);
                 }
             }
             FT_Done_MM_Var(ft_library, amaster);
@@ -151,9 +154,10 @@ Fetch-File `
 #   3) Slower scroll animation: 60 -> 30 px/s
 Write-Host "  ~ patching imgui_animated.cpp for v1.92.9 compat" -ForegroundColor Yellow
 $patch = Get-Content -Raw $ia_cpp
-# Replace the old InFlags/ButtonFlags_Repeat block with a comment
-$patch = $patch -replace [regex]::Escape("`tif (g.LastItemData.InFlags & ImGuiItemFlags_ButtonRepeat)`r`n`t`tflags |= ImGuiButtonFlags_Repeat;") `
-    , "`t// Note: modern imgui (v1.92.9) handles ButtonRepeat internally`r`n`t// via g.LastItemData.ItemFlags inside ButtonBehavior."
+# Replace the old InFlags/ButtonFlags_Repeat block with a comment.
+# Use a line-ending-agnostic regex (GitHub raw serves LF; local edits may have CRLF).
+$patch = $patch -replace '(?m)^\tif \(g\.LastItemData\.InFlags & ImGuiItemFlags_ButtonRepeat\)\r?\n\t\tflags \|= ImGuiButtonFlags_Repeat;',
+    "`t// Note: modern imgui (v1.92.9) handles ButtonRepeat internally`r`n`t// via g.LastItemData.ItemFlags inside ButtonBehavior."
 # Slow scroll speed from 60 -> 30 px/s
 $patch = $patch -replace 'g\.Time \* 60\.f', 'g.Time * 30.f'
 [System.IO.File]::WriteAllText($ia_cpp, $patch)

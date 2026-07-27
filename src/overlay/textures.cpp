@@ -83,7 +83,7 @@ static void load_modern_font(float scale) {
     auto fonts_dir = module_directory() / "mods" / "frdx" / "fonts";
 
     // Select the modern font file based on modern_font setting.
-    // Using variable TTFs with the wght axis set to 600 (semibold) via
+    // Using variable TTFs with the wght axis set to 500 (medium) via
     // FreeType's FT_Set_Var_Design_Coordinates (patched into imgui_freetype).
     struct FontEntry { const char* setting; const char* filename; };
     static constexpr FontEntry font_entries[] = {
@@ -178,7 +178,7 @@ static void load_modern_font(float scale) {
         }
     }
 
-    // Kenney Game Icons: merge into the Inter font so ICON_KI_* glyphs are
+    // Kenney Game Icons: merge into the Geist font so ICON_KI_* glyphs are
     // accessible from the same ImFont*.  In 1.92 glyph ranges are not needed
     // — the dynamic font system loads glyphs on demand.
     auto kenney_path = fonts_dir / "kenney-icon-font.ttf";

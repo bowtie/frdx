@@ -95,6 +95,7 @@ static void imgui_dx12_free_srv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_H
 static wil::com_ptr<ID3D12Resource> g_shot_staging;       // default-heap texture
 static D3D12_RESOURCE_STATES g_shot_staging_state = D3D12_RESOURCE_STATE_COMMON;
 static wil::com_ptr<ID3D12Resource> g_shot_readback;      // readback buffer
+static UINT64 g_shot_readback_size = 0;  // allocated size of g_shot_readback
 static UINT g_shot_w = 0, g_shot_h = 0;
 static UINT64 g_shot_row_pitch = 0;
 static DXGI_FORMAT g_shot_fmt = DXGI_FORMAT_UNKNOWN;
@@ -203,8 +204,13 @@ static void shot_phase2_copy_to_readback(ID3D12GraphicsCommandList* cmd) {
     g_dx.device->GetCopyableFootprints(&st_desc, 0, 1, 0, &footprint,
                                        &num_rows, &row_size, &total_bytes);
 
-    // (Re)create readback buffer if needed.
-    if (!g_shot_readback) {
+    // (Re)create readback buffer if needed — the buffer must be at least
+    // total_bytes large.  Recreate when the resolution increased since the
+    // last capture (the staging texture is recreated by ensure_shot_staging,
+    // but the readback buffer was only created once, so a larger capture
+    // would overflow it).
+    if (!g_shot_readback || g_shot_readback_size < total_bytes) {
+        g_shot_readback.reset();
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_READBACK;
 
@@ -222,9 +228,11 @@ static void shot_phase2_copy_to_readback(ID3D12GraphicsCommandList* cmd) {
                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                 IID_PPV_ARGS(g_shot_readback.put())))) {
             re_log::warn("[capture] failed to create readback buffer");
+            g_shot_readback_size = 0;
             g_shot_phase = 0;
             return;
         }
+        g_shot_readback_size = total_bytes;
     }
 
     // Staging → COPY_SOURCE
@@ -923,6 +931,7 @@ void cleanup_imgui_resources() {
 
     g_shot_staging.reset();
     g_shot_readback.reset();
+    g_shot_readback_size = 0;
     g_shot_phase = 0;
 
     g_dx.fb_bufs.clear();

@@ -425,8 +425,8 @@ inline int snap_ui_scale(float scale) {
     return std::max(1, static_cast<int>(std::ceil(scale - 0.05f)));
 }
 
-// Returns true when the overlay is in "modern" font mode (Inter Variable +
-// Material Symbols + fractional scaling).  In this mode, ui_scale is a
+// Returns true when the overlay is in "modern" font mode (Geist Variable +
+// Kenney Game Icons + fractional scaling).  In this mode, ui_scale is a
 // float (e.g. 1.33 for 1440p) and FontScaleMain encodes it.
 inline bool font_mode_is_modern() {
     return g_ui.font_mode == "modern";

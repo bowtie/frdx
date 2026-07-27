@@ -123,10 +123,14 @@ void draw_display_settings_tab() {
     if (ImGui::Combo("##theme", &g_ui.theme_idx, g_ui.theme_names,
                      IM_ARRAYSIZE(g_ui.theme_names))) {
         ApplyTheme(g_ui.theme_idx);
-        // ApplyTheme resets the entire style; restore font scale fields.
+        // ApplyTheme resets the entire style (via style = ImGuiStyle()),
+        // so FontScaleMain / FontSizeBase must be set AFTER it, not before.
         if (font_mode_is_modern()) {
             ImGui::GetStyle().FontScaleMain = g_ui.ui_scale;
             ImGui::GetStyle().FontSizeBase  = g_ui.modern_base_size;
+        } else {
+            ImGui::GetStyle().FontScaleMain = 1.0f;
+            ImGui::GetStyle().FontSizeBase  = 16.0f;
         }
         const char* theme = theme_value(g_ui.theme_idx);
         g_ctx.store->patch([&](Config& c) { c.overlay.theme = theme; });

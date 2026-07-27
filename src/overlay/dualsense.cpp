@@ -237,7 +237,7 @@ bool dualsense_section_content_begin(AccordionState& state) {
 
 void dualsense_section_content_end(AccordionState& state) {
     const auto& style = ImGui::GetStyle();
-    ImGui::Unindent(style.FramePadding.x + 6.0f);
+    ImGui::Unindent(style.FramePadding.x + 6.0f * g_ui.ui_scale);
     if (state.disabled) ImGui::EndDisabled();
 
     const float measured_h = std::max(0.0f, ImGui::GetCursorPosY() - state.content_start_y);

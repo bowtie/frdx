@@ -419,7 +419,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
             if (wheel != 0.0f) {
                 float new_gain = std::clamp(configured_gain + wheel * 0.05f, 0.0f, 1.0f);
                 if (g_ctx.bridge) g_ctx.bridge->set_gain(new_gain);
-                g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_gain; });
+                if (g_ctx.store) g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_gain; });
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 g_ui.vol_dragging = true;
@@ -433,7 +433,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
                 float mouse_x    = ImGui::GetMousePos().x;
                 float new_val    = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
                 if (g_ctx.bridge) g_ctx.bridge->set_gain(new_val);
-                g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_val; });
+                if (g_ctx.store) g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_val; });
             } else {
                 g_ui.vol_dragging = false;
             }
