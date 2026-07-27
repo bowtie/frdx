@@ -94,6 +94,9 @@ void RingBuffer::consume(std::size_t n) noexcept {
 
     std::scoped_lock lk{drain_mu_};
     const auto r = read_pos_.load(std::memory_order_relaxed);
+    const auto w = write_pos_.load(std::memory_order_acquire);
+    const auto avail = w - r;
+    if (n > avail) n = avail;
     read_pos_.store(r + n, std::memory_order_release);
 }
 
