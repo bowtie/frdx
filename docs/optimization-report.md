@@ -492,3 +492,54 @@ well-optimized (no changes needed):
   game memory layout, risky to remove.
 - `kPlaceholderHash196x104Alt` — documented design decision.
 - Unused annotation macros in `thread_annotations.hpp` — utility macros.
+
+## Round 8 — clang-tidy fixes + per-frame config snapshot skip + console popup string optimization
+
+### 1. player_bar.cpp — enum base type fix (clang-tidy performance-enum-size)
+
+**Before:** `enum IconGlyph { ... }` defaulted to `int` (4 bytes) despite
+only needing values 0–4.
+
+**After:** `enum IconGlyph : uint8_t { ... }` — 1 byte, fixes
+`performance-enum-size` and `cert-int09-c` warnings.
+
+### 2. hooks.cpp — braces around if/else (clang-tidy readability-braces)
+
+**Before:** Braceless `if/else` at the UI scale settle-frames check.
+
+**After:** Added braces to satisfy `readability-braces-around-statements`.
+
+### 3. dll_main.cpp — enum base type fix (clang-tidy performance-enum-size)
+
+**Before:** `enum { PROCESS_PER_MONITOR_DPI_AWARE = 2 }` defaulted to `int`.
+
+**After:** `enum : std::uint8_t { ... }` — 1 byte.
+
+### 4. console.cpp — eliminate heap allocations in popup menu labels
+
+**Before:** `std::string cv_label = "Copy visible (" + std::to_string(...) +
+...` and `std::string ca_label = "Copy all (" + std::to_string(...) + ")"`
+allocated 2+ temporary strings every frame while the right-click popup was
+open.
+
+**After:** Stack `char[64]` / `char[48]` buffers with `snprintf` — zero
+heap allocations. Matches the existing pattern used for the counter text
+just above.
+
+### 5. config_store.hpp/cpp + hooks.cpp — generation counter to skip per-frame config deep copy
+
+**Before:** `snapshot()` was called every frame in the render loop,
+performing a full deep copy of the `Config` struct (which contains
+`std::string` theme/notification_position, `std::vector<std::string>`
+presets, etc.) under a mutex lock — even when nothing had changed.
+
+**After:** Added `std::atomic<uint64_t> generation_` to `ConfigStore`,
+incremented in `patch()`. The render loop checks `generation()` (a single
+atomic load, no lock) against a cached `frame_cfg_generation` and only
+calls `snapshot()` when the generation has actually advanced. In the
+common case (config static), this eliminates one mutex lock + full deep
+copy per frame.
+
+**Impact:** Removes a per-frame mutex lock + heap-allocating deep copy of
+the entire config struct in the render hot path. The atomic load is
+~1ns vs the lock+copy which was ~100ns+ depending on string/vector sizes.

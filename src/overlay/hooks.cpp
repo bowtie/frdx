@@ -521,10 +521,11 @@ static float compute_ui_scale(UINT sc_height) {
     // ≥1080p:   use the *larger* of DPI and resolution — high-res/low-DPI
     //           monitors (e.g. 4K @ 100%) get the resolution-based scale.
     float scale;
-    if (res_factor < 1.0f)
+    if (res_factor < 1.0f) {
         scale = std::min(dpi_scale, res_factor);
-    else
+    } else {
         scale = std::max(dpi_scale, res_factor);
+    }
     // Sandbox: the window size is arbitrary (not the real game resolution),
     // so don't let it push the scale below 1.0 — the overlay should always
     // render at a readable size in the dev tool.
@@ -1179,11 +1180,17 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // Refresh the per-frame config cache once — all hot-path callers
         // (blur, toasts, track info, volume bar) read from the frame_*_cfg
         // fields instead of taking repeated lock+copy snapshots.
+        // Skip the deep copy when the config generation hasn't changed since
+        // the last snapshot (the common case — config is static most frames).
         if (g_ctx.store) {
-            auto snap = g_ctx.store->snapshot();
-            g_ctx.frame_overlay_cfg = std::move(snap.overlay);
-            g_ctx.frame_audio_cfg   = snap.audio;  // AudioConfig is trivially copyable — move is a no-op
-            g_ctx.frame_dualsense_cfg = std::move(snap.dualsense);
+            const uint64_t gen = g_ctx.store->generation();
+            if (gen != g_ctx.frame_cfg_generation) {
+                auto snap = g_ctx.store->snapshot();
+                g_ctx.frame_overlay_cfg   = std::move(snap.overlay);
+                g_ctx.frame_audio_cfg     = snap.audio;  // trivially copyable
+                g_ctx.frame_dualsense_cfg = std::move(snap.dualsense);
+                g_ctx.frame_cfg_generation = gen;
+            }
         }
 
         // Dual-Kawase backdrop blur: capture the freshly-rendered backbuffer

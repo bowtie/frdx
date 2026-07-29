@@ -21,6 +21,7 @@ void ConfigStore::patch(const std::function<void(Config&)>& mutator) {
         copy = cfg_;
         obs  = observers_;
         local_path = path_;
+        generation_.fetch_add(1, std::memory_order_release);
     }
     try {
         save_config(local_path, copy);

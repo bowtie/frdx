@@ -407,6 +407,7 @@ struct ExternalCtx {
     OverlayConfig  frame_overlay_cfg{};
     AudioConfig    frame_audio_cfg{};
     DualSenseConfig frame_dualsense_cfg{};
+    uint64_t frame_cfg_generation = 0;  // last ConfigStore generation copied
 };
 extern ExternalCtx g_ctx;
 

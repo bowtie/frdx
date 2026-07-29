@@ -167,7 +167,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) noexcept {
         // is only available on Windows 10 v1703+.
         {
             // Local enum + typedefs to avoid needing <ShellScalingApi.h>.
-            enum { PROCESS_PER_MONITOR_DPI_AWARE = 2 };
+            enum : std::uint8_t { PROCESS_PER_MONITOR_DPI_AWARE = 2 };
             using PFN_SetProcessDpiAwarenessContext = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
             using PFN_SetProcessDpiAwareness = HRESULT(WINAPI*)(int);
             bool dpi_aware = false;

@@ -258,7 +258,7 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     // active_col / hover_col override the resting/hover colors (0 = use default theme colors).
     // Glyph strings are mode-aware: Material Symbols icons in modern mode,
     // Unicode media symbols in pixel mode.
-    enum IconGlyph { G_PREV = 0, G_PAUSE = 1, G_PLAY = 2, G_NEXT = 3, G_GEAR = 4, G_COUNT };
+    enum IconGlyph : uint8_t { G_PREV = 0, G_PAUSE, G_PLAY, G_NEXT, G_GEAR, G_COUNT };
     static const char* s_glyph_strs[G_COUNT] = {};
     static ImVec2 s_glyph_sz[G_COUNT] = {};
     static float s_glyph_font_scale = -1.0f;

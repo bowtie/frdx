@@ -471,15 +471,18 @@ void draw_console_window() {
                     ImGui::SetClipboardText(line.c_str());
                 }
                 ImGui::Separator();
-                const std::string cv_label = "Copy visible (" +
-                                             std::to_string(shown_count) + " / " +
-                                             std::to_string(total_lines) + ")";
-                const std::string ca_label =
-                    "Copy all (" + std::to_string(total_lines) + ")";
-                if (ImGui::MenuItem(cv_label.c_str(), nullptr, false, shown_count > 0)) {
+                // Stack buffers avoid 2+ std::to_string allocs and string
+                // concatenation every frame while the popup is open.
+                char cv_label[64];
+                std::snprintf(cv_label, sizeof(cv_label),
+                              "Copy visible (%zu / %zu)", shown_count, total_lines);
+                char ca_label[48];
+                std::snprintf(ca_label, sizeof(ca_label),
+                              "Copy all (%zu)", total_lines);
+                if (ImGui::MenuItem(cv_label, nullptr, false, shown_count > 0)) {
                     copy_visible_to_clipboard();
                 }
-                if (ImGui::MenuItem(ca_label.c_str(), nullptr, false, total_lines > 0)) {
+                if (ImGui::MenuItem(ca_label, nullptr, false, total_lines > 0)) {
                     copy_all_to_clipboard();
                 }
                 ImGui::EndPopup();

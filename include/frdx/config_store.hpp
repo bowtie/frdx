@@ -3,6 +3,7 @@
 #include "frdx/config.hpp"
 #include "frdx/detail/thread_annotations.hpp"
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -27,6 +28,12 @@ public:
     ConfigStore& operator=(ConfigStore&&)      = delete;
 
     Config snapshot() const FRDX_EXCLUDES(mu_);
+
+    // Returns the current generation number. Increments every time patch()
+    // mutates the config. Callers can compare against a cached value to skip
+    // a full snapshot() deep copy when nothing has changed.
+    uint64_t generation() const noexcept { return generation_.load(std::memory_order_acquire); }
+
     void patch(const std::function<void(Config&)>& mutator) FRDX_EXCLUDES(mu_);
     void on_change(Observer obs) FRDX_EXCLUDES(mu_);
 
@@ -35,6 +42,7 @@ private:
     std::filesystem::path path_  FRDX_GUARDED_BY(mu_);
     Config cfg_                  FRDX_GUARDED_BY(mu_);
     std::vector<Observer> observers_ FRDX_GUARDED_BY(mu_);
+    std::atomic<uint64_t> generation_{0};
 };
 
 } // namespace frdx
