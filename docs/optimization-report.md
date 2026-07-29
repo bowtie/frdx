@@ -848,3 +848,34 @@ on the render thread.
 
 **Verification:** Build succeeds, all 3 tests pass, sandbox runs clean
 (exit 124 = timeout), clang-tidy clean on dsp_bridge.cpp.
+
+---
+
+## Round 15 (commit d2d1d5e)
+
+### 1. allocators: vector → fixed std::array<32>
+
+**File:** `include/frdx/overlay/overlay_priv.hpp`, `src/overlay/hooks.cpp`
+
+**Before:** `DxResources::allocators` was a `std::vector<wil::com_ptr<ID3D12CommandAllocator>>`
+that was `resize(pool_size)` at init and `clear()` at cleanup. Like
+`allocator_fence_values` (converted in Round 13), the pool size is always
+`kAllocatorPoolSize` (32) at runtime. The vector was scanned per-frame in
+the render loop to find a ready allocator.
+
+**After:** Replaced with `std::array<wil::com_ptr<ID3D12CommandAllocator>, 32>`.
+Init creates allocators in-place via `allocators[i].put()`, cleanup resets
+each element. The per-frame scan loop now uses `kAllocatorPoolSize` as the
+bound instead of `allocators.size()`. Both `allocators` and
+`allocator_fence_values` are now contiguous fixed arrays — the scan loop
+touches only adjacent cache lines, improving locality.
+
+Also simplified the init code: removed the `max(BufferCount, kAllocatorPoolSize)`
+calculation since `kAllocatorPoolSize` (32) always wins (DXGI MaxBufferCount
+is typically 16).
+
+**Impact:** Eliminates one more heap allocation at init. Combined with
+Round 13's `allocator_fence_values` conversion, the entire allocator pool
+is now stack/static memory with no heap indirection.
+
+**Verification:** Build succeeds, all 3 tests pass, sandbox runs clean.
