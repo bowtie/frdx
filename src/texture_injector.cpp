@@ -651,8 +651,8 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
 bool TextureInjector::pop_pending_pixels(std::vector<PixelVariant>& out_variants) {
     std::scoped_lock lk{pixels_mtx_};
     if (!has_new_image_) return false;
-    out_variants = pending_variants_;       // copy (keep cache)
-    last_variants_ = pending_variants_;     // cache for reinject
+    last_variants_ = std::move(pending_variants_);  // cache for reinject
+    out_variants = last_variants_;                  // copy (keep cache)
     has_new_image_ = false;
     has_pending_pixels_.store(false, std::memory_order_release);
     return true;
