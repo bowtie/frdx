@@ -41,7 +41,6 @@ public:
     // of the same track load instantly.  Station logos are always
     // cached (they're bundled files that only change on mod update).
     void set_cache_enabled(bool enabled) noexcept { cache_enabled_.store(enabled, std::memory_order_release); }
-    bool cache_enabled() const noexcept { return cache_enabled_.load(std::memory_order_acquire); }
 
     // Pre-warm the BC7 disk cache for station logos.  Scans all given
     // logo URLs, checks if each has a valid cache entry (file content

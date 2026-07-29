@@ -31,8 +31,4 @@ void enable_debug_layer_if_requested() noexcept;
 // (no-op).  Idempotent — only logs once per process lifetime.
 void log_device_removed_if_debug(ID3D12Device* device) noexcept;
 
-// Returns true if the debug layer was enabled by a prior call to
-// enable_debug_layer_if_requested().
-bool is_enabled() noexcept;
-
 } // namespace frdx::d3d12_debug

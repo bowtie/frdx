@@ -75,11 +75,6 @@ public:
 
     void set_winhttp_session(void* session) noexcept { winhttp_session_ = session; }
 
-    // ── Cross-thread notifications ───────────────────────────────────
-
-    // Called when the separate direct-ICY connection has delivered metadata.
-    void notify_icy_metadata(int64_t now_ms) noexcept;
-
 private:
     // Internal stop without locking — caller must hold ctrl_mu_.
     void stop_unlocked();
@@ -125,9 +120,6 @@ private:
 
     std::jthread metadata_thread_;   // WS/REST poller
     std::jthread icy_poller_thread_; // ICY poller
-
-    // Timestamp of the last direct-ICY metadata delivery.
-    std::atomic<int64_t> last_icy_ms_{0};
 
     // ICY read buffer — reused across run_icy_poller() invocations.
     std::vector<char> icy_buf_;

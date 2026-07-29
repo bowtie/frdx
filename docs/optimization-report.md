@@ -366,3 +366,50 @@ inline. No heap allocations, no indirect calls. Also removed the now-unused
   matched (documented design decision).
 - `src/helper/worker_server.cpp` — IPC server, no per-frame work. Pipeline/
   kill subsystem is dead but left as infrastructure.
+
+## Round 5 — Comprehensive dead code removal
+
+A full-codebase scan identified and removed dead code across multiple
+subsystems. All removals were verified by clean build, 3/3 tests passing,
+and sandbox launching successfully (exit 124).
+
+### Dead code removed
+
+1. **hooks.cpp** — Removed dead forward declaration `wait_for_other_queues_sync`
+   and unused constant `kExecuteCommandListsSlot`.
+
+2. **worker_server.cpp** — Removed unused `create_kill_on_close_job()` function
+   (was declared and defined but never called).
+
+3. **d3d12_debug.cpp / d3d12_debug.hpp** — Removed unused `is_enabled()` method
+   and its declaration.
+
+4. **ring_buffer.hpp** — Removed unused `set_hold()` and `held()` public methods.
+
+5. **texture_injector.hpp** — Removed unused `cache_enabled()` public getter.
+
+6. **game_state_probe.hpp / game_state_probe.cpp** — Removed write-only
+   `Snapshot::race_active` and `Snapshot::race_restart` fields, their write
+   sites, and the now-unused offset constants `kRaceRunningA`, `kRaceRunningB`,
+   `kRaceRestartDw`.
+
+7. **mpg123_stream.hpp / mpg123_stream.cpp** — Removed write-only
+   `bytes_decoded_` member and its write site.
+
+8. **shoutcast_metadata.hpp / shoutcast_metadata.cpp / shoutcast_source.cpp** —
+   Removed write-only `last_icy_ms_` atomic field, the `notify_icy_metadata()`
+   function (which only stored to it), and all 3 call sites. The field was
+   never loaded/read anywhere in the codebase.
+
+### Items intentionally left in place
+
+- `WorkerClient::kill()` + Pipeline infrastructure in worker_server.cpp —
+  dead but left as IPC infrastructure for potential future use.
+- `RadioInstance::refcount_obj` and `DiscoveryResult::vtable` — populated but
+  not read by external consumers; left because they model game memory layout
+  and removing fields from RE scanning structs is risky.
+- `kPlaceholderHash196x104Alt` — intentionally not matched (documented design
+  decision, comment at tex_hooks.cpp:417).
+- Unused annotation macros (`FRDX_PT_GUARDED_BY`, `FRDX_ACQUIRED_BEFORE`,
+  `FRDX_ACQUIRED_AFTER`, `FRDX_ACQUIRE_SHARED`, `FRDX_RELEASE_SHARED`) in
+  thread_annotations.hpp — utility macros, left for potential future use.

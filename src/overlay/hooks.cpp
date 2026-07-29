@@ -332,12 +332,10 @@ using ExecuteCommandLists_t = void(__stdcall*)(ID3D12CommandQueue* pQueue, UINT 
 //   7     ID3D12DeviceChild : GetDevice
 //   8     ID3D12CommandQueue: UpdateTileMappings
 //   9     ID3D12CommandQueue: CopyTileMappings
-//   10    ID3D12CommandQueue: ExecuteCommandLists  <-- kExecuteCommandListsSlot
+//   10    ID3D12CommandQueue: ExecuteCommandLists
 //   ...    (SetMarker / BeginEvent / EndEvent / Signal / Wait / GetDesc)
-// Hoist the hook slot into a named constant: hijacking any other slot (notably
-// UpdateTileMappings on slot 8, called per-frame for Hi-Z) triggers a video
-// card crash within seconds.
-[[maybe_unused]] static constexpr UINT kExecuteCommandListsSlot = 10;
+// Hijacking any other slot (notably UpdateTileMappings on slot 8, called
+// per-frame for Hi-Z) triggers a video card crash within seconds.
 
 Present_t original_Present                               = nullptr;
 ResizeBuffers_t original_ResizeBuffers                   = nullptr;
@@ -367,7 +365,6 @@ CommandQueueMap g_cq;
 // hook trampolines defined later in the file.
 void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
                                          ID3D12CommandList* const* ppCommandLists);
-bool wait_for_other_queues_sync(ID3D12CommandQueue* self);
 
 WNDPROC original_wnd_proc = nullptr;
 bool g_runtime_started    = false;

@@ -83,9 +83,6 @@ private:
 
     // True once mpg123 has determined the stream format
     bool format_known_ = false;
-
-    // Total bytes of PCM decoded so far
-    std::uint64_t bytes_decoded_ = 0;
 };
 
 } // namespace frdx::sources

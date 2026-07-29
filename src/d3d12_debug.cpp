@@ -171,8 +171,4 @@ void log_device_removed_if_debug(ID3D12Device* device) noexcept {
     dred->Release();
 }
 
-bool is_enabled() noexcept {
-    return g_debug_enabled.load(std::memory_order_relaxed);
-}
-
 } // namespace frdx::d3d12_debug

@@ -345,7 +345,6 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
         // Stop old stream (fast — no HTTP reconnect here).
         stop_stream_locked();
         reset_metadata_sync_locked();
-        metadata_controller_->notify_icy_metadata(0);
     } // mu_ released — stream launch happens outside the lock
 
     // Phase 2: launch mpg123 stream OUTSIDE the lock (HTTP handshake).
@@ -875,7 +874,6 @@ void ShoutcastSource::clear_pending_metadata_locked() {
 uint64_t ShoutcastSource::reset_metadata_sync_locked() {
     clear_pending_metadata_locked();
     metadata_epoch_has_track_ = false;
-    metadata_controller_->notify_icy_metadata(0);
     return metadata_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
 }
 

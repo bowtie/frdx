@@ -42,17 +42,6 @@ std::list<Pipeline> g_pipelines;
 std::atomic<int> g_next_id{1};
 HANDLE g_shutdown_event = nullptr;
 
-HANDLE create_kill_on_close_job() {
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (!job) return nullptr;
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION eli{};
-    eli.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                            &eli, sizeof(eli));
-    return job;
-}
-
 void kill_process_tree(DWORD pid) {
     // Simple: terminate the process and its direct children.
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);

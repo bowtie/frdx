@@ -142,10 +142,6 @@ MetadataController::~MetadataController() {
     stop_unlocked();
 }
 
-void MetadataController::notify_icy_metadata(int64_t now_ms) noexcept {
-    last_icy_ms_.store(now_ms, std::memory_order_release);
-}
-
 // ---- Polling control -----------------------------------------------------
 
 void MetadataController::start(const std::string& stream_url,
@@ -161,9 +157,6 @@ void MetadataController::start(const std::string& stream_url,
 
     // 1. Stop existing producers before starting new ones.
     stop_unlocked();
-
-    // Reset ICY timestamps so the first response fills title/artist.
-    last_icy_ms_.store(0, std::memory_order_release);
 
     // 2. Start ICY poller for non-WS, non-SSE, non-static, non-rest stations.
     //    REST and icecast-json stations have their own JSON poller below.
@@ -949,10 +942,7 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
                     info.artist = "";  // caller fills fallback
                     info.title  = std::move(val);
                 }
-                bool accepted = on_metadata_(std::move(info), now_ms, metadata_epoch);
-                if (accepted) {
-                    notify_icy_metadata(now_ms);
-                }
+                on_metadata_(std::move(info), now_ms, metadata_epoch);
             }
 
             if (first_title) {

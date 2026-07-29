@@ -260,7 +260,6 @@ std::size_t Mpg123Stream::read_pcm(std::span<std::byte> out, bool& ended) {
 
             if (got > 0) {
                 total_written += got;
-                bytes_decoded_ += got;
                 if (!format_known_) {
                     long rate = 0;
                     int channels = 0, encoding = 0;
