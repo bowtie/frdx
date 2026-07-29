@@ -979,3 +979,32 @@ confirms the rendering and audio paths are already well-optimized — no further
 allocation elimination opportunities were found in the per-frame paths.
 
 **Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
+
+---
+
+## Round 18 — Consolidate atomic loads in DSP read_callback (commit 170b69f)
+
+### Optimization: Single atomic load for mode + stereo + gain in audio callback
+
+**File:** `src/fmod/dsp_bridge.cpp`
+
+The DSP `read_callback` (called at ~48 kHz on the FMOD audio thread) was
+loading `dsp_state_` three separate times:
+1. `b->mode()` → `dsp_state_.load(acquire)` to get the DSP mode
+2. `b->force_stereo_audio()` → `dsp_state_.load(acquire)` to get stereo flag
+3. `b->gain()` → `dsp_state_.load(acquire)` to get the gain value
+
+All three values are packed into a single `uint64_t` by `PackedDSPState`,
+so one acquire load gives a consistent snapshot of all three fields.
+Replaced the three method calls with a single `dsp_state_.load(acquire)`
+and direct `PackedDSPState::mode/stereo/gain` extraction.
+
+On x86-64, an aligned atomic load compiles to a plain `mov` (no bus lock),
+but the acquire ordering still constrains compiler reordering. Eliminating
+two redundant loads per callback is a small but real win on the audio
+thread, where every nanosecond matters.
+
+**Impact:** 2 fewer atomic loads per audio callback invocation (~96,000
+loads/sec at 48 kHz).
+
+**Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
