@@ -606,7 +606,6 @@ int push_blur_widget_styles(float alpha_scalar);
 void pop_blur_widget_styles(int pushed_count);
 
 void enqueue_action(std::function<void()> action);
-void save_active_shoutcast_station(IAudioSource* active);
 void wait_for_all_overlay_work();
 void pre_resize();
 void post_resize(IDXGISwapChain* swapChain);

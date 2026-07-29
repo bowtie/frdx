@@ -8,38 +8,20 @@
 #include "frdx/sources/shoutcast_source.hpp"
 #include "frdx/texture_injector.hpp"
 #include "frdx/log.hpp"
-#include "frdx/platform/windows/subprocess.hpp"
 
 #include <windows.h>
-#include <d3d12.h>
-#include <dxgi1_4.h>
 #include <vector>
 #include <string>
 #include <mutex>
-#include <unordered_map>
 #include <filesystem>
 #include <algorithm>
-#include <condition_variable>
-#include <deque>
 #include <functional>
 #include <thread>
 #include <atomic>
-#include <optional>
 #include <string_view>
 
 #include <imgui.h>
 #include <imgui_animated.h>
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-field-initializers"
-#endif
-#include <im_anim.h>
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-
-#include <wil/com.h>
-#include "frdx/detail/thread_annotations.hpp"
 
 namespace frdx::overlay {
 using namespace frdx;
@@ -180,17 +162,6 @@ void enqueue_action(std::function<void()> action) {
         g_aq.pending_ref().push_back(std::move(action));
     }
     g_aq.cv.notify_one();
-}
-
-void save_active_shoutcast_station(IAudioSource* active) {
-    if (!g_ctx.store || !active || active->type() != SourceType::shoutcast) return;
-    auto* shoutcast                    = static_cast<sources::ShoutcastSource*>(active);
-    const auto [station_id, stream_id] = shoutcast->active_station_stream();
-    if (station_id.empty() || stream_id.empty()) return;
-    g_ctx.store->patch([&](Config& c) {
-        c.shoutcast.last_station_id = station_id;
-        c.shoutcast.last_stream_id  = stream_id;
-    });
 }
 
 void run_station_switch(const PendingStationSwitch& request) {

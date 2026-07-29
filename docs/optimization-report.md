@@ -307,3 +307,17 @@ in the dev tool. The real game is unaffected.
 - `src/overlay/settings.cpp` — All remaining `snapshot()` calls are either
   in the DualSense tab (off-limits) or init-time. Audio/Display tabs already
   use `frame_overlay_cfg` from Round 2.
+
+### Dead Code Removed
+
+- `save_active_shoutcast_station()` in `src/overlay/overlay.cpp` — declared
+  in `overlay_priv.hpp` and defined in `overlay.cpp` but never called
+  anywhere. Its functionality (persisting `last_station_id`/`last_stream_id`
+  to config) was already inlined into `run_station_switch()`.
+- Unused includes removed from `src/overlay/overlay.cpp`: `<d3d12.h>`,
+  `<dxgi1_4.h>`, `<unordered_map>`, `<condition_variable>`, `<deque>`,
+  `<optional>`, `<wil/com.h>`, `<im_anim.h>`,
+  `"frdx/platform/windows/subprocess.hpp"`,
+  `"frdx/detail/thread_annotations.hpp"`. None of these headers' symbols
+  were used directly in the file — they were transitively included via
+  `overlay_priv.hpp`.
