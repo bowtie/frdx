@@ -325,19 +325,22 @@ struct Emitter {
         out += '\n';
     }
     void kv(std::string_view key, int64_t v) {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v));
         out += key;
         out += " = ";
-        out += std::to_string(v);
+        out += buf;
         out += '\n';
     }
     void kv(std::string_view key, double v) {
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%g", v);
-        std::string text{buf};
-        if (text.find_first_of(".eE") == std::string::npos) text += ".0";
+        std::string_view text{buf};
         out += key;
         out += " = ";
         out += text;
+        // TOML requires a decimal point or exponent for floats.
+        if (text.find_first_of(".eE") == std::string_view::npos) out += ".0";
         out += '\n';
     }
     void kv_strs(std::string_view key, const std::vector<std::string>& v) {
