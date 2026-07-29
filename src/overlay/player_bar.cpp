@@ -431,9 +431,17 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
                 float mouse_x    = ImGui::GetMousePos().x;
                 float new_val    = std::clamp((mouse_x - bar_x) / bar_w, 0.0f, 1.0f);
                 if (g_ctx.bridge) g_ctx.bridge->set_gain(new_val);
-                if (g_ctx.store) g_ctx.store->patch([&](Config& c) { c.audio.output_gain = new_val; });
+                // Update the in-memory config without disk I/O so the volume
+                // bar stays responsive during the drag.  patch() (which writes
+                // to disk + notifies observers) is deferred to drag end.
+                if (g_ctx.store) g_ctx.store->update([&](Config& c) { c.audio.output_gain = new_val; });
             } else {
                 g_ui.vol_dragging = false;
+                // Persist to disk now that the drag is finished.
+                if (g_ctx.store) {
+                    float final_gain = g_ctx.store->snapshot().audio.output_gain;
+                    g_ctx.store->patch([&](Config& c) { c.audio.output_gain = final_gain; });
+                }
             }
         }
     }

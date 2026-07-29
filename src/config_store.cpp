@@ -43,4 +43,10 @@ void ConfigStore::on_change(Observer obs) {
     observers_.push_back(std::move(obs));
 }
 
+void ConfigStore::update(const std::function<void(Config&)>& mutator) {
+    frdx::ScopedLock lk{mu_};
+    mutator(cfg_);
+    generation_.fetch_add(1, std::memory_order_release);
+}
+
 } // namespace frdx

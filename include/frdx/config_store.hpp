@@ -35,6 +35,12 @@ public:
     uint64_t generation() const noexcept { return generation_.load(std::memory_order_acquire); }
 
     void patch(const std::function<void(Config&)>& mutator) FRDX_EXCLUDES(mu_);
+
+    // In-memory only update: mutates the config and bumps the generation
+    // counter (so frame-cached snapshots pick up the change) but skips
+    // disk I/O and observer notification.  Use for high-frequency updates
+    // like volume dragging; follow with a patch() to persist.
+    void update(const std::function<void(Config&)>& mutator) FRDX_EXCLUDES(mu_);
     void on_change(Observer obs) FRDX_EXCLUDES(mu_);
 
 private:
