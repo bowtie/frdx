@@ -437,3 +437,12 @@ the field and all three checks, eliminating a dead atomic load from the FMOD
 mixer hot path.
 
 **Files changed:** `ring_buffer.hpp`, `ring_buffer.cpp`
+
+## Round 7 — Remove unused includes from hooks.cpp
+
+Removed `<string>` and `<unordered_map>` from `src/overlay/hooks.cpp` —
+neither is directly used in the file (`std::string` is pulled in transitively
+through other headers, and `std::unordered_map` is not used at all). Small
+compile-time improvement.
+
+**Files changed:** `hooks.cpp`

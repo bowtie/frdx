@@ -16,8 +16,6 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <vector>
-#include <string>
-#include <unordered_map>
 #include <filesystem>
 #include <algorithm>
 #include <chrono>
