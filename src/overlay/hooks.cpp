@@ -810,7 +810,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     const size_t pool_size = std::max(static_cast<size_t>(desc.BufferCount),
                                       DxResources::kAllocatorPoolSize);
     g_dx.allocators.resize(pool_size);
-    g_dx.allocator_fence_values.resize(pool_size, 0);
+    g_dx.allocator_fence_values.fill(0);
     for (size_t i = 0; i < pool_size; i++) {
         if (FAILED(g_dx.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                        IID_PPV_ARGS(g_dx.allocators[i].put()))) ||
@@ -963,7 +963,7 @@ void cleanup_imgui_resources() {
     }
     g_dx.fence.reset();
     g_dx.allocators.clear();
-    g_dx.allocator_fence_values.clear();
+    g_dx.allocator_fence_values.fill(0);
     g_ui.bg_texture.reset();
     g_ui.bg_texture_id     = 0;
     g_ui.bg_texture_width  = 0;

@@ -139,7 +139,7 @@ bool wait_for_fence(UINT64 fence_value) {
 }
 
 void wait_for_all_overlay_work() {
-    for (const auto fence_value : g_dx.allocator_fence_values) {
+    for (const UINT64 fence_value : g_dx.allocator_fence_values) {
         if (!wait_for_fence(fence_value)) {
             log::warn("[overlay] timed out waiting for GPU overlay work to finish");
         }
