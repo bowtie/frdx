@@ -321,3 +321,48 @@ in the dev tool. The real game is unaffected.
   `"frdx/detail/thread_annotations.hpp"`. None of these headers' symbols
   were used directly in the file — they were transitively included via
   `overlay_priv.hpp`.
+
+## Round 4
+
+### 9. dsp_bridge.cpp — Eliminate std::function heap allocations in FMOD read callback
+
+**Before:** `read_callback` (called at ~48kHz on the FMOD audio thread)
+created two `std::function` objects (`mix_stereo` and `mix_mono`) on every
+single invocation. `std::function` typically heap-allocates when the captured
+state exceeds the small-buffer-optimization limit, and even when it doesn't,
+it introduces an indirect call through a vtable. On the real-time audio
+thread, this is both an allocation and a branch-prediction miss per callback.
+
+**After:** Replaced the `std::function` lambdas with an `if/else` branch on
+`out_ch` that inlines the S16→float conversion loop directly. The stereo and
+mono paths each have their own ring-reading loop with the conversion code
+inline. No heap allocations, no indirect calls. Also removed the now-unused
+`<functional>` include.
+
+**Files changed:**
+- `src/fmod/dsp_bridge.cpp` — replaced `std::function` lambdas with inline
+  if/else branches; removed `<functional>` include
+
+### Dead Code Noted (not removed)
+
+- `WorkerClient::kill()` in `src/helper/worker_client.cpp` — declared and
+  defined but never called from any client code. The server-side
+  `handle_kill()` and `Pipeline` management in `worker_server.cpp` are also
+  unused (no code ever creates a pipeline). This is IPC infrastructure that
+  was implemented for future subprocess management but never wired up.
+  Left in place as it may be needed for future features and removing it
+  would be a design decision.
+
+### Files Reviewed in Round 4 (no changes needed)
+
+- `src/overlay/console.cpp` — Already optimized in Round 2 with precomputed
+  filter results. Generation-based refresh is effective.
+- `src/sources/shoutcast_metadata.cpp` — Background poller threads with
+  proper sleep intervals. No per-frame work.
+- `include/frdx/config.hpp` — All config fields verified as used across
+  config loading, bridge initialization, and settings UI.
+- `include/frdx/texture_injector.hpp` — All public methods and constants
+  verified as used. `kPlaceholderHash196x104Alt` is intentionally not
+  matched (documented design decision).
+- `src/helper/worker_server.cpp` — IPC server, no per-frame work. Pipeline/
+  kill subsystem is dead but left as infrastructure.
