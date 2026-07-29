@@ -744,3 +744,60 @@ were reviewed for the first time in this round:
 - `dualsense_external_helper_should_launch()` — defined + tested but not
   called from production. Left in place (intentional).
 - No other dead functions or unused variables found.
+
+---
+
+## Round 13 (commit d94b41d)
+
+### 1. allocator_fence_values: vector → fixed std::array<32>
+
+**File:** `include/frdx/overlay/overlay_priv.hpp`, `src/overlay/hooks.cpp`, `src/overlay/overlay.cpp`
+
+**Before:** `DxResources::allocator_fence_values` was a `std::vector<UINT64>`
+that was `resize(pool_size, 0)` at init and `clear()` at cleanup. The pool
+size is always `kAllocatorPoolSize` (32) at runtime — `desc.BufferCount` is
+always 2-3, so `max(BufferCount, 32)` is always 32. The vector was accessed
+in the per-frame render loop (linear scan at hooks.cpp:1147) and in
+`wait_for_all_overlay_work` (overlay.cpp:142).
+
+**After:** Replaced with `std::array<UINT64, kAllocatorPoolSize>` (fixed
+32-element array). Init uses `.fill(0)`, cleanup uses `.fill(0)`. The
+per-frame scan loop now iterates contiguous stack/static memory instead of
+heap-allocated vector storage, improving cache locality. Eliminates the
+heap allocation entirely.
+
+**Impact:** Minor — removes one heap allocation at init and improves cache
+locality of the per-frame allocator scan. The scan itself is O(pool_size)
+but almost always breaks on the first ready allocator.
+
+### Round 13 audit — verified already optimal
+
+Re-scanned all 36 source files for remaining optimization opportunities:
+
+- **No std::map usage** anywhere in the codebase (all maps are unordered_map)
+- **No std::regex usage** anywhere
+- **No shared_ptr copies** in hot paths (only in atomic stream swap)
+- **All std::to_string calls** are in non-hot paths (texture cache naming,
+  shoutcast helpers JSON parsing, off-limits fastboot/dualsense)
+- **All std::string temporaries** in per-frame functions use stack char[]
+  buffers (console, config serialization — fixed in earlier rounds)
+- **All range-for loops** use references except `overlay.cpp:142` which
+  iterates `UINT64` values by value (trivially copyable, now fixed to
+  explicit `UINT64` type)
+- **dynamic_cast** usage (2 sites) is in user-initiated paths, not per-frame
+- **All log calls** in hooks.cpp are in init/rare-event paths, not per-frame
+- **SRV slot allocator** uses vector back/pop_back (O(1) free-list)
+- **inject_pixels** creates upload buffer per call but only runs on artwork
+  change (seconds apart, not per-frame)
+- **Blur pipeline** has early-out when no blur windows visible
+- **push_blur_widget_styles** has early-out when blur disabled or opacity >= 1
+- **draw_backdrop_blur** has early-out on alpha <= -1 and alpha <= 0
+- **wnd_proc_hook** caches config via atomic + on_change callback
+- **Config snapshot** is generation-gated (skips deep copy when unchanged)
+- **Control loop** is 50Hz with throttled metadata, 1-pole gain filter
+- **Metadata injector** has dedup, SEH-wrapped writes, retired buffer limiter
+- **Texture injection** has two-tier fast path, throttled fingerprinting,
+  non-blocking GPU polling, periodic heartbeat pruning
+
+No further optimization opportunities found. The codebase is comprehensively
+optimized across 13 rounds of work.
