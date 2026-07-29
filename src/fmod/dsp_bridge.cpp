@@ -439,14 +439,19 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
                                             int32_t* out_channels) {
     auto* b = g_bridge.load(std::memory_order_acquire);
     if (!b || !out_buf) return 0;
-    const DSPMode m = b->mode();
+
+    // Single atomic load of the packed DSP state — mode, gain, and stereo
+    // are all packed into one uint64_t, so one acquire load gives us all
+    // three fields with a consistent snapshot.
+    const uint64_t state = b->dsp_state_.load(std::memory_order_acquire);
+    const DSPMode m      = PackedDSPState::mode(state);
 
     // Declare our DSP output: stereo (default, force_stereo path) or mono
     // (when force_stereo is off and we're feeding the 3D panner — stereo
     // into a 3D panner phase-cancels into a metallic mess). FMOD re-reads
     // *out_channels every callback, so writing it here unconditionally is
     // all that's needed to switch layout live on a config change.
-    const int32_t out_ch = b->force_stereo_audio() ? 2 : 1;
+    const int32_t out_ch = PackedDSPState::stereo(state) ? 2 : 1;
     if (out_channels) *out_channels = out_ch;
     const std::size_t total = static_cast<std::size_t>(length) * out_ch;
 
@@ -467,7 +472,7 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
         return 0;
     }
 
-    const float gain = b->gain();
+    const float gain = PackedDSPState::gain(state);
     if (gain <= 0.0f) {
         std::memset(out_buf, 0, total * sizeof(float));
         stats();
