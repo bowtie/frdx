@@ -879,3 +879,46 @@ Round 13's `allocator_fence_values` conversion, the entire allocator pool
 is now stack/static memory with no heap indirection.
 
 **Verification:** Build succeeds, all 3 tests pass, sandbox runs clean.
+
+---
+
+## Round 16 — Dead Code Removal (commit ee3398e)
+
+### Dead code: WorkerClient::kill() and entire Pipeline infrastructure
+
+**Files:** `include/frdx/helper/worker_client.hpp`, `src/helper/worker_client.cpp`,
+`src/helper/worker_server.cpp`
+
+A comprehensive dead code scan found that the entire `Pipeline` infrastructure in
+the worker server was dead code:
+
+- `WorkerClient::kill(int id)` — declared in the header, implemented in the client,
+  server-side `handle_kill()` existed and was dispatched — but **no production code
+  ever called `worker.kill()`**. The `download()` path is fire-and-forget and doesn't
+  track pipeline IDs.
+- `struct Pipeline` — defined in an anonymous namespace in `worker_server.cpp`,
+  but `g_pipelines` (a `std::list<Pipeline>`) was **never populated**. No code ever
+  inserted into it.
+- `g_next_id` (`std::atomic<int>`) — declared and initialized but **never read**.
+- `kill_process_tree(DWORD pid)` — only called from `handle_kill()` (which iterates
+  the empty `g_pipelines`) and the cleanup loop (which also iterates the empty list).
+- The pipeline cleanup loop at the end of `run_worker_loop()` — iterates `g_pipelines`
+  which is always empty, so the entire block is dead.
+
+Removed 101 lines across 3 files. Also cleaned up now-unused includes:
+`<tlhelp32.h>`, `<atomic>`, `<list>`, `<memory>`, `<mutex>` from
+`worker_server.cpp`, and `<filesystem>`, `<optional>`, `<vector>` from
+`worker_client.hpp`.
+
+**Scan scope:** All public declarations in `include/frdx/` (excluding off-limits
+dualsense/fastboot files) were checked against usage in `src/`. Every other
+function — including all `overlay_priv.hpp` free functions, `dsp_bridge.hpp`
+methods, `shoutcast_source.hpp` methods, `shoutcast_metadata.hpp` methods,
+`safe_mem.hpp` helpers, `ipc_protocol.hpp` functions, and `pe_image.hpp` types —
+was confirmed in use.
+
+**Impact:** 101 lines of dead code removed. Reduces binary size slightly
+(functions were internal to an anonymous namespace but still compiled) and
+removes confusion about whether pipeline kill is a live feature.
+
+**Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
