@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 namespace frdx::fmod_bridge {
 
@@ -436,38 +437,53 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     }
 
     uint32_t produced = 0;
-    auto mix_bytes = [&](const std::byte* pcm, uint32_t frames) {
+
+    // Split the mono/stereo conversion into two separate loops so the
+    // out_ch branch is hoisted out of the per-frame iteration.  The FMOD
+    // mixer calls this at ~48 kHz on the audio thread — every branch
+    // removed from the inner loop matters.
+    std::function<void(const std::byte*, uint32_t)> mix_stereo = [&](const std::byte* pcm, uint32_t frames) {
         if (do_clip) {
             for (uint32_t f = 0; f < frames; ++f) {
                 const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
                 const float fl    = load_s16(frame + 0) * scale;
                 const float fr    = load_s16(frame + 2) * scale;
-                const float L     = soft_clip(fl);
-                const float R     = soft_clip(fr);
-                float* o          = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
-                if (out_ch == 1) {
-                    o[0] = (L + R) * 0.5f;
-                } else {
-                    o[0] = L;
-                    o[1] = R;
-                }
+                float* o          = out_buf + static_cast<std::size_t>(produced + f) * 2;
+                o[0] = soft_clip(fl);
+                o[1] = soft_clip(fr);
             }
         } else {
             for (uint32_t f = 0; f < frames; ++f) {
                 const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
-                const float L     = load_s16(frame + 0) * scale;
-                const float R     = load_s16(frame + 2) * scale;
-                float* o          = out_buf + static_cast<std::size_t>(produced + f) * out_ch;
-                if (out_ch == 1) {
-                    o[0] = (L + R) * 0.5f;
-                } else {
-                    o[0] = L;
-                    o[1] = R;
-                }
+                float* o          = out_buf + static_cast<std::size_t>(produced + f) * 2;
+                o[0] = load_s16(frame + 0) * scale;
+                o[1] = load_s16(frame + 2) * scale;
             }
         }
         produced += frames;
     };
+
+    std::function<void(const std::byte*, uint32_t)> mix_mono = [&](const std::byte* pcm, uint32_t frames) {
+        if (do_clip) {
+            for (uint32_t f = 0; f < frames; ++f) {
+                const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
+                const float fl    = load_s16(frame + 0) * scale;
+                const float fr    = load_s16(frame + 2) * scale;
+                out_buf[static_cast<std::size_t>(produced + f)] =
+                    (soft_clip(fl) + soft_clip(fr)) * 0.5f;
+            }
+        } else {
+            for (uint32_t f = 0; f < frames; ++f) {
+                const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
+                const float fl    = load_s16(frame + 0) * scale;
+                const float fr    = load_s16(frame + 2) * scale;
+                out_buf[static_cast<std::size_t>(produced + f)] = (fl + fr) * 0.5f;
+            }
+        }
+        produced += frames;
+    };
+
+    auto& mix_bytes = (out_ch == 1) ? mix_mono : mix_stereo;
 
     for (; produced < length;) {
         const uint32_t want_frames = std::min(length - produced, kChunkFrames);

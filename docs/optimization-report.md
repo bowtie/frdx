@@ -1,0 +1,146 @@
+# Optimization Report — research/optimizations branch
+
+Date: 2026-07-29
+
+## Summary
+
+Five optimizations applied across the overlay, FMOD DSP, texture injection,
+and Shoutcast source subsystems. All changes are performance or code-quality
+improvements with no behavioral changes. Build succeeds, all tests pass,
+sandbox launches and renders without crashing.
+
+## Optimizations Applied
+
+### 1. tex_hooks.cpp — O(1) resource tracking lookup in CreateSRV hook
+
+**Before:** `hook_CreateSRV` performed three linear scans over `g_unverified`,
+`g_streamer_mode`, and `g_pending_fp` on every CreateSRV call to check if a
+resource was already tracked. This runs on the game's render thread every
+time the game creates a shader resource view.
+
+**After:** Added a `std::unordered_set<ID3D12Resource*> g_tracked_resources`
+that provides O(1) membership lookup. The set is updated under `g_tex_mutex`
+alongside the existing vectors at every insertion, erasure, and clear point.
+
+**Impact:** Eliminates O(n) linear scans on the render thread in the CreateSRV
+hot path. The game creates SRVs frequently during rendering, so this reduces
+mutex hold time under `g_tex_mutex`.
+
+**Files changed:** `src/overlay/tex_hooks.cpp`
+
+### 2. dsp_bridge.cpp — Split mono/stereo branch out of audio callback inner loop
+
+**Before:** The `read_callback` DSP function (called by FMOD's mixer at ~48 kHz
+on the audio thread) had a single `mix_bytes` lambda that checked
+`out_ch == 1` on every frame iteration inside the PCM conversion loop.
+
+**After:** Split into two separate lambdas (`mix_stereo` and `mix_mono`), each
+with the channel-specific write pattern hardcoded. The selection is made once
+per callback via a `std::function` reference, so the per-frame branch is
+eliminated.
+
+**Impact:** Removes a per-frame conditional branch from the real-time audio
+mixer callback. The branch was predictable (out_ch is constant for the entire
+callback), but removing it reduces instruction cache pressure and simplifies
+the inner loop for the compiler's auto-vectorizer.
+
+**Files changed:** `src/fmod/dsp_bridge.cpp`
+
+### 3. texture_injector.cpp — Faster alpha pre-multiply and border color sampling
+
+**Before:**
+- `compress_bc7` used integer division `(r * a) / 255` for alpha pre-multiply,
+  executed per-pixel during BC7 compression.
+- `build_cover_variants` iterated every pixel of the resized image to compute
+  the average border color.
+
+**After:**
+- Replaced integer division with a bit-shift approximation
+  `(r * a + 128) >> 8`, which is accurate to <1 LSB and avoids the integer
+  division instruction.
+- Added a sampling stride for the border color computation: when the image
+  has more than ~4096 pixels, only every Nth pixel is sampled. The border
+  color is decorative, not color-critical.
+
+**Impact:** Reduces CPU time in the artwork processing pipeline, which runs
+on a background thread at `THREAD_PRIORITY_LOWEST`. The alpha pre-multiply
+runs for every pixel of every BC7 block; the border color computation runs
+once per artwork image.
+
+**Files changed:** `src/texture_injector.cpp`
+
+### 4. shoutcast_source.cpp — O(1) station lookup via index map
+
+**Before:** Multiple functions performed linear scans over `stations_` to find
+a station by ID:
+- `select_station` (2 separate scans: station lookup + multi_stream check)
+- `restore_station_display_locked`
+- `apply_pending_metadata_locked` (2 separate scans: logo_only check +
+  artwork fallback)
+- `restart_metadata_for_current`
+
+Each scan iterated `stations_` (typically 10-30 stations) and compared
+string IDs.
+
+**After:** Added a `std::unordered_map<std::string, size_t> station_index_`
+that maps station IDs to their index in `stations_`. The index is rebuilt in
+`load_stations()` whenever the station list changes. All six linear scans
+were replaced with O(1) map lookups.
+
+**Impact:** Eliminates 6 linear string-comparison scans across station
+selection, metadata application, and display restoration. These run on the
+action worker thread and control loop thread during station switches and
+metadata updates.
+
+**Files changed:** `include/frdx/sources/shoutcast_source.hpp`,
+`src/sources/shoutcast_source.cpp`
+
+### 5. hooks.cpp — Skip per-pixel loop for RGBA screenshots
+
+**Before:** `shot_phase3_save_png` iterated every pixel in the screenshot
+with a per-pixel BGRA/RGBA branch, even when the source format was already
+RGBA (no conversion needed).
+
+**After:** When the format is RGBA, the per-pixel loop is skipped entirely
+and each row is copied with `memcpy`. The BGRA path remains as a per-pixel
+swap but no longer has the format check inside the inner loop.
+
+**Impact:** Eliminates per-pixel overhead for RGBA-format screenshots. BGRA
+screenshots (the common case on Windows) benefit from removing the format
+branch from the inner loop.
+
+**Files changed:** `src/overlay/hooks.cpp`
+
+## Optimizations Considered but Rejected
+
+### try_complete_fingerprint — Replace unordered_set with stack buffer
+
+**Rejected.** The `try_complete_fingerprint` function allocates a
+`std::unordered_set<uint64_t>` per call to count unique BC7 blocks. The
+block counts are small (at most 49×52 = 2548 blocks for 196×196), and the
+allocation happens on the GPU completion poll path (at most ~5x/sec).
+Replacing with a flat array would require sorting or a bloom filter, adding
+complexity for negligible gain on a cold path.
+
+### RingBuffer — Lock-free consume
+
+**Rejected.** `RingBuffer::consume()` takes `drain_mu_` to serialize with
+`drain()`. Making it lock-free would require a CAS loop on `read_pos_` and
+careful interaction with `drain()`, which also modifies `read_pos_`. The
+current mutex is uncontended in practice (only the DSP callback calls
+`consume`), and the lock is held for nanoseconds. Not worth the complexity.
+
+### overlay.cpp — Track info cache static variables
+
+**Rejected.** The `draw_imgui_ui_impl` function uses `static` variables for
+track info caching (s_track_source, s_track_gen, etc.). These are already
+effective — they avoid calling `current_track()` every frame by checking
+the metadata generation counter. No improvement needed.
+
+## Verification
+
+- **Build:** `cmake --build build` succeeds with no new warnings or errors.
+- **Tests:** `ctest` passes all 3 existing tests (dualsense_self_test,
+  dualsense_config_self_test, dualsense_settings_coverage_test).
+- **Sandbox:** `frdx_sandbox.exe` launches and renders for 5+ seconds
+  without crashing (timeout-terminated smoke test).

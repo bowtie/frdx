@@ -269,6 +269,8 @@ private:
 
     // Station presets.
     std::vector<StationPreset> stations_ FRDX_GUARDED_BY(mu_);
+    // O(1) station lookup by ID, rebuilt in load_stations() when stations_ changes.
+    std::unordered_map<std::string, std::size_t> station_index_ FRDX_GUARDED_BY(mu_);
     // Cached flat (station_idx, stream_idx) pairs for O(1) cycle_preset(),
     // rebuilt in load_stations() when stations_ changes.
     std::vector<std::pair<std::size_t, std::size_t>> flat_presets_ FRDX_GUARDED_BY(mu_);

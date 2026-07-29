@@ -24,6 +24,11 @@
 #include <unordered_set>
 #include <vector>
 
+// O(1) membership check for tracked resources, avoiding three linear scans
+// over g_unverified / g_streamer_mode / g_pending_fp on every CreateSRV call.
+// Updated under g_tex_mutex alongside the vectors.
+static std::unordered_set<ID3D12Resource*> g_tracked_resources;
+
 #include <wil/com.h>
 
 namespace frdx::overlay {
@@ -179,6 +184,7 @@ void set_tex_injection_enabled(bool enabled) noexcept {
             for (auto& tt : g_streamer_mode) { if (tt.resource) tt.resource.reset(); }
             g_streamer_mode.clear();
             g_unverified.clear();
+            g_tracked_resources.clear();
             g_tex_work_pending.store(!g_pending_fp.empty(), std::memory_order_release);
         }
     }
@@ -617,34 +623,28 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
         static auto last_target_time = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_target_time).count() > 1) {
+            for (const auto& tt : g_unverified) g_tracked_resources.erase(tt.resource.get());
+            for (const auto& pf : g_pending_fp) g_tracked_resources.erase(pf.resource.get());
             g_unverified.clear();
             g_pending_fp.clear();
             g_tex_work_pending.store(!g_streamer_mode.empty(), std::memory_order_release);
         }
         last_target_time = now;
 
-        // Check if already tracked. g_pending_fp must be checked too: while
-        // a resource's async fingerprint readback is in flight it's been
-        // removed from g_unverified but hasn't landed in g_streamer_mode
-        // yet, so skipping it here would let a second CreateSRV call for
-        // the same resource re-queue (and eventually double-fingerprint)
-        // it.
-        bool already = false;
-        for (const auto& tt : g_unverified) {
-            if (tt.resource.get() == pResource) { already = true; break; }
-        }
-        for (const auto& tt : g_streamer_mode) {
-            if (tt.resource.get() == pResource) { already = true; break; }
-        }
-        for (const auto& pf : g_pending_fp) {
-            if (pf.resource.get() == pResource) { already = true; break; }
-        }
+        // Check if already tracked via O(1) set lookup. g_pending_fp must
+        // be covered too: while a resource's async fingerprint readback is
+        // in flight it's been removed from g_unverified but hasn't landed
+        // in g_streamer_mode yet, so skipping it here would let a second
+        // CreateSRV call for the same resource re-queue (and eventually
+        // double-fingerprint) it.
+        const bool already = g_tracked_resources.count(pResource) > 0;
 
         if (!already) {
             TrackedTexture tt;
             tt.resource.attach(pResource);
             pResource->AddRef(); // keep alive for tracking
             tt.first_seen = std::chrono::steady_clock::now();
+            g_tracked_resources.insert(pResource);
             g_unverified.push_back(std::move(tt));
             g_tex_work_pending.store(true, std::memory_order_release);
         }
@@ -690,6 +690,7 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
         g_streamer_mode.clear();
         g_unverified.clear();
         g_pending_fp.clear();
+        g_tracked_resources.clear();
         g_tex_work_pending.store(false, std::memory_order_release);
     }
 }
@@ -748,8 +749,12 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
                 g_last_cleanup = now;
                 g_unverified.erase(std::ranges::remove_if(g_unverified,
                                                           [&](const TrackedTexture& tt) {
-                                                              return now - tt.first_seen >
-                                                                     std::chrono::seconds(5);
+                                                              if (now - tt.first_seen >
+                                                                     std::chrono::seconds(5)) {
+                                                                  g_tracked_resources.erase(tt.resource.get());
+                                                                  return true;
+                                                              }
+                                                              return false;
                                                           })
                                        .begin(),
                                    g_unverified.end());
@@ -764,6 +769,7 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
                 if (now - it->first_seen >= std::chrono::seconds(2)) {
                     to_fingerprint.push_back(it->resource.get());
                     it->resource.get()->AddRef();
+                    // Resource stays in g_tracked_resources — it moves to g_pending_fp.
                     it = g_unverified.erase(it);
                 } else {
                     ++it;
@@ -813,8 +819,13 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
                 // keep recreating this SRV as it renders, so cap how many
                 // instances we retain and inject into.
                 if (g_streamer_mode.size() > kMaxStreamerModeTextures) {
+                    auto& evicted = g_streamer_mode.front();
+                    g_tracked_resources.erase(evicted.resource.get());
                     g_streamer_mode.erase(g_streamer_mode.begin());
                 }
+            } else {
+                // Not a placeholder — release tracking.
+                g_tracked_resources.erase(it->resource.get());
             }
             it = g_pending_fp.erase(it);
         }
@@ -862,10 +873,14 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
                 // Prune stale textures (refcount <= 1 means only our ref remains)
                 g_streamer_mode.erase(std::ranges::remove_if(g_streamer_mode,
                                                              [&](const TrackedTexture& tt) {
-                                                                 if (!tt.resource) return true;
+                                                                 if (!tt.resource) {
+                                                                     g_tracked_resources.erase(nullptr);
+                                                                     return true;
+                                                                 }
                                                                  tt.resource->AddRef();
                                                                  ULONG rc = tt.resource->Release();
                                                                  if (rc <= 1) {
+                                                                     g_tracked_resources.erase(tt.resource.get());
                                                                      sm_stale++;
                                                                      return true;
                                                                  }

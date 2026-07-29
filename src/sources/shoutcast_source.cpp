@@ -240,9 +240,13 @@ void ShoutcastSource::load_stations(const std::filesystem::path& path) {
     auto loaded = parse_stations_json(path);
     frdx::ScopedLock lk{mu_};
     stations_ = std::move(loaded);
+    // Rebuild station index for O(1) lookup by ID.
+    station_index_.clear();
+    station_index_.reserve(stations_.size());
     // Rebuild flat preset cache for cycle_preset().
     flat_presets_.clear();
     for (std::size_t i = 0; i < stations_.size(); ++i) {
+        station_index_[stations_[i].id] = i;
         for (std::size_t j = 0; j < stations_[i].streams.size(); ++j)
             flat_presets_.emplace_back(i, j);
     }
@@ -287,11 +291,9 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
 
         const StationPreset* station = nullptr;
         const StationStream* stream  = nullptr;
-        for (const auto& s : stations_) {
-            if (s.id == station_id) {
-                station = &s;
-                break;
-            }
+        auto sit = station_index_.find(station_id);
+        if (sit != station_index_.end()) {
+            station = &stations_[sit->second];
         }
         if (!station) {
             log::warn("[shoutcast] station '{}' not found", station_id);
@@ -389,11 +391,9 @@ void ShoutcastSource::select_station(const std::string& station_id, const std::s
                 info_.title  = station_name;
                 info_.artist = stream_name;
                 info_.is_placeholder = true;
-                for (const auto& st : stations_) {
-                    if (st.id == station_id) {
-                        info_.multi_stream = st.streams.size() > 1;
-                        break;
-                    }
+                auto msit = station_index_.find(station_id);
+                if (msit != station_index_.end()) {
+                    info_.multi_stream = stations_[msit->second].streams.size() > 1;
                 }
             }
             info_.artwork_url = artwork_url;
@@ -533,35 +533,34 @@ void ShoutcastSource::stop_stream_locked() {
 
 void ShoutcastSource::restore_station_display_locked() {
     if (active_station_id_.empty()) return;
-    for (const auto& st : stations_) {
-        if (st.id != active_station_id_) continue;
-        info_.title   = st.name;
-        display_name_ = st.name;
-        display_name_gen_.fetch_add(1, std::memory_order_release);
-        info_.artist.clear();
-        info_.artwork_url.clear();
-        info_.is_placeholder = true;
-        info_.multi_stream = st.streams.size() > 1;
-        for (const auto& str : st.streams) {
-            if (str.id == active_stream_id_) {
-                info_.artist = str.name;
-                info_.artwork_url = str.artwork_url;
-                break;
-            }
+    auto sit = station_index_.find(active_station_id_);
+    if (sit == station_index_.end()) return;
+    const auto& st = stations_[sit->second];
+    info_.title   = st.name;
+    display_name_ = st.name;
+    display_name_gen_.fetch_add(1, std::memory_order_release);
+    info_.artist.clear();
+    info_.artwork_url.clear();
+    info_.is_placeholder = true;
+    info_.multi_stream = st.streams.size() > 1;
+    for (const auto& str : st.streams) {
+        if (str.id == active_stream_id_) {
+            info_.artist = str.name;
+            info_.artwork_url = str.artwork_url;
+            break;
         }
-        if (st.metadata.type == "static") {
-            info_.title =
-                st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
-            info_.artist = st.metadata.static_artist;
-            metadata_epoch_has_track_ = true;
-        }
-        // Station logo fallback for any metadata type.
-        if (info_.artwork_url.empty())
-            info_.artwork_url = st.metadata.static_artwork_url;
-        clear_pending_metadata_locked();
-        info_gen_.fetch_add(1, std::memory_order_release);
-        return;
     }
+    if (st.metadata.type == "static") {
+        info_.title =
+            st.metadata.static_title.empty() ? st.name : st.metadata.static_title;
+        info_.artist = st.metadata.static_artist;
+        metadata_epoch_has_track_ = true;
+    }
+    // Station logo fallback for any metadata type.
+    if (info_.artwork_url.empty())
+        info_.artwork_url = st.metadata.static_artwork_url;
+    clear_pending_metadata_locked();
+    info_gen_.fetch_add(1, std::memory_order_release);
 }
 
 void ShoutcastSource::play() {
@@ -818,11 +817,9 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
     // station_logo_only: always use the station logo, ignore poller art.
     bool logo_only = false;
     if (!active_station_id_.empty()) {
-        for (const auto& st : stations_) {
-            if (st.id == active_station_id_) {
-                logo_only = st.metadata.station_logo_only;
-                break;
-            }
+        auto sit = station_index_.find(active_station_id_);
+        if (sit != station_index_.end()) {
+            logo_only = stations_[sit->second].metadata.station_logo_only;
         }
     }
     if (logo_only) {
@@ -854,14 +851,9 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
         }
     }
     if (info_.artwork_url.empty() && !active_station_id_.empty()) {
-        for (const auto& st : stations_) {
-            if (st.id == active_station_id_) {
-                info_.artwork_url = st.metadata.static_artwork_url;
-                // Use cover-fit crop (stretch=false) — same as album art.
-                // Only station_logo_only stations use stretch=true, and
-                // that's handled above.
-                break;
-            }
+        auto sit = station_index_.find(active_station_id_);
+        if (sit != station_index_.end()) {
+            info_.artwork_url = stations_[sit->second].metadata.static_artwork_url;
         }
     }
 
@@ -1014,8 +1006,9 @@ void ShoutcastSource::restart_metadata_for_current() {
     }
 
     const StationPreset* station = nullptr;
-    for (const auto& st : stations_) {
-        if (st.id == active_station_id_) { station = &st; break; }
+    auto sit = station_index_.find(active_station_id_);
+    if (sit != station_index_.end()) {
+        station = &stations_[sit->second];
     }
     if (!station) return;
 

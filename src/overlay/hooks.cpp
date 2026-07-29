@@ -283,19 +283,20 @@ static void shot_phase3_save_png(UINT64 fence_value) {
     for (UINT y = 0; y < g_shot_h; ++y) {
         const uint8_t* src = mapped + static_cast<size_t>(y) * g_shot_row_pitch;
         uint8_t* dst = pixels.data() + static_cast<size_t>(y) * g_shot_w * 4;
-        for (UINT x = 0; x < g_shot_w; ++x) {
-            const uint8_t* px = src + static_cast<size_t>(x) * 4;
-            if (bgra) {
-                dst[x * 4 + 0] = px[2];
-                dst[x * 4 + 1] = px[1];
-                dst[x * 4 + 2] = px[0];
-                dst[x * 4 + 3] = px[3];
-            } else {
-                dst[x * 4 + 0] = px[0];
-                dst[x * 4 + 1] = px[1];
-                dst[x * 4 + 2] = px[2];
-                dst[x * 4 + 3] = px[3];
+        if (bgra) {
+            // Swap R and B channels in-place per row, then copy.
+            // Process 4 bytes (one pixel) at a time.
+            for (UINT x = 0; x < g_shot_w; ++x) {
+                const uint8_t* px = src + static_cast<size_t>(x) * 4;
+                uint8_t* op = dst + static_cast<size_t>(x) * 4;
+                op[0] = px[2];
+                op[1] = px[1];
+                op[2] = px[0];
+                op[3] = px[3];
             }
+        } else {
+            // Already RGBA — straight copy per row.
+            std::memcpy(dst, src, static_cast<size_t>(g_shot_w) * 4);
         }
     }
     D3D12_RANGE written{0, 0};
