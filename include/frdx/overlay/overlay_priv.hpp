@@ -123,7 +123,33 @@ struct DxResources {
     // vertex data changes frame to frame) tear diagonally because the GPU
     // reads a buffer mid-overwrite. Static content is unaffected because
     // overwriting identical data is invisible.
-    std::vector<UINT64> frame_fence_ring;
+    //
+    // Fixed-capacity ring (no heap allocation per frame). D3D12 swap chains
+    // have at most a handful of back buffers; 8 is more than any config.
+    static constexpr size_t kFenceRingCap = 8;
+    UINT64 fence_ring_data[kFenceRingCap]{};
+    size_t fence_ring_head = 0;  // index of oldest entry
+    size_t fence_ring_count = 0;
+    size_t fence_ring_limit = 0; // set to fb_bufs.size() after init/resize
+
+    void fence_ring_push(UINT64 v) noexcept {
+        if (fence_ring_count < fence_ring_limit) {
+            const size_t idx = (fence_ring_head + fence_ring_count) % kFenceRingCap;
+            fence_ring_data[idx] = v;
+            ++fence_ring_count;
+        } else {
+            // Overwrite oldest: advance head, write at the freed slot.
+            fence_ring_data[fence_ring_head] = v;
+            fence_ring_head = (fence_ring_head + 1) % kFenceRingCap;
+        }
+    }
+    UINT64 fence_ring_oldest() const noexcept {
+        return fence_ring_count > 0 ? fence_ring_data[fence_ring_head] : 0;
+    }
+    void fence_ring_clear() noexcept {
+        fence_ring_head = 0;
+        fence_ring_count = 0;
+    }
     std::vector<wil::com_ptr<ID3D12Resource>> fb_bufs;
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> fb_rtvs;
 

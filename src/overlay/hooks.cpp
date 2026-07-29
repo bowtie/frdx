@@ -574,7 +574,8 @@ void post_resize(IDXGISwapChain* swapChain) {
     g_dx.fb_rtvs.resize(desc.BufferCount);
     // Buffer count may have changed (resize/recreate) — drop stale ring
     // entries so the ImGui-slot wait uses the new NumFramesInFlight.
-    g_dx.frame_fence_ring.clear();
+    g_dx.fence_ring_clear();
+    g_dx.fence_ring_limit = desc.BufferCount;
 
     for (UINT i = 0; i < desc.BufferCount; i++) {
         wil::com_ptr<ID3D12Resource> tmp;
@@ -1264,8 +1265,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // animated widgets (whose verts change frame to frame). Wait for the
         // GPU to finish the frame that last used the slot we're about to
         // reuse (the oldest in the ring, NumFramesInFlight frames ago).
-        if (g_dx.frame_fence_ring.size() >= g_dx.fb_bufs.size() && !g_dx.frame_fence_ring.empty()) {
-            const UINT64 slot_fence = g_dx.frame_fence_ring.front();
+        if (g_dx.fence_ring_count >= g_dx.fence_ring_limit && g_dx.fence_ring_count > 0) {
+            const UINT64 slot_fence = g_dx.fence_ring_oldest();
             if (slot_fence > 0) wait_for_fence(slot_fence);
         }
 
@@ -1305,10 +1306,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             // Record this frame's fence in the ring so the next
             // NumFramesInFlight-th frame can wait on it before reusing
             // its ImGui vertex/index buffer slot.
-            g_dx.frame_fence_ring.push_back(fence_value);
-            if (g_dx.frame_fence_ring.size() > g_dx.fb_bufs.size()) {
-                g_dx.frame_fence_ring.erase(g_dx.frame_fence_ring.begin());
-            }
+            g_dx.fence_ring_push(fence_value);
             // Phase 3: if readback copy was recorded this frame, map and save.
             if (g_shot_phase == 2) {
                 shot_phase3_save_png(fence_value);

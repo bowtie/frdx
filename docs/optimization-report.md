@@ -663,3 +663,84 @@ bugs found. Verified:
 One minor note: at line 1717, `sleep_for(1s)` is called while holding
 `mu_` on socket bind failure. Not a correctness bug — only blocks
 status()/update_config() for 1s on rare bind failures.
+
+## Round 12 — frame_fence_ring fixed-capacity ring + full codebase audit
+
+### 1. frame_fence_ring: eliminate per-frame vector erase(begin())
+
+**File:** `include/frdx/overlay/overlay_priv.hpp`, `src/overlay/hooks.cpp`
+
+The `frame_fence_ring` was a `std::vector<UINT64>` used as a FIFO queue:
+`push_back()` + `erase(begin())` every frame to track the fence values of
+the last `fb_bufs.size()` overlay frames. While the vector is small
+(2-3 entries for typical swap chains), `erase(begin())` performs an O(n)
+memmove and touches the vector's internal bookkeeping every frame.
+
+Replaced with a fixed-capacity ring (static array of 8 + head/count/limit
+indices) and inline `fence_ring_push`/`fence_ring_oldest`/`fence_ring_clear`
+methods. Zero heap allocation, zero memmove, branch-free push when full.
+
+### 2. Full codebase audit — all 36 source files reviewed
+
+Completed reading every source file in the project. The following files
+were reviewed for the first time in this round:
+
+- `src/fmod/dsp_control_loop.cpp` (lines 130-511) — control loop body,
+  staleness watchdog, audibility edge detection, metadata push. Clean:
+  proper SEH wrapping, throttled metadata refresh, 1-pole gain low-pass,
+  no allocations in the tick loop.
+- `src/fmod/metadata_injector.cpp` (175 lines) — SEH-wrapped string slot
+  writes, retired buffer limiter (static unique_virtual), SSO/heap
+  detection. Clean and well-structured.
+- `src/overlay/hooks.cpp` (lines 1-978, 1290-1602) — D3D12 init, font
+  loading, hook installation, screenshot capture, shutdown. Clean:
+  proper RAII (wil::com_ptr), allocator pool (32 slots), fence ring,
+  SEH-protected texture injection, correct cleanup ordering.
+- `src/bridge.cpp` (338 lines) — bridge entry point, helper launch,
+  config wiring. Clean: three-phase stream launch pattern, proper
+  thread join on exit.
+- `src/audio_source_manager.cpp` (46 lines) — atomic source swap,
+  ring drain. Clean.
+- `src/ring_buffer.cpp` (114 lines) — lock-free SPSC, pow2 mask,
+  drain_mu_ for drain/drop/read serialization. Clean.
+- `src/log.cpp` (101 lines) — thread-local timestamp cache, pre-reserved
+  line string, generation counter. Clean.
+- `src/texture_injector.cpp` (670 lines) — BC7 compression, disk cache,
+  job cancellation, prewarm. Clean: low-priority background threads,
+  RAII temp file cleanup, content-hash cache invalidation.
+- `src/fmod/game_state_probe.cpp` (133 lines) — pattern scanning,
+  SEH-protected reads, station retune. Clean.
+- `src/sources/shoutcast_source.cpp` (1282 lines) — full review of
+  stream lifecycle, three-phase launch, reconnect, metadata sync,
+  PCM pump. Clean: lock-free stream acquire, throttled ring fill,
+  quiet-gap detection with fast-path skip.
+- `src/sources/shoutcast_metadata.cpp` (967 lines) — WS/SSE/REST/ICY
+  pollers. Clean: proper stop_token handling, heartbeat management,
+  OOM guards on SSE/ICY buffers, connection retry logic.
+- `src/sources/mpg123_stream.cpp` (334 lines) — WinHTTP + mpg123 feed
+  loop. Clean: shared session, proper handle cleanup, 4-iteration cap.
+- `src/overlay/themes.cpp` (180 lines) — static theme definitions.
+  Clean: no allocations, ScaleAllSizes applied once on theme change.
+
+### Audit summary — already optimal (no changes needed)
+
+- **DSP control loop** — 50Hz tick, throttled metadata, 1-pole gain filter
+- **Metadata injector** — SEH-wrapped writes, retired buffer limiter
+- **D3D12 init/cleanup** — allocator pool, fence ring, proper RAII
+- **Screenshot capture** — two-frame GPU pipeline, staging texture reuse
+- **Shoutcast source** — three-phase lock pattern, lock-free stream acquire
+- **Metadata pollers** — network I/O bound, proper stop handling, OOM guards
+- **Mpg123 stream** — feed loop with iteration cap, shared WinHTTP session
+- **Texture injector** — background threads, job cancellation, disk cache
+- **Game state probe** — SEH-protected, 4Hz probe rate, pattern scanning
+- **Ring buffer** — lock-free SPSC, pow2 mask, drain mutex
+- **Log** — thread-local timestamp, pre-reserved string, generation counter
+- **Themes** — static definitions, no allocations
+
+### Dead code status
+
+- `WorkerClient::kill()` — declared, implemented, server handles "kill" op,
+  but no client code calls it. Left as IPC infrastructure (intentional).
+- `dualsense_external_helper_should_launch()` — defined + tested but not
+  called from production. Left in place (intentional).
+- No other dead functions or unused variables found.
