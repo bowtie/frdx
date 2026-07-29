@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <emmintrin.h>  // SSE2 — int16→float conversion in DSP callback
 
 namespace frdx::fmod_bridge {
 
@@ -351,6 +352,76 @@ void DSPBridge::detach() noexcept {
     detach_current_handle_locked();
 }
 
+// ── SSE2 int16→float conversion for the DSP hot loop ──
+// Processes 4 stereo frames (8 int16 samples) per iteration.
+// x64 guarantees SSE2 support. The scalar fallback handles the
+// remainder (0-3 frames) after the SIMD loop.
+//
+// Pattern: load 8×int16 → unpack low/high to two 4×int32 → cvtepi32_ps
+// → multiply by scale → store 8×float (interleaved L,R,L,R,...).
+inline void convert_s16_to_f32_stereo_sse2(const std::byte* src, float* dst,
+                                           float scale, uint32_t frames) noexcept {
+    const __m128 v_scale = _mm_set1_ps(scale);
+    const uint32_t simd_frames = frames & ~3u;  // 4-frame blocks
+    const auto* pcm = reinterpret_cast<const int16_t*>(src);
+
+    for (uint32_t f = 0; f < simd_frames; f += 4) {
+        // Load 8 int16 samples (4 stereo frames): L0,R0,L1,R1,L2,R2,L3,R3
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pcm + f * 2));
+        // Unpack low 4 int16 → 4 int32: L0,R0,L1,R1
+        __m128i lo = _mm_srai_epi32(_mm_unpacklo_epi16(v, v), 16);
+        // Unpack high 4 int16 → 4 int32: L2,R2,L3,R3
+        __m128i hi = _mm_srai_epi32(_mm_unpackhi_epi16(v, v), 16);
+        // Convert to float and scale
+        __m128 flo = _mm_mul_ps(_mm_cvtepi32_ps(lo), v_scale);
+        __m128 fhi = _mm_mul_ps(_mm_cvtepi32_ps(hi), v_scale);
+        // Store 8 floats (interleaved L,R,L,R,L,R,L,R)
+        _mm_storeu_ps(dst + f * 2, flo);
+        _mm_storeu_ps(dst + f * 2 + 4, fhi);
+    }
+
+    // Scalar remainder (0-3 frames)
+    for (uint32_t f = simd_frames; f < frames; ++f) {
+        const auto* frame = reinterpret_cast<const std::byte*>(pcm + f * 2);
+        dst[f * 2]     = load_s16(frame + 0) * scale;
+        dst[f * 2 + 1] = load_s16(frame + 2) * scale;
+    }
+}
+
+// Mono: load 8 int16 (4 frames), unpack, convert, downmix L+R, scale by 0.5.
+inline void convert_s16_to_f32_mono_sse2(const std::byte* src, float* dst,
+                                         float scale, uint32_t frames) noexcept {
+    const __m128 v_scale = _mm_set1_ps(scale * 0.5f);
+    const uint32_t simd_frames = frames & ~3u;
+    const auto* pcm = reinterpret_cast<const int16_t*>(src);
+
+    for (uint32_t f = 0; f < simd_frames; f += 4) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pcm + f * 2));
+        __m128i lo = _mm_srai_epi32(_mm_unpacklo_epi16(v, v), 16);
+        __m128i hi = _mm_srai_epi32(_mm_unpackhi_epi16(v, v), 16);
+        __m128 flo = _mm_cvtepi32_ps(lo);
+        __m128 fhi = _mm_cvtepi32_ps(hi);
+        // Deinterleave: even indices = L, odd = R.
+        // lo = [L0,R0,L1,R1], hi = [L2,R2,L3,R3]
+        // Shuffle to get L0,L1,L2,L3 and R0,R1,R2,R3
+        __m128 l_lo = _mm_shuffle_ps(flo, flo, _MM_SHUFFLE(2, 0, 2, 0));  // L0,L1,L0,L1
+        __m128 l_hi = _mm_shuffle_ps(fhi, fhi, _MM_SHUFFLE(2, 0, 2, 0));  // L2,L3,L2,L3
+        __m128 l = _mm_shuffle_ps(l_lo, l_hi, _MM_SHUFFLE(2, 0, 2, 0));   // L0,L1,L2,L3
+        __m128 r_lo = _mm_shuffle_ps(flo, flo, _MM_SHUFFLE(3, 1, 3, 1));  // R0,R1,R0,R1
+        __m128 r_hi = _mm_shuffle_ps(fhi, fhi, _MM_SHUFFLE(3, 1, 3, 1));  // R2,R3,R2,R3
+        __m128 r = _mm_shuffle_ps(r_lo, r_hi, _MM_SHUFFLE(2, 0, 2, 0));   // R0,R1,R2,R3
+        // Downmix: (L + R) * scale * 0.5
+        __m128 mono = _mm_mul_ps(_mm_add_ps(l, r), v_scale);
+        _mm_storeu_ps(dst + f, mono);
+    }
+
+    // Scalar remainder
+    for (uint32_t f = simd_frames; f < frames; ++f) {
+        const auto* frame = reinterpret_cast<const std::byte*>(pcm + f * 2);
+        dst[f] = (load_s16(frame + 0) + load_s16(frame + 2)) * scale * 0.5f;
+    }
+}
+
 // FMOD DSP read callback (mixer thread). Sources write 48 kHz S16 stereo
 // (mpg123 / miniaudio resample upstream), which is FMOD's master rate, so
 // the callback is a straight int16 -> float conversion with gain.
@@ -488,12 +559,9 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
                     o[1] = soft_clip(fr);
                 }
             } else {
-                for (uint32_t f = 0; f < got_frames; ++f) {
-                    const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
-                    float* o = out_buf + static_cast<std::size_t>(produced + f) * 2;
-                    o[0] = load_s16(frame + 0) * scale;
-                    o[1] = load_s16(frame + 2) * scale;
-                }
+                // SSE2 fast path: 4 frames per iteration (no clipping needed)
+                convert_s16_to_f32_stereo_sse2(
+                    pcm, out_buf + static_cast<std::size_t>(produced) * 2, scale, got_frames);
             }
             produced += got_frames;
             ring.consume(whole_frame_bytes);
@@ -538,12 +606,9 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
                         (soft_clip(fl) + soft_clip(fr)) * 0.5f;
                 }
             } else {
-                for (uint32_t f = 0; f < got_frames; ++f) {
-                    const auto* frame = pcm + static_cast<std::size_t>(f) * 4;
-                    const float fl = load_s16(frame + 0) * scale;
-                    const float fr = load_s16(frame + 2) * scale;
-                    out_buf[static_cast<std::size_t>(produced + f)] = (fl + fr) * 0.5f;
-                }
+                // SSE2 fast path: 4 frames per iteration (no clipping needed)
+                convert_s16_to_f32_mono_sse2(
+                    pcm, out_buf + static_cast<std::size_t>(produced), scale, got_frames);
             }
             produced += got_frames;
             ring.consume(whole_frame_bytes);
