@@ -578,3 +578,48 @@ All 36 source files have been run through clang-tidy with the project's
 Remaining warnings are intentional (e.g. `bugprone-branch-clone` in
 hooks.cpp scale-settle logic where both branches intentionally set
 `should_apply = true` for different reasons).
+
+## Round 10 — eliminate heap allocations in config serialization
+
+### 1. config.cpp — kv(int64_t) uses stack buffer instead of std::to_string
+
+**Before:** `std::to_string(v)` allocated a temporary `std::string` for
+every integer config value written.
+
+**After:** `std::snprintf(buf, sizeof(buf), "%lld", ...)` writes to a
+24-byte stack buffer — zero heap allocation.
+
+### 2. config.cpp — kv(double) uses string_view instead of std::string
+
+**Before:** `std::string text{buf}` allocated a string just to check for
+decimal/exponent and append to the output.
+
+**After:** `std::string_view text{buf}` — no allocation, and the `.0`
+suffix is appended directly to `out` when needed.
+
+## Comprehensive audit summary (Rounds 8-10)
+
+Beyond the specific fixes above, the following areas were audited and found
+already optimal:
+
+- **DSP bridge inner loops** — branch-hoisted mono/stereo paths, inline
+  `load_s16`/`soft_clip`, no allocations, chunked ring reads
+- **Ring buffer** — lock-free SPSC with proper memory ordering, pow2 mask
+- **Console rendering** — generation-gated refresh, precomputed filter
+  results, stack-buffer counter text, cached CalcTextSize
+- **Player bar** — combo cache rebuilt only on source change, animation
+  state cached, early-out when not visible
+- **Toasts** — early-out on alpha <= 0, no per-frame allocations
+- **Overlay alpha** — eased fade with cached state, early return when
+  alpha <= 0.01
+- **Texture injection** — background thread with low priority, job
+  cancellation via atomic job ID, BC7 via bc7enc
+- **Game state probe** — SEH-protected reads at 4Hz, not per-frame
+- **Control loop** — 50Hz tick rate, throttled metadata writes
+- **Config store** — generation counter skips per-frame deep copy
+- **Log emit** — thread-local timestamp cache, pre-reserved string,
+  generation counter for console refresh gating
+- **All config fields** — verified every OverlayConfig/DualSenseConfig/
+  FastBootConfig field is actively used in production code
+- **All header-declared functions** — verified no dead functions remain
+- **All 36 source files** — clang-tidy clean with project config
