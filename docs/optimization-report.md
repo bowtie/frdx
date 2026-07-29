@@ -623,3 +623,43 @@ already optimal:
   FastBootConfig field is actively used in production code
 - **All header-declared functions** — verified no dead functions remain
 - **All 36 source files** — clang-tidy clean with project config
+
+## Round 11 — player_bar.cpp include cleanup + DualSense correctness review
+
+### 1. player_bar.cpp — remove unused includes
+
+**Removed:** `<utility>` (no std::move/pair/swap), `<imgui_animated.h>`
+(no symbols referenced — `iam_eval_preset` comes from `<im_anim.h>`).
+
+### 2. DualSense correctness review
+
+Full review of `src/dualsense.cpp` (1807 lines) against the DualSense HID
+protocol specification and Forza Data Out packet format. No correctness
+bugs found. Verified:
+
+- **HID report layout:** USB report ID 0x02 (flags@1, right@11, left@22,
+  size 64) and Bluetooth report ID 0x31 (flags@2, right@12, left@23,
+  size 78) match the known DualSense output report format.
+- **Trigger flags:** 0x04|0x08 = 0x0C enables both L2/R2 trigger effects.
+- **Effect modes:** rigid=0x01, off=0x05, vibrate=0x06, rigid_zones=0x21,
+  vibrate_zones=0x26 — all match DualSense adaptive trigger opcodes.
+- **Zone packing:** 10 zones → 6 bytes via 3-bit values + 10-bit active
+  mask. Matches the DualSense zone-based trigger format.
+- **Bluetooth CRC:** CRC32 with polynomial 0xEDB88320, prefix 0xA2, over
+  74 bytes, final XOR 0xFFFFFFFF. Matches the BT report CRC spec.
+- **Forza Data Out parsing:** All field offsets verified against the
+  documented UDP packet format (is_race_on@0, engine_rpm@16,
+  tire_slip_ratio@84, wheel_rotation@100, surface_rumble@148,
+  tire_combined_slip@180, drivetrain@224, speed@256, accel@315,
+  brake@316, handbrake@318, gear@319).
+- **Driven wheels:** FWD→{0,1}, RWD→{2,3}, AWD→{0,1,2,3}. Correct.
+- **Wall hysteresis:** Separate engage/release thresholds. Correct.
+- **UDP packet draining:** Switches to non-blocking to drain stale
+  queued packets, keeping only the latest telemetry sample.
+- **Effect deduplication:** Only writes HID report when effect changes.
+- **Reconnect logic:** Respects enable_reconnect + reconnect_interval_s.
+- **Socket binding:** IPv6 dual-stack first, IPv4 fallback.
+
+One minor note: at line 1717, `sleep_for(1s)` is called while holding
+`mu_` on socket bind failure. Not a correctness bug — only blocks
+status()/update_config() for 1s on rare bind failures.
