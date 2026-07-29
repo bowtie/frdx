@@ -139,19 +139,6 @@ std::string WorkerClient::request(std::string_view json_msg) {
     return resp;
 }
 
-bool WorkerClient::kill(int id) noexcept {
-    nlohmann::json j;
-    j["op"] = "kill";
-    j["id"] = id;
-    auto resp = request(j.dump());
-    if (resp.empty()) return false;
-    try {
-        auto r = nlohmann::json::parse(resp);
-        return r.value("ok", false);
-    } catch (...) {}
-    return false;
-}
-
 bool WorkerClient::download(std::string_view url, std::string_view dest_path) {
     nlohmann::json j;
     j["op"] = "download";

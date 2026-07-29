@@ -3,15 +3,9 @@
 #include "frdx/log.hpp"
 #include "frdx/platform/windows/subprocess.hpp"
 
-#include <tlhelp32.h>
-
 #include <nlohmann/json.hpp>
 
-#include <atomic>
 #include <cstdio>
-#include <list>
-#include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -25,43 +19,7 @@ namespace frdx::helper {
 
 namespace {
 
-// ── Subprocess helpers ──
-
-struct Pipeline {
-    int id = 0;
-    std::vector<HANDLE> procs;
-    HANDLE job = nullptr;
-    std::wstring pcm_pipe_name;
-    HANDLE pcm_pipe = nullptr;
-    std::thread proxy;
-    std::unique_ptr<std::atomic<bool>> stopping;
-};
-
-std::mutex g_pipelines_mu;
-std::list<Pipeline> g_pipelines;
-std::atomic<int> g_next_id{1};
 HANDLE g_shutdown_event = nullptr;
-
-void kill_process_tree(DWORD pid) {
-    // Simple: terminate the process and its direct children.
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return;
-    PROCESSENTRY32W pe{};
-    pe.dwSize = sizeof(pe);
-    std::vector<DWORD> children;
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            if (pe.th32ParentProcessID == pid) children.push_back(pe.th32ProcessID);
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
-    for (DWORD child : children) {
-        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, child);
-        if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-    }
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-    if (h) { TerminateProcess(h, 1); CloseHandle(h); }
-}
 
 // ── HTTP download ──
 
@@ -210,28 +168,6 @@ bool http_download(std::string_view url, std::string_view dest_path) {
 
 // ── Request handlers ──
 
-std::string handle_kill(const nlohmann::json& req) {
-    int id = req.value("id", -1);
-    if (id < 0) return R"({"ok":false,"error":"invalid id"})";
-
-    std::scoped_lock lk{g_pipelines_mu};
-    for (auto it = g_pipelines.begin(); it != g_pipelines.end(); ++it) {
-        if (it->id == id) {
-            it->stopping->store(true);
-            for (HANDLE h : it->procs) {
-                DWORD pid = GetProcessId(h);
-                if (pid) kill_process_tree(pid);
-            }
-            if (it->proxy.joinable()) it->proxy.join();
-            for (HANDLE h : it->procs) CloseHandle(h);
-            if (it->job) CloseHandle(it->job);
-            g_pipelines.erase(it);
-            return R"({"ok":true})";
-        }
-    }
-    return R"({"ok":false,"error":"not found"})";
-}
-
 std::string handle_download(const nlohmann::json& req) {
     auto url = req.value("url", std::string{});
     auto dest = req.value("dest_path", std::string{});
@@ -274,8 +210,6 @@ void handle_connection(HANDLE pipe, [[maybe_unused]] std::string_view token) {
             CloseHandle(pipe);
             if (g_shutdown_event) SetEvent(g_shutdown_event);
             return;
-        } else if (op == "kill") {
-            response = handle_kill(req);
         } else if (op == "download") {
             response = handle_download(req);
         } else {
@@ -350,22 +284,6 @@ void run_worker_loop(const std::wstring& pipe_name, HANDLE shutdown_event,
         std::thread(handle_connection, pipe, std::string{token}).detach();
     }
     if (connect_ov.hEvent) CloseHandle(connect_ov.hEvent);
-
-    // Cleanup: kill all pipelines
-    {
-        std::scoped_lock lk{g_pipelines_mu};
-        for (auto& p : g_pipelines) {
-            p.stopping->store(true);
-            for (HANDLE h : p.procs) {
-                DWORD pid = GetProcessId(h);
-                if (pid) kill_process_tree(pid);
-            }
-            if (p.proxy.joinable()) p.proxy.join();
-            for (HANDLE h : p.procs) CloseHandle(h);
-            if (p.job) CloseHandle(p.job);
-        }
-        g_pipelines.clear();
-    }
 
     log::info("[worker] accept loop exiting");
 }

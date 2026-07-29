@@ -6,12 +6,9 @@
 // entire game process — critical for Wine/Proton performance.
 
 #include <cstdint>
-#include <filesystem>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 #include <windows.h>
 
 namespace frdx::helper {
@@ -45,9 +42,6 @@ public:
     bool is_running() const noexcept { return process_ != nullptr || external_; }
 
     // ── Worker operations ──
-
-    // Kill a pipeline by id.
-    bool kill(int id) noexcept;
 
     // Download a URL to a file path.
     bool download(std::string_view url, std::string_view dest_path);
