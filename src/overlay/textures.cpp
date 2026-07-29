@@ -13,7 +13,6 @@
 #include <cstring>
 #include <filesystem>
 #include <utility>
-#include <vector>
 
 #include <imgui.h>
 #include <imgui_freetype.h>

@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
-#include <fstream>
 #include <imgui.h>
 #include <imgui_impl_dx12.h>
 #include <imfilebrowser.h>

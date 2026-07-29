@@ -543,3 +543,38 @@ copy per frame.
 **Impact:** Removes a per-frame mutex lock + heap-allocating deep copy of
 the entire config struct in the render hot path. The atomic load is
 ~1ns vs the lock+copy which was ~100ns+ depending on string/vector sizes.
+
+## Round 9 — unused include removal + clang-tidy sweep completion
+
+### 1. overlay.cpp — remove 5 unused includes
+
+**Removed:** `<vector>`, `<filesystem>`, `<atomic>`, `<string_view>`,
+`<imgui_animated.h>`. None are referenced directly — all are pulled in
+transitively by the project headers that `overlay.cpp` includes.
+
+### 2. sandbox_main.cpp — remove 3 unused includes
+
+**Removed:** `<cstdio>`, `<thread>`, `<type_traits>`. No direct references
+to any symbols from these headers.
+
+### 3. textures.cpp — remove unused `<vector>`
+
+No `std::vector` or `vector` reference in the file.
+
+### 4. tex_hooks.cpp — remove unused `<unordered_map>`
+
+No `std::unordered_map` reference in the file. The file uses
+`std::unordered_set` (which remains included).
+
+### 5. settings.cpp — remove unused `<fstream>`
+
+No `std::ifstream`, `std::ofstream`, or `std::fstream` reference. File
+browser uses `std::filesystem::path` (via `<filesystem>`, which stays).
+
+### 6. clang-tidy sweep complete
+
+All 36 source files have been run through clang-tidy with the project's
+`.clang-tidy` config (bugprone-*, cert-*, clang-analyzer-*, performance-*).
+Remaining warnings are intentional (e.g. `bugprone-branch-clone` in
+hooks.cpp scale-settle logic where both branches intentionally set
+`should_apply = true` for different reasons).

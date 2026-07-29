@@ -10,18 +10,13 @@
 #include "frdx/log.hpp"
 
 #include <windows.h>
-#include <vector>
 #include <string>
 #include <mutex>
-#include <filesystem>
 #include <algorithm>
 #include <functional>
 #include <thread>
-#include <atomic>
-#include <string_view>
 
 #include <imgui.h>
-#include <imgui_animated.h>
 
 namespace frdx::overlay {
 using namespace frdx;
