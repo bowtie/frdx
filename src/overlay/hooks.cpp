@@ -387,7 +387,23 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     // Suppress focus-loss messages so the game doesn't auto-pause on alt-tab.
     // We rewrite WM_ACTIVATE(ACTIVATE_INACTIVE) → ACTIVATE_ACTIVE and swallow
     // WM_ACTIVATEAPP / WM_KILLFOCUS / WM_SETFOCUS entirely.
-    if (g_ctx.store && g_ctx.store->snapshot().overlay.prevent_focus_loss_pause) {
+    // Cache the config flag — Windows sends hundreds of messages per second
+    // (mouse move, key repeat, paint), and snapshot() takes a mutex lock +
+    // copies the entire Config struct each time.
+    static std::atomic<bool> s_prevent_focus_pause{false};
+    static bool s_cfg_hooked = false;
+    if (!s_cfg_hooked && g_ctx.store) {
+        s_cfg_hooked = true;
+        s_prevent_focus_pause.store(
+            g_ctx.store->snapshot().overlay.prevent_focus_loss_pause,
+            std::memory_order_release);
+        // Re-sync when the config changes (user toggles the setting).
+        g_ctx.store->on_change([](const Config& c) {
+            s_prevent_focus_pause.store(c.overlay.prevent_focus_loss_pause,
+                                        std::memory_order_release);
+        });
+    }
+    if (s_prevent_focus_pause.load(std::memory_order_acquire)) {
         if (uMsg == WM_ACTIVATE) {
             // Force the activation state to "active" regardless of what happened.
             wParam = MAKELONG(WA_ACTIVE, 0);

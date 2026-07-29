@@ -144,3 +144,102 @@ the metadata generation counter. No improvement needed.
   dualsense_config_self_test, dualsense_settings_coverage_test).
 - **Sandbox:** `frdx_sandbox.exe` launches and renders for 5+ seconds
   without crashing (timeout-terminated smoke test).
+
+## Round 2
+
+Date: 2026-07-29
+
+Four additional optimizations applied across the overlay console, settings,
+and window message handling subsystems. All changes are performance
+improvements with no behavioral changes. Build succeeds, all tests pass,
+sandbox launches and renders without crashing.
+
+### 6. console.cpp — Precompute filter results + skip string allocation
+
+**Before:** The console display loop called `passes_filter()` twice per line
+per frame — once in the shown-count pre-count loop and again in the display
+loop. For 500 lines that's 1000 calls/frame. Additionally, every visible line
+constructed a `std::string displayed` with `reserve + append`, even when
+`count == 1` (no suffix needed), causing a heap allocation per line per frame.
+
+**After:**
+- Precompute filter results into a `std::vector<char>` once per frame, then
+  reuse it for both the shown-count loop and the display loop. Halves the
+  filter call count.
+- When `count == 1`, call `ImGui::TextUnformatted(line.c_str(), line.c_str() + line.size())`
+  directly with zero heap allocation. Only build the suffixed string when
+  `count > 1` (dedup collapsed duplicates).
+- `copy_visible_to_clipboard` also uses the precomputed filter results instead
+  of re-calling `passes_filter`.
+
+**Impact:** Eliminates ~500 redundant filter calls/frame and ~500 heap
+allocations/frame in the common case (no dedup or all-unique lines). The
+filter check involves a mutex-guarded subsystem visibility lookup and a
+substring search, so halving the call count is meaningful at high log volume.
+
+**Files changed:** `src/overlay/console.cpp`
+
+### 7. settings.cpp — Use per-frame cached config instead of snapshot()
+
+**Before:** `draw_audio_settings_tab()` and `draw_display_settings_tab()`
+each called `g_ctx.store->snapshot()` every frame while the settings panel
+was open. `snapshot()` takes a mutex lock and copies the entire `Config`
+struct, which includes `DualSenseConfig` (~30 fields with strings), even
+though these tabs only read `OverlayConfig` fields.
+
+**After:** Both functions now read from `g_ctx.frame_overlay_cfg`, which is
+already cached once per frame at the top of `render_overlay_frame()` in
+hooks.cpp. This avoids the mutex lock and full Config copy.
+
+**Impact:** Eliminates 2 mutex lock + full-Config-copy operations per frame
+while the settings panel is open. The DualSense tab still uses `snapshot()`
+since it needs `DualSenseConfig` which isn't in the per-frame cache.
+
+**Files changed:** `src/overlay/settings.cpp`
+
+### 8. hooks.cpp — Cache prevent_focus_loss_pause in wnd_proc_hook
+
+**Before:** `wnd_proc_hook` called `g_ctx.store->snapshot().overlay.prevent_focus_loss_pause`
+on every incoming Windows message. Windows sends hundreds of messages per
+second (mouse move, key repeat, paint, timer), and each call takes a mutex
+lock and copies the entire `Config` struct just to read one boolean.
+
+**After:** The flag is cached in a `static std::atomic<bool>` initialized
+once on the first wnd_proc call, then updated via a `ConfigStore::on_change`
+observer callback when the user toggles the setting. The per-message path
+is now a single atomic load — no mutex, no copy.
+
+**Impact:** Eliminates hundreds of mutex lock + full-Config-copy operations
+per second on the Windows message thread. This is the highest-frequency
+`snapshot()` call in the codebase.
+
+**Files changed:** `src/overlay/hooks.cpp`
+
+## Round 2 — Files Reviewed but No Changes Needed
+
+- `src/fmod/game_state_probe.cpp` — Minimal work per tick (handful of
+  `safe_read` calls). Already optimal.
+- `src/sources/mpg123_stream.cpp` — Clean HTTP→feed→decode loop with 64KB
+  buffer. No hot-path waste.
+- `src/fmod/dsp_control_loop.cpp` — Runs at 50Hz with proper throttling of
+  discovery/metadata. Already well-structured.
+- `src/overlay/toasts.cpp` — Toast list is capped at 4 entries; iteration
+  is trivial. No optimization needed.
+- `src/overlay/themes.cpp` — Only runs on theme switch, not per-frame.
+- `src/overlay/player_bar.cpp` — Already uses cached combo data and
+  `frame_overlay_cfg`/`frame_audio_cfg`. No snapshot() calls.
+- `src/overlay/overlay.cpp` — Track info caching with generation check is
+  already effective. No improvement needed.
+- `src/overlay/textures.cpp` — Blur pipeline is GPU-bound; CPU-side setup
+  is minimal. Font loading is init-only.
+- `src/overlay/tex_hooks.cpp` — Already optimized in Round 1 with O(1)
+  set lookup. Fast-path tiered checks are well-structured.
+- `src/log.cpp` — Timestamp caching already present. `recent_lines()` only
+  called on generation change, not per-frame.
+- `src/config_store.cpp` — `snapshot()` is the hot path, but it's a simple
+  lock+copy. The optimization is in reducing call sites (done above).
+- `src/bridge.cpp` — Startup-only code. No per-frame work.
+- `src/audio_source_manager.cpp` — Minimal: one atomic load + one virtual
+  call per pump. Already optimal.
+- `src/sources/shoutcast_metadata.cpp` — Background poller threads with
+  proper sleep intervals. No per-frame work.

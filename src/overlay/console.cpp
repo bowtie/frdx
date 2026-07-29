@@ -216,9 +216,17 @@ void draw_console_window() {
         // the right-click "Copy visible" label — uses passes_filter so
         // subsystem + text-search mutes out properly.
         const size_t total_lines = g_ui.console_lines.size();
-        size_t shown_count      = 0;
-        for (size_t i = 0; i < g_ui.console_lines.size(); ++i) {
-            if (passes_filter(i)) ++shown_count;
+        // Precompute filter results once per frame — passes_filter is used
+        // again in the display loop below, so this halves the call count for
+        // large buffers (500 lines → 500 calls instead of 1000).
+        static std::vector<char> filter_results;
+        filter_results.assign(total_lines, 0);
+        size_t shown_count = 0;
+        for (size_t i = 0; i < total_lines; ++i) {
+            if (passes_filter(i)) {
+                filter_results[i] = 1;
+                ++shown_count;
+            }
         }
 
         // Compute subsystem-popup label state once per frame so we don't
@@ -380,11 +388,12 @@ void draw_console_window() {
             std::string joined;
             size_t capacity = 0;
             for (size_t i = 0; i < g_ui.console_lines.size(); ++i) {
-                if (passes_filter(i)) capacity += g_ui.console_lines[i].size() + 1;
+                if (i < filter_results.size() && filter_results[i])
+                    capacity += g_ui.console_lines[i].size() + 1;
             }
             joined.reserve(capacity);
             for (size_t i = 0; i < g_ui.console_lines.size(); ++i) {
-                if (!passes_filter(i)) continue;
+                if (i >= filter_results.size() || !filter_results[i]) continue;
                 joined += g_ui.console_lines[i];
                 joined += '\n';
             }
@@ -426,7 +435,7 @@ void draw_console_window() {
         const bool stick_to_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
         const float wrap_width = ImGui::GetContentRegionAvail().x;
         for (size_t line_idx = 0; line_idx < g_ui.console_lines.size(); ++line_idx) {
-            if (!passes_filter(line_idx)) continue;
+            if (line_idx >= filter_results.size() || !filter_results[line_idx]) continue;
             const ConsoleLineKind kind = line_idx < g_ui.console_line_kinds.size()
                                            ? g_ui.console_line_kinds[line_idx]
                                            : ConsoleLineKind::normal;
@@ -434,18 +443,23 @@ void draw_console_window() {
             const size_t count = line_idx < g_ui.console_line_counts.size()
                                    ? g_ui.console_line_counts[line_idx]
                                    : 1u;
-            std::string displayed;
-            displayed.reserve(line.size() + 12);
-            displayed.append(line);
-            if (count > 1) {
-                displayed.append(" (×");
-                displayed.append(std::to_string(count));
-                displayed.push_back(')');
-            }
             ImGui::PushID(static_cast<int>(line_idx));
             ImGui::PushStyleColor(ImGuiCol_Text, console_line_color(kind));
             ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + wrap_width);
-            ImGui::TextUnformatted(displayed.c_str(), nullptr);
+            if (count > 1) {
+                // Only build the suffixed string when we actually need it
+                // (dedup collapsed duplicates).  The common case (count==1)
+                // renders the line directly with zero heap allocation.
+                char suffix[16];
+                std::snprintf(suffix, sizeof(suffix), " (\xC3\x97%zu)", count);
+                std::string displayed;
+                displayed.reserve(line.size() + 16);
+                displayed.append(line);
+                displayed.append(suffix);
+                ImGui::TextUnformatted(displayed.c_str(), nullptr);
+            } else {
+                ImGui::TextUnformatted(line.c_str(), line.c_str() + line.size());
+            }
             ImGui::PopTextWrapPos();
             ImGui::PopStyleColor();
 
