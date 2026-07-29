@@ -68,7 +68,6 @@ private:
     std::unique_ptr<std::byte[]> data_;
     alignas(64) std::atomic<std::size_t> write_pos_{0};
     alignas(64) std::atomic<std::size_t> read_pos_{0};
-    alignas(64) std::atomic<bool> hold_{false};
 
     // Serializes drain()/drop() (called from control/UI threads) with the
     // consumer's read()/consume() (FMOD mixer thread).  The producer's

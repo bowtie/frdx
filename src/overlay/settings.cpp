@@ -629,8 +629,7 @@ void draw_settings_window(const PlayerBarLayout& layout) {
             if (ImGui::BeginTabBar("##settings_tabs")) {
                 if (ImGui::BeginTabItem("DualSense")) {
                     ImGui::PushItemWidth(180.0f * g_ui.ui_scale);
-                    const auto cfg = g_ctx.store->snapshot();
-                    draw_dualsense_settings(cfg.dualsense);
+                    draw_dualsense_settings(g_ctx.frame_dualsense_cfg);
                     ImGui::PopItemWidth();
                     ImGui::EndTabItem();
                 }

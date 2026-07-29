@@ -1185,6 +1185,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             auto snap = g_ctx.store->snapshot();
             g_ctx.frame_overlay_cfg = std::move(snap.overlay);
             g_ctx.frame_audio_cfg   = snap.audio;  // AudioConfig is trivially copyable — move is a no-op
+            g_ctx.frame_dualsense_cfg = std::move(snap.dualsense);
         }
 
         // Dual-Kawase backdrop blur: capture the freshly-rendered backbuffer

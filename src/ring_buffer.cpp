@@ -19,7 +19,6 @@ RingBuffer::RingBuffer(std::size_t capacity_bytes)
       data_{std::make_unique<std::byte[]>(capacity_)} {}
 
 std::size_t RingBuffer::readable() const noexcept {
-    if (hold_.load(std::memory_order_acquire)) return 0;
     return write_pos_.load(std::memory_order_acquire) - read_pos_.load(std::memory_order_acquire);
 }
 
@@ -56,7 +55,6 @@ std::size_t RingBuffer::write_partial(const void* src, std::size_t n) noexcept {
 
 std::size_t RingBuffer::read(void* dst, std::size_t n) noexcept {
     if (!dst || n == 0) return 0;
-    if (hold_.load(std::memory_order_acquire)) return 0;
 
     std::scoped_lock lk{drain_mu_};
     const auto r     = read_pos_.load(std::memory_order_relaxed);
@@ -76,7 +74,6 @@ std::size_t RingBuffer::read(void* dst, std::size_t n) noexcept {
 
 std::span<const std::byte> RingBuffer::readable_span(std::size_t n) const noexcept {
     if (n == 0) return {};
-    if (hold_.load(std::memory_order_acquire)) return {};
 
     const auto r     = read_pos_.load(std::memory_order_relaxed);
     const auto w     = write_pos_.load(std::memory_order_acquire);

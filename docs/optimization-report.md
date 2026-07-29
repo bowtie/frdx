@@ -413,3 +413,27 @@ and sandbox launching successfully (exit 124).
 - Unused annotation macros (`FRDX_PT_GUARDED_BY`, `FRDX_ACQUIRED_BEFORE`,
   `FRDX_ACQUIRED_AFTER`, `FRDX_ACQUIRE_SHARED`, `FRDX_RELEASE_SHARED`) in
   thread_annotations.hpp — utility macros, left for potential future use.
+
+## Round 6 — DualSense config cache + dead hold_ atomic
+
+### Performance: eliminate per-frame snapshot() in DualSense settings tab
+
+The DualSense settings tab called `g_ctx.store->snapshot()` every frame
+when the tab was visible, doing a full mutex lock + Config copy (including
+DualSenseConfig with ~40 fields + a std::string). Added `frame_dualsense_cfg`
+to the per-frame config cache in `ExternalCtx`, refreshed once alongside
+the existing `frame_overlay_cfg` and `frame_audio_cfg` in `render_overlay_frame`.
+The settings tab now reads from the cached copy, eliminating the redundant
+lock+copy.
+
+**Files changed:** `overlay_priv.hpp`, `hooks.cpp`, `settings.cpp`
+
+### Dead code: remove unused hold_ atomic from RingBuffer
+
+The `hold_` atomic bool in RingBuffer was checked in `readable()`, `read()`,
+and `readable_span()` on every audio-thread call, but was never set to `true`
+— the `set_hold()` method that controlled it was removed in Round 5. Removed
+the field and all three checks, eliminating a dead atomic load from the FMOD
+mixer hot path.
+
+**Files changed:** `ring_buffer.hpp`, `ring_buffer.cpp`
