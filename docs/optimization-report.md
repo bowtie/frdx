@@ -922,3 +922,60 @@ was confirmed in use.
 removes confusion about whether pipeline kill is a live feature.
 
 **Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
+
+---
+
+## Round 17 — pop_pending_pixels move optimization + hot-path audit (commit 90acfb4)
+
+### Optimization: Eliminate one BC7 variant vector copy in pop_pending_pixels
+
+**File:** `src/texture_injector.cpp`
+
+`pop_pending_pixels()` previously did two deep copies of the BC7 variant
+vector (which can be several KB for a 196×196 BC7 texture):
+1. `out_variants = pending_variants_` (copy to caller)
+2. `last_variants_ = pending_variants_` (copy to reinject cache)
+
+Replaced with move-then-copy:
+1. `last_variants_ = std::move(pending_variants_)` (move to cache — pending_variants_ is not read again until repopulated via move)
+2. `out_variants = last_variants_` (copy to caller — last_variants_ must survive for reinject_last())
+
+This eliminates one vector copy per artwork injection. The `pending_variants_`
+vector is only repopulated by `process_artwork` or cache-hit via move assignment,
+so moving out of it between pop and repopulation is safe.
+
+### Hot-path audit findings (no changes needed)
+
+A comprehensive audit of all per-frame and per-tick code paths confirmed they
+are already well-optimized:
+
+- **DSP read callback** (`dsp_bridge.cpp:480-625`): SSE2 SIMD for no-clip paths,
+  zero-copy span access, drift correction, no heap allocation
+- **Ring buffer** (`ring_buffer.cpp`): SPSC, power-of-2 masking, cache-line
+  aligned atomics, no per-frame allocation
+- **Shoutcast pump** (`shoutcast_source.cpp:1072-1280`): stack-allocated PCM
+  buffer, throttled ring writes, no per-frame heap allocation
+- **observe_pcm_for_metadata_sync**: fast-path early return when no pending
+  metadata (common case), peak-amplitude scan only during track transitions
+- **Control loop** (`dsp_control_loop.cpp:80-334`): 20ms tick, metadata
+  throttled to 4Hz, gain low-pass filter, no per-tick allocation
+- **Texture injection** (`tex_hooks.cpp:670-905`): two-tier fast path (zero
+  overhead when no work), fingerprinting throttled to 5Hz, tight lock scopes
+- **Overlay render** (`overlay.cpp:306-441`, `hooks.cpp:1180-1270`): config
+  snapshot cached by generation, static track-info caching, preloaded fonts,
+  fence ring avoids per-frame waits
+- **Console refresh** (`console.cpp:130-189`): only runs on log generation
+  change, not per-frame
+- **MetadataInjector** (`metadata_injector.cpp`): dedup via last_title_/last_artist_,
+  in-place overwrite when possible, RAII buffer management, single-buffer retire
+- **GameStateProbe::read()**: SEH-safe pointer chain walk, SSO-likely string
+  return (short station names), runs at 4Hz not per-frame
+- **Fence ring** (`overlay_priv.hpp:138-155`): fixed-capacity stack array,
+  no heap allocation, power-of-2 modulus optimizes to bitmask
+- **Toasts** (`toasts.cpp`): deque capped at 4, no per-frame allocation
+
+**Impact:** One fewer vector copy per artwork injection. The hot-path audit
+confirms the rendering and audio paths are already well-optimized — no further
+allocation elimination opportunities were found in the per-frame paths.
+
+**Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
