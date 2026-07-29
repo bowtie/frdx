@@ -530,6 +530,11 @@ static float compute_ui_scale(UINT sc_height) {
         scale = std::min(dpi_scale, res_factor);
     else
         scale = std::max(dpi_scale, res_factor);
+    // Sandbox: the window size is arbitrary (not the real game resolution),
+    // so don't let it push the scale below 1.0 — the overlay should always
+    // render at a readable size in the dev tool.
+    if (g_ctx.is_sandbox)
+        scale = std::max(scale, 1.0f);
     return std::clamp(scale, 0.50f, 3.0f);
 }
 

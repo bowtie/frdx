@@ -791,6 +791,7 @@ bool ShoutcastSource::queue_timed_metadata_locked(TrackInfo info, int64_t now_ms
     quiet_started_ms_    = 0;
     pending_info_epoch_  = metadata_epoch;
     pending_info_valid_  = true;
+    has_pending_metadata_.store(true, std::memory_order_release);
     // Don't apply immediately even if there's no track yet — the station
     // logo grace period in observe_pcm_for_metadata_sync() will hold it
     // for a few seconds so the user can see what station they tuned into.
@@ -809,8 +810,7 @@ void ShoutcastSource::apply_pending_metadata_locked(const char* reason) {
     quiet_started_ms_ = 0;
     pending_info_epoch_ = 0;
     pending_info_valid_ = false;
-
-    // Station logo fallback: if the poller didn't provide artwork, use
+    has_pending_metadata_.store(false, std::memory_order_release);
     // the station's cover_url (static_artwork_url) so the texture
     // injector still has something to display.
     //
@@ -869,6 +869,7 @@ void ShoutcastSource::clear_pending_metadata_locked() {
     quiet_started_ms_ = 0;
     pending_info_epoch_ = 0;
     pending_info_valid_ = false;
+    has_pending_metadata_.store(false, std::memory_order_release);
 }
 
 uint64_t ShoutcastSource::reset_metadata_sync_locked() {
@@ -915,6 +916,17 @@ void ShoutcastSource::observe_pcm_for_metadata_sync(const int16_t* samples,
     // on-screen for at least this long before the first track metadata
     // overwrites it, so the user can see what station they tuned into.
     const int64_t kStationGracePeriodMs = grace_period_ms_.load(std::memory_order_acquire);
+
+    // Fast path: if no metadata is pending (the common case — music playing,
+    // no track change queued), skip the peak-amplitude scan entirely.
+    // has_pending_metadata_ is a lock-free mirror of pending_info_valid_
+    // that is written under mu_ in the metadata queue/clear/apply paths.
+    if (!has_pending_metadata_.load(std::memory_order_acquire)) {
+        // Still need to reset quiet_started_ms_ if the epoch changed, but
+        // only if it was non-zero (rare).  Avoid taking the lock in the
+        // overwhelmingly common case by just returning.
+        return;
+    }
 
     // Compute peak amplitude across the buffer.  If the peak is below the
     // silence threshold, the audio is effectively silent.

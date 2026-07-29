@@ -253,6 +253,11 @@ private:
     int64_t quiet_started_ms_        FRDX_GUARDED_BY(mu_) = 0;
     uint64_t pending_info_epoch_     FRDX_GUARDED_BY(mu_) = 0;
     bool pending_info_valid_         FRDX_GUARDED_BY(mu_) = false;
+    // Lock-free mirror of pending_info_valid_ so observe_pcm_for_metadata_sync
+    // can skip the peak-amplitude scan when no metadata is pending (the common
+    // case — music playing, no track change queued).  Written under mu_ alongside
+    // pending_info_valid_; read lock-free in the PCM pump path.
+    std::atomic<bool> has_pending_metadata_{false};
     bool metadata_epoch_has_track_   FRDX_GUARDED_BY(mu_) = false;
     // Timestamp of the last station selection (select_station / cycle_preset).
     // Used to hold the station logo on-screen for a grace period before

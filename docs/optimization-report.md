@@ -243,3 +243,67 @@ per second on the Windows message thread. This is the highest-frequency
   call per pump. Already optimal.
 - `src/sources/shoutcast_metadata.cpp` — Background poller threads with
   proper sleep intervals. No per-frame work.
+
+## Round 3
+
+### 7. shoutcast_source.cpp — Skip peak-amplitude scan when no metadata pending
+
+**Before:** `observe_pcm_for_metadata_sync` computed the peak amplitude across
+every PCM buffer (a full linear scan of all samples) before checking whether
+there was any pending metadata to apply. In the common case — music playing
+with no track change queued — the peak scan was pure wasted work on every PCM
+chunk read from the network stream.
+
+**After:** Added a lock-free `std::atomic<bool> has_pending_metadata_` mirror
+of `pending_info_valid_`. It's written under `mu_` in
+`queue_pending_metadata_locked`, `clear_pending_metadata_locked`, and
+`apply_pending_metadata_locked`, and read lock-free at the top of
+`observe_pcm_for_metadata_sync`. When false (the common case), the function
+returns immediately without scanning any samples or taking the mutex.
+
+**Files changed:**
+- `include/frdx/sources/shoutcast_source.hpp` — added `has_pending_metadata_` atomic
+- `src/sources/shoutcast_source.cpp` — set/clear the atomic alongside
+  `pending_info_valid_`; added early-return guard in `observe_pcm_for_metadata_sync`
+
+### 8. hooks.cpp — Sandbox UI scale minimum clamp (bug fix)
+
+**Bug:** In the sandbox, the window is 1300x760 → backbuffer 1284x721.
+`compute_ui_scale` computed `res_factor = 721/1080 = 0.668`, which in modern
+font mode produced `FontScaleMain=0.67x`, rendering the 16px base font at
+~10.7px — far too small to read. The sandbox window size is arbitrary and
+doesn't represent the real game resolution.
+
+**Fix:** Added a `g_ctx.is_sandbox` check in `compute_ui_scale` that clamps
+the scale to at least 1.0, so the overlay always renders at a readable size
+in the dev tool. The real game is unaffected.
+
+**Files changed:**
+- `src/overlay/hooks.cpp` — added sandbox minimum scale clamp in `compute_ui_scale`
+
+### Files Reviewed in Round 3 (no changes needed)
+
+- `src/helper/worker_server.cpp` — IPC server, only handles download/kill
+  requests on demand. No per-frame work. Well-structured accept loop with
+  overlapped I/O.
+- `src/proxy/dll_main.cpp` — DLL entry point. Init-only + crash handler.
+  No per-frame work.
+- `src/sandbox_main.cpp` — Sandbox entry point. Init/teardown only.
+  Well-structured typestate teardown guard.
+- `src/subprocess.cpp` — 23-line utility file (narrow/widen). No optimization
+  needed.
+- `src/overlay/textures.cpp` (lines 1-600) — Font loading is init-only.
+  Background texture upload is init-only. `blur_strength_table()` is already
+  a Meyer's singleton (built once, cached). Blur PSO/root-signature creation
+  is init-only. `capture_and_blur_backbuffer` already has early-exit when blur
+  is disabled or no blur window is visible.
+- `src/overlay/hooks.cpp` `render_overlay_frame` — Single per-frame
+  `snapshot()` call is the necessary config cache. Allocator pool scan is
+  O(8) with early break. `frame_fence_ring` vector erase is trivial (2-3
+  elements). No optimization needed.
+- `src/overlay/overlay.cpp` `draw_imgui_ui_impl` — Track info caching with
+  generation check already effective. Early returns when UI is hidden.
+  `should_draw_imgui_cursor()` is a trivial `return false`.
+- `src/overlay/settings.cpp` — All remaining `snapshot()` calls are either
+  in the DualSense tab (off-limits) or init-time. Audio/Display tabs already
+  use `frame_overlay_cfg` from Round 2.
