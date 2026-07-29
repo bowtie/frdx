@@ -807,9 +807,7 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // is behind by even one frame, the allocator for the current
     // backbuffer index isn't ready and we'd have to block or skip.
     // A pool of 8 gives the GPU plenty of room to lag without stalling.
-    const size_t pool_size = std::max(static_cast<size_t>(desc.BufferCount),
-                                      DxResources::kAllocatorPoolSize);
-    g_dx.allocators.resize(pool_size);
+    const size_t pool_size = DxResources::kAllocatorPoolSize;
     g_dx.allocator_fence_values.fill(0);
     for (size_t i = 0; i < pool_size; i++) {
         if (FAILED(g_dx.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -962,7 +960,7 @@ void cleanup_imgui_resources() {
         g_dx.fence_event = nullptr;
     }
     g_dx.fence.reset();
-    g_dx.allocators.clear();
+    for (auto& a : g_dx.allocators) a.reset();
     g_dx.allocator_fence_values.fill(0);
     g_ui.bg_texture.reset();
     g_ui.bg_texture_id     = 0;
@@ -1144,7 +1142,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // rare), skip this overlay frame rather than blocking.
         size_t alloc_idx = SIZE_MAX;
         const UINT64 gpu_completed = g_dx.fence ? g_dx.fence->GetCompletedValue() : 0;
-        for (size_t i = 0; i < g_dx.allocators.size(); i++) {
+        for (size_t i = 0; i < DxResources::kAllocatorPoolSize; i++) {
             if (g_dx.allocator_fence_values[i] == 0 ||
                 gpu_completed >= g_dx.allocator_fence_values[i]) {
                 alloc_idx = i;

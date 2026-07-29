@@ -110,10 +110,10 @@ struct DxResources {
     // A larger pool (32) is used because frame generation can double the
     // Present rate, increasing the number of in-flight overlay frames.
     static constexpr size_t kAllocatorPoolSize = 32;
-    std::vector<wil::com_ptr<ID3D12CommandAllocator>> allocators;
     // Fixed array — pool size is always kAllocatorPoolSize (32) at runtime
     // (BufferCount is always smaller), so no need for dynamic allocation.
     // Contiguous memory improves cache locality during the per-frame scan.
+    std::array<wil::com_ptr<ID3D12CommandAllocator>, kAllocatorPoolSize> allocators;
     std::array<UINT64, kAllocatorPoolSize> allocator_fence_values{};
     // Ring of the fence values signaled at the end of the last
     // fb_bufs.size() (== ImGui NumFramesInFlight) overlay frames. ImGui's
