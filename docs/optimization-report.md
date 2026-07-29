@@ -801,3 +801,50 @@ Re-scanned all 36 source files for remaining optimization opportunities:
 
 No further optimization opportunities found. The codebase is comprehensively
 optimized across 13 rounds of work.
+
+---
+
+## Round 14 (commit c99f6b2)
+
+### 1. SSE2 SIMD int16→float conversion in DSP read_callback
+
+**File:** `src/fmod/dsp_bridge.cpp`
+
+**Before:** The DSP read_callback's inner loop processed one stereo frame
+per iteration: load 2×int16, multiply by float scale, store 2×float. This
+runs on FMOD's audio mixer thread at 48kHz, processing ~1024 frames per
+callback invocation (~21ms of audio). The loop was scalar — while MSVC's
+`/O2` auto-vectorizer might partially vectorize it, the `load_s16` helper
+(uses `memcpy`) and pointer arithmetic made auto-vectorization unreliable.
+
+**After:** Added two SSE2 inline helpers for the no-clip paths (the common
+case — gain ≤ 1.0, which is the default and the only path that matters for
+normal listening):
+
+- `convert_s16_to_f32_stereo_sse2`: Loads 8 int16 samples (4 stereo frames)
+  per iteration via `_mm_loadu_si128`, unpacks to two 4×int32 vectors via
+  `_mm_unpacklo_epi16`/`_mm_unpackhi_epi16` + arithmetic shift, converts to
+  float via `_mm_cvtepi32_ps`, multiplies by scale, and stores 8 floats.
+  Processes 4 frames per iteration vs 1 — 4× reduction in loop overhead.
+
+- `convert_s16_to_f32_mono_sse2`: Same load/unpack/convert, then deinterleaves
+  L/R channels via `_mm_shuffle_ps`, downmixes (L+R)*0.5*scale, stores 4 floats.
+  Processes 4 frames per iteration.
+
+Both functions have scalar remainder loops for 0-3 trailing frames (when
+`got_frames` is not a multiple of 4).
+
+**Scope:** Only the no-clip paths are SIMD-ized. The clipping paths (gain > 1.0,
+which requires per-sample `soft_clip`) remain scalar — this is rare (only when
+a user manually sets gain > 1.0 in config.toml) and the per-sample nonlinearity
+prevents vectorization.
+
+**Impact:** The DSP callback is the single hottest path in the codebase —
+called every ~21ms on the audio thread. 4× reduction in loop iterations
+reduces instruction count and improves throughput. The actual wall-clock
+savings are small (the loop processes ~1024 frames in microseconds), but
+it reduces audio thread CPU usage which matters for frame-time stability
+on the render thread.
+
+**Verification:** Build succeeds, all 3 tests pass, sandbox runs clean
+(exit 124 = timeout), clang-tidy clean on dsp_bridge.cpp.
