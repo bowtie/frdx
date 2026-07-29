@@ -446,3 +446,49 @@ through other headers, and `std::unordered_map` is not used at all). Small
 compile-time improvement.
 
 **Files changed:** `hooks.cpp`
+
+## Comprehensive scan summary
+
+After 7 rounds of optimization, every source file in the project has been
+reviewed. The following areas were scanned and found to be already
+well-optimized (no changes needed):
+
+- **`src/overlay/player_bar.cpp`** — Combo cache with source-pointer
+  invalidation, glyph size caching across frames, frame config usage.
+- **`src/overlay/toasts.cpp`** — Small fixed-size deque (max 4), no
+  per-frame allocations, stack buffer for window names.
+- **`src/overlay/themes.cpp`** — No per-frame work.
+- **`src/overlay/textures.cpp`** — Font/texture loading only on init
+  and scale changes, not per-frame.
+- **`src/fmod/dsp_control_loop.cpp`** — 50Hz tick rate, metadata at 4Hz,
+  edge detection for radio state transitions, gain low-pass fade.
+- **`src/fmod/radio_discovery.cpp`** — RTTI/heap scan cached, retries
+  only re-validate SoundName chain. Runs on 5s retry, not per-frame.
+- **`src/fmod/sig_scanner.cpp`** — Pattern matching runs only at startup.
+- **`src/fmod/pe_image.cpp`** — PE parsing runs once at startup.
+- **`src/fmod/metadata_injector.cpp`** — Dedup via last_title_/last_artist_,
+  SEH-protected writes, runs at 4Hz max.
+- **`src/sources/mpg123_stream.cpp`** — Background thread, 64KB read
+  buffer, format detection cached.
+- **`src/audio_source_manager.cpp`** — Atomic source swap, minimal lock
+  scope.
+- **`src/config_store.cpp`** — Observer pattern for on_change, patch
+  under lock then notify outside.
+- **`src/log.cpp`** — Thread-local timestamp cache, generation counter
+  for console refresh gating.
+- **`src/bridge.cpp`** — One-time setup, on_change callback for config
+  updates, 2s sleep loop for process lifetime.
+- **`src/proxy/dll_main.cpp`** — DPI awareness setup, crash handler,
+  FastBoot start, bridge thread launch.
+- **`src/subprocess.cpp`** — Utility functions, not per-frame.
+
+### Items noted but intentionally left in place
+
+- `dualsense_external_helper_should_launch()` in `config.cpp` — defined
+  and tested but not called from production code. Left because it has
+  test coverage and may be intended for external consumers.
+- `WorkerClient::kill()` — dead but left as IPC infrastructure.
+- `RadioInstance::refcount_obj` and `DiscoveryResult::vtable` — model
+  game memory layout, risky to remove.
+- `kPlaceholderHash196x104Alt` — documented design decision.
+- Unused annotation macros in `thread_annotations.hpp` — utility macros.
