@@ -1174,3 +1174,47 @@ graph complexity:
 - `shoutcast_source.cpp`: removed `frdx/overlay/overlay_priv.hpp` (no overlay_priv symbols)
 
 **Verification:** Build succeeds, all 3 tests pass, sandbox exits 124 (timeout = OK).
+
+### Dead code and header audit (R23)
+
+Full audit of all header files under `include/frdx/` for dead code, unused
+declarations, and unnecessary includes.
+
+**Dead code removed:**
+
+- `include/frdx/common.hpp` — entirely deleted. This "centralized stdlib
+  includes" header was never included by any file in the codebase.
+- `IAudioSource::next()` / `IAudioSource::previous()` — virtual methods
+  declared in `audio_source.hpp` with empty default bodies, overridden in
+  `ShoutcastSource`. Neither was ever called anywhere; station switching
+  uses `select_station()` exclusively. Removed the base declarations, the
+  overrides, and the dead `ShoutcastSource::cycle_and_restart()` function
+  that was only called from `next()`/`previous()`.
+- `PlayerBarLayout::gear_right` — field written in `player_bar.cpp` but
+  never read anywhere. Removed the field and the write.
+- 5 unused thread-safety annotation macros: `FRDX_PT_GUARDED_BY`,
+  `FRDX_ACQUIRED_BEFORE`, `FRDX_ACQUIRED_AFTER`, `FRDX_ACQUIRE_SHARED`,
+  `FRDX_RELEASE_SHARED` — defined in `thread_annotations.hpp` but never
+  used anywhere in the codebase.
+
+**Unused includes removed from headers:**
+
+- `win32_handle.hpp`: removed `<winhttp.h>` (no WinHTTP types used)
+- `ring_buffer.hpp`: removed `<cstdint>` (no uint32_t etc.)
+- `sig_scanner.hpp`: removed `<cstdint>`
+- `radio_discovery.hpp`: removed `<cstdint>`
+- `worker_client.hpp`: removed `<cstdint>`
+- `shoutcast_metadata.hpp`: removed `<atomic>`, `<string_view>`
+- `shoutcast_source.hpp`: removed `<chrono>`
+- `mpg123_stream.hpp`: removed `<optional>`
+- `texture_injector.hpp`: removed `<thread>`
+
+**Audit confirmed clean (no issues):**
+- All enum values used (PlaybackState, SourceType, ConsoleLineKind, etc.)
+- All typedefs/using declarations used
+- All remaining struct fields read
+- `TextureInjector::kPlaceholderHash196x104Alt` — intentionally unused
+  (documented design decision, kept for reference)
+
+**Verification:** Build succeeds (66/66, only pre-existing stb warnings),
+all 3 tests pass, sandbox exits 124 (timeout = OK).
