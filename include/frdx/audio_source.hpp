@@ -57,8 +57,6 @@ public:
 
     virtual void play()  = 0;
     virtual void pause() = 0;
-    virtual void next() {}
-    virtual void previous() {}
 
     // Pull PCM into the ring. Sources that push from their own thread no-op.
     virtual void pump(RingBuffer&) {}

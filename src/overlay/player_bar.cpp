@@ -449,7 +449,6 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
     ImGui::SameLine(0, 3.0f * ui_s);
 
     // ── Unified settings window ──
-    float gear_right = 0.0f;
     {
         const ImVec4 hl_col(0.35f, 0.45f, 0.70f, 1.0f);
         const ImU32 hl_u32 = ImGui::GetColorU32(hl_col);
@@ -464,13 +463,11 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
                 g_ui.settings_visible = false;
             }
         }
-        gear_right = ImGui::GetItemRectMax().x;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Settings");
     }
 
     // Capture layout data for the stations browser and settings before closing the window.
     PlayerBarLayout layout;
-    layout.gear_right = gear_right;
     layout.pos        = ImGui::GetWindowPos();
     layout.size       = ImGui::GetWindowSize();
 

@@ -5,7 +5,6 @@
 // Include this instead of duplicating the typedefs in each .cpp.
 
 #include <windows.h>
-#include <winhttp.h>
 #include <wil/resource.h>
 
 #include <cstdio> // std::FILE, std::fclose

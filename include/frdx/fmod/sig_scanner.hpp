@@ -2,7 +2,6 @@
 
 #include "frdx/fmod/pe_image.hpp"
 
-#include <cstdint>
 #include <expected>
 #include <string_view>
 

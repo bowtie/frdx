@@ -528,7 +528,6 @@ template <class Fn> inline void patch_dualsense(Fn&& fn) {
 struct PlayerBarLayout {
     ImVec2 pos;
     ImVec2 size;
-    float gear_right{};
 };
 
 void draw_console_window();

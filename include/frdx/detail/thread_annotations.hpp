@@ -7,11 +7,8 @@
 //
 // Usage:
 //   FRDX_GUARDED_BY(mu)        — member is protected by mutex 'mu'
-//   FRDX_PT_GUARDED_BY(mu)     — pointer member is protected by 'mu'
 //   FRDX_REQUIRES(mu)          — caller must hold 'mu'
 //   FRDX_EXCLUDES(mu)          — caller must NOT hold 'mu' (function locks internally)
-//   FRDX_ACQUIRED_BEFORE(a)    — lock ordering: this mutex must be acquired before 'a'
-//   FRDX_ACQUIRED_AFTER(a)     — lock ordering: this mutex must be acquired after 'a'
 //   FRDX_NO_THREAD_SAFETY_ANALYSIS — suppress false positives on this function
 //
 // Use frdx::Mutex instead of std::mutex for any mutex referenced by
@@ -23,11 +20,8 @@
 
 #if defined(__clang__)
 #define FRDX_GUARDED_BY(x)          __attribute__((guarded_by(x)))
-#define FRDX_PT_GUARDED_BY(x)       __attribute__((pt_guarded_by(x)))
 #define FRDX_REQUIRES(...)          __attribute__((exclusive_locks_required(__VA_ARGS__)))
 #define FRDX_EXCLUDES(...)          __attribute__((locks_excluded(__VA_ARGS__)))
-#define FRDX_ACQUIRED_BEFORE(...)   __attribute__((acquired_before(__VA_ARGS__)))
-#define FRDX_ACQUIRED_AFTER(...)    __attribute__((acquired_after(__VA_ARGS__)))
 #define FRDX_NO_THREAD_SAFETY_ANALYSIS [[clang::no_thread_safety_analysis]]
 
 // ── Capability type annotations (for custom mutex/lock types) ───────
@@ -35,23 +29,16 @@
 #define FRDX_SCOPED_CAPABILITY    __attribute__((scoped_lockable))
 #define FRDX_ACQUIRE(...)         __attribute__((acquire_capability(__VA_ARGS__)))
 #define FRDX_RELEASE(...)         __attribute__((release_capability(__VA_ARGS__)))
-#define FRDX_ACQUIRE_SHARED(...)  __attribute__((acquire_shared_capability(__VA_ARGS__)))
-#define FRDX_RELEASE_SHARED(...)  __attribute__((release_shared_capability(__VA_ARGS__)))
 #else
 #define FRDX_GUARDED_BY(x)
-#define FRDX_PT_GUARDED_BY(x)
 #define FRDX_REQUIRES(...)
 #define FRDX_EXCLUDES(...)
-#define FRDX_ACQUIRED_BEFORE(...)
-#define FRDX_ACQUIRED_AFTER(...)
 #define FRDX_NO_THREAD_SAFETY_ANALYSIS
 
 #define FRDX_CAPABILITY(x)
 #define FRDX_SCOPED_CAPABILITY
 #define FRDX_ACQUIRE(...)
 #define FRDX_RELEASE(...)
-#define FRDX_ACQUIRE_SHARED(...)
-#define FRDX_RELEASE_SHARED(...)
 #endif
 
 namespace frdx {

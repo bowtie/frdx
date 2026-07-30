@@ -703,60 +703,6 @@ void ShoutcastSource::on_radio_audible(bool audible) {
     }
 }
 
-void ShoutcastSource::cycle_and_restart(int direction) {
-    metadata_controller_->stop();
-
-    bool has_stream = false;
-    std::string launch_url;
-    {
-        frdx::ScopedLock lk{mu_};
-        cycle_preset(direction);
-        // Only (re)start the stream when the radio is audible AND the user
-        // has requested playback — mirrors select_station()'s gate. Without
-        // the state_ check, cycling presets while paused or before FMOD is
-        // hooked would launch the stream into a void.
-        const auto st = state_.load(std::memory_order_relaxed);
-        const bool user_playing = (st == PlaybackState::playing ||
-                                   st == PlaybackState::buffering);
-        if (audible_ && user_playing) {
-            launch_url = start_stream_locked();
-        } else {
-            // Not audible / not playing: update the display info so the
-            // station name is ready when the UI comes back, but don't start
-            // the stream yet.
-            restore_station_display_locked();
-        }
-        // Always clear pending timed metadata on station swap — the
-        // previous station's pending track info is stale and should
-        // never be applied to the new station.
-        clear_pending_metadata_locked();
-        metadata_epoch_has_track_ = false;
-        has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
-        station_selected_ms_ = steady_ms();
-    } // mu_ released — HTTP handshake happens outside the lock
-
-    // Phase 2: launch the stream OUTSIDE mu_ (the WinHTTP/MP3 handshake can
-    // block for several seconds).  Mirrors select_station()'s three-phase
-    // pattern and prevents stalling the action-worker thread.
-    if (!launch_url.empty()) {
-        auto stream_result = launch_stream(launch_url, winhttp_session_);
-        {
-            frdx::ScopedLock lk{mu_};
-            install_stream_locked(launch_url, std::move(stream_result));
-            has_stream = (stream_.load(std::memory_order_acquire) != nullptr);
-        }
-    }
-
-    restart_metadata_for_current();
-    if (has_stream) {
-        state_.store(PlaybackState::playing, std::memory_order_release);
-    }
-}
-
-void ShoutcastSource::next() { cycle_and_restart(1); }
-
-void ShoutcastSource::previous() { cycle_and_restart(-1); }
-
 TrackInfo ShoutcastSource::current_track() const {
     TrackInfo t;
     {

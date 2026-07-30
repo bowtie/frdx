@@ -3,13 +3,11 @@
 #include "frdx/audio_source.hpp"
 #include "frdx/sources/shoutcast_source.hpp"  // StationMetadataMapping, StationMetadataWebSocketFilter, StationMetadataWebSocketHeartbeat
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
 #include <stop_token>
 #include <string>
-#include <string_view>
 #include <thread>
 #include <vector>
 

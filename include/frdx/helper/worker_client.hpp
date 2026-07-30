@@ -5,7 +5,6 @@
 // CreateProcess calls (downloads, texconv) don't fork the
 // entire game process — critical for Wine/Proton performance.
 
-#include <cstdint>
 #include <mutex>
 #include <string>
 #include <string_view>

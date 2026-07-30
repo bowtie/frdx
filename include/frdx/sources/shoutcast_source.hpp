@@ -5,7 +5,6 @@
 #include "frdx/sources/mpg123_stream.hpp"
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -172,8 +171,6 @@ public:
 
     void play() override FRDX_EXCLUDES(mu_);
     void pause() override FRDX_EXCLUDES(mu_);
-    void next() override FRDX_EXCLUDES(mu_);
-    void previous() override FRDX_EXCLUDES(mu_);
     void pump(RingBuffer& ring) override FRDX_EXCLUDES(mu_);
     void on_radio_audible(bool audible) override FRDX_EXCLUDES(mu_);
 
@@ -218,7 +215,6 @@ private:
     void stop_stream_locked() FRDX_REQUIRES(mu_);
     void restore_station_display_locked() FRDX_REQUIRES(mu_);
     void cycle_preset(int direction = 1) FRDX_REQUIRES(mu_);
-    void cycle_and_restart(int direction) FRDX_EXCLUDES(mu_);
     bool queue_timed_metadata_locked(TrackInfo info, int64_t now_ms, uint64_t metadata_epoch)
         FRDX_REQUIRES(mu_);
     void apply_pending_metadata_locked(const char* reason) FRDX_REQUIRES(mu_);
