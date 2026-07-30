@@ -1262,3 +1262,20 @@ common.hpp, 5 unused annotation macros). All unnecessary includes have been
 stripped from both .cpp and .hpp files (R22: 5 .cpp removals, R23: 10 .hpp
 removals + 1 deleted header). Build flags are already optimal (/O2, /Gy, /Gw,
 /LTCG, /OPT:REF, /OPT:ICF). No further optimization opportunities remain.
+
+**Additional patterns verified clean (R24 deep pass):**
+- `std::function` — all usage on action/background paths, not hot paths.
+  DSP callback's `std::function` was already removed (see comment in
+  `dsp_bridge.cpp:519`).
+- `dynamic_cast` — 2 calls, both on user-action paths (station switch,
+  checkbox toggle), not per-frame. Replacing with `static_cast` would
+  risk correctness if a non-Shoutcast source is ever added.
+- Struct padding — `PackedDSPState` packs mode+stereo+gain into a single
+  `uint64_t` atomic. Ring buffer atomics are `alignas(64)` cache-line
+  aligned. No padding waste in hot-path structs.
+- Per-frame string formatting — all per-frame string ops use `static`
+  or `thread_local` buffers (console filter results, cached HUD title,
+  counter text). No per-frame `std::string` construction on render path.
+- Virtual dispatch in hot paths — `IAudioSource` virtual calls (`pump`,
+  `playback_state`) are one per tick (20ms), not per-frame. The DSP
+  callback reads directly from the ring buffer with no virtual dispatch.
