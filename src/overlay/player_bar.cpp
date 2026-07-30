@@ -4,7 +4,6 @@
 #include "frdx/config_store.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
-#include "frdx/texture_injector.hpp"
 
 #include <IconsKenney.h>
 
