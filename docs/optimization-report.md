@@ -1160,3 +1160,16 @@ allocations. No dead code remains (R16 removed WorkerClient::kill + Pipeline
 infrastructure, all subsequent scans found nothing). The remaining allocation
 sites are all on background threads or user-action paths where they are
 acceptable.
+
+### Include cleanup (R22)
+
+Removed unnecessary `#include` directives that were not referenced in
+their translation units — reduces compile time and header dependency
+graph complexity:
+
+- `settings.cpp`: removed `<imgui_impl_dx12.h>` (no ImGui_ImplDX12_* calls)
+- `overlay.cpp`: removed `frdx/dualsense.hpp` (no dualsense:: symbols)
+- `player_bar.cpp`: removed `frdx/texture_injector.hpp` (no TextureInjector refs)
+- `hooks.cpp`: removed `frdx/platform/windows/subprocess.hpp` (no subprocess:: refs)
+
+**Verification:** Build succeeds, all 3 tests pass.
