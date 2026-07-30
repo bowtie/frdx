@@ -1218,3 +1218,47 @@ declarations, and unnecessary includes.
 
 **Verification:** Build succeeds (66/66, only pre-existing stb warnings),
 all 3 tests pass, sandbox exits 124 (timeout = OK).
+
+### Exhaustive scan — no further opportunities (R24)
+
+After R23, performed a final exhaustive read of every remaining non-off-limits
+`.cpp` file (36 total) and every header under `include/frdx/`. All files are
+clean — no dead code, no unused includes, no optimization opportunities
+remaining.
+
+Files verified clean in this pass:
+- `fmod/dsp_bridge.cpp` — SSE2 SIMD hot loop, packed atomic state, zero-copy
+  ring reads, drift correction. Already optimal.
+- `fmod/dsp_control_loop.cpp` — 20ms tick, throttled metadata, edge-detected
+  audibility, gain low-pass. No allocations on the tick path.
+- `fmod/radio_discovery.cpp` — cached RTTI/COL/vtable, throttled logging,
+  SEH-wrapped heap scan. Already optimal.
+- `fmod/game_state_probe.cpp` — SEH-wrapped chain walk, re-deref per tick.
+- `fmod/metadata_injector.cpp` — SEH-wrapped string slot writes, dedup cache,
+  retired-buffer leak prevention. Already optimal.
+- `fmod/sig_scanner.cpp` — two-pass scan (pdata then full text), anchor-based
+  and direct pattern matching. Already optimal.
+- `fmod/pe_image.cpp` — .pdata chain unwind, sorted function RVAs. Clean.
+- `overlay/console.cpp` — precomputed filter results, cached text sizes,
+  zero-alloc common case. Already optimal.
+- `overlay/toasts.cpp` — move semantics, deque cap, no per-frame allocs.
+- `helper/worker_server.cpp` — overlapped I/O accept loop, detached threads.
+- `helper/worker_client.cpp` — bcrypt token, mutex-serialized requests.
+- `audio_source_manager.cpp` — atomic source swap, lock-free pump.
+- `config_store.cpp` — patch() (disk) + update() (memory-only) split.
+- `ring_buffer.cpp` — SPSC, power-of-2, cache-line aligned, zero-copy.
+- `log.cpp` — thread-local timestamp cache, deque cap, generation counter.
+- `subprocess.cpp` — minimal UTF-8 conversion helpers.
+- `d3d12_debug.cpp` — env-gated, one-shot device-removed logging.
+- `proxy/dll_main.cpp` — PE forwarders, deferred bridge thread, VEH crash
+  handler with one-shot minidump.
+
+**Conclusion:** The codebase has been thoroughly optimized across 24 rounds.
+All hot paths use lock-free or minimal-lock patterns with no per-frame heap
+allocations. All per-frame disk I/O has been eliminated. All dead code has
+been removed (R16: WorkerClient::kill + Pipeline infrastructure, R23:
+IAudioSource::next()/previous() + cycle_and_restart, PlayerBarLayout::gear_right,
+common.hpp, 5 unused annotation macros). All unnecessary includes have been
+stripped from both .cpp and .hpp files (R22: 5 .cpp removals, R23: 10 .hpp
+removals + 1 deleted header). Build flags are already optimal (/O2, /Gy, /Gw,
+/LTCG, /OPT:REF, /OPT:ICF). No further optimization opportunities remain.
