@@ -1108,3 +1108,55 @@ Hot-path audit confirmed clean:
 - `render_overlay_frame` — cached sc3, config generation check, early-exit when UI hidden
 - `d3d12_debug.cpp` — no release-build overhead (env-gated)
 - `texture_injector.cpp` `std::to_string` calls — background thread, one-shot per artwork
+
+### Full codebase audit (R21)
+
+Completed exhaustive scan of all 36 `.cpp` files and all headers in `include/frdx/`.
+No new optimizations or dead code found — the codebase is well-optimized.
+
+Files audited (no issues found):
+- `log.cpp` — timestamp cached thread_local, recent_lines() only on generation change
+- `subprocess.cpp` — narrow/widen both used
+- `themes.cpp` — only runs on theme switch (user action)
+- `sig_scanner.cpp` — init-only, match_at/match_any both used
+- `radio_discovery.cpp` — init-only, RTTI scan runs once per discovery
+- `pe_image.cpp` — parse() used from bridge.cpp, PESection::readable() used
+- `game_state_probe.cpp` — 4Hz, safe_read (no alloc), SSO-likely string returns
+- `shoutcast_metadata.cpp` — background thread, all helpers used
+- `shoutcast_helpers.hpp` — all inline functions used (parse_json_array_index,
+  resolve_json_node, resolve_json_path, resolve_mapped_value, sanitize_brackets,
+  extract_stream_title, steady_ms, ScopedWinHttp, ParsedUrl, winhttp_connect)
+- `ring_buffer.cpp` — SPSC, power-of-2, cache-line aligned, zero-copy readable_span
+- `audio_source_manager.cpp` — atomic load + virtual call in pump_once
+- `dsp_control_loop.cpp` — 50Hz, tick-based counters, no per-tick alloc
+- `metadata_injector.cpp` — caches last_title/artist, only writes on change
+- `dsp_bridge.cpp` read_callback — already optimal (R18: single atomic load,
+  SSE2 SIMD, zero-copy ring spans, drift correction, no heap alloc)
+- `overlay/overlay.cpp` — track info cached, enqueue_action only on user actions
+- `overlay/player_bar.cpp` — combo cache rebuilt on source change, glyph strings
+  cached, no per-frame alloc
+- `overlay/console.cpp` — filter_results static vector reuses capacity, passes_filter
+  O(1) subsystem lookup, extract_subsystem returns string_view
+- `overlay/toasts.cpp` — no alloc, simple ImGui draw calls
+- `overlay/textures.cpp` — all 9 static functions used, blur shaders compiled once
+- `overlay/tex_hooks.cpp` — two-tier fast path (atomic check + throttled fingerprint)
+- `overlay/hooks.cpp` render_overlay_frame — cached sc3, config gen check, early-exit
+- `overlay/settings.cpp` — all sliders fixed (R20), checkboxes are one-shot
+- `helper/worker_client.cpp` — stop() called from destructor, download() used
+- `helper/worker_server.cpp` — all functions used
+- `proxy/dll_main.cpp` — log_stack_trace used in SEH handler
+- `sandbox_main.cpp` — all 4 static functions used
+- `sources/mpg123_stream.cpp` — ensure_mpg123_init used
+- `config.cpp` — save_config uses atomic temp+rename, Emitter string growth
+  is acceptable for call frequency (slider release / checkbox toggle)
+- `config_store.cpp` — patch() and update() both used correctly
+- `bridge.cpp` — worker lifecycle managed by RAII, observers have 10s cooldown
+- `d3d12_debug.cpp` — env-gated, no release overhead
+
+Conclusion: The codebase has been thoroughly optimized across 21 rounds. All
+per-frame disk I/O has been eliminated (volume bar R19, settings sliders R20).
+All hot paths use lock-free or minimal-lock patterns with no per-frame heap
+allocations. No dead code remains (R16 removed WorkerClient::kill + Pipeline
+infrastructure, all subsequent scans found nothing). The remaining allocation
+sites are all on background threads or user-action paths where they are
+acceptable.
