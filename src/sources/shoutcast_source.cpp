@@ -2,7 +2,6 @@
 #include "frdx/sources/shoutcast_helpers.hpp"
 #include "frdx/sources/shoutcast_metadata.hpp"
 #include "frdx/log.hpp"
-#include "frdx/overlay/overlay_priv.hpp"
 
 #include <nlohmann/json.hpp>
 
