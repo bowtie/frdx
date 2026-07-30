@@ -127,10 +127,16 @@ static void load_modern_font(float scale) {
     // glyphs are rasterized on demand at whatever size is needed.
     // The base size is controlled by style.FontSizeBase, and scaling by
     // style.FontScaleMain (replacing the legacy io.FontGlobalScale).
+    const float eff_scale = effective_ui_scale(scale);
     ImFontConfig font_cfg{};
     font_cfg.OversampleH = 2;
     font_cfg.OversampleV = 1;
     font_cfg.PixelSnapH  = false;
+    // Geist's ascent/descent metrics place its baseline ~1px lower than
+    // Fusion Pixel (the pixel-mode reference).  Nudge up 1px so the two
+    // modes align vertically.  GlyphOffset is in font units — ImGui's
+    // FontScaleMain scales it automatically at render time.
+    font_cfg.GlyphOffset.y = -1.0f;
     // Set variable font weight via upper 16 bits of FontLoaderFlags.
     // The imgui_freetype patch extracts this and calls
     // FT_Set_Var_Design_Coordinates on the 'wght' axis.
@@ -206,7 +212,9 @@ static void load_modern_font(float scale) {
         // Offset = (primary_ascent - kenney_ascent) * kenney_size
         //        = (1.005 - 0.938) * 15 ≈ 1.0px, plus extra descent
         //        compensation ≈ 2.5px total at 15px/18px combo.
-        icon_cfg.GlyphOffset.y    = 1.5f;
+        // Reduced by 1px to match the primary font's -1px baseline nudge.
+        // ImGui's FontScaleMain scales GlyphOffset automatically at render time.
+        icon_cfg.GlyphOffset.y    = 0.5f;
         io.Fonts->AddFontFromFileTTF(
             kenney_path.string().c_str(), g_ui.modern_icon_size, &icon_cfg);
         log::info("[overlay] merged Kenney Game Icons into modern font (offset y={:.1f})",
@@ -217,7 +225,6 @@ static void load_modern_font(float scale) {
     // for the legacy io.FontGlobalScale).  In modern mode, ui_scale is the
     // raw float (e.g. 1.33 for 1440p) and FontScaleMain multiplies the base
     // font size to get the effective rendered size.
-    const float eff_scale = effective_ui_scale(scale);
     g_ui.ui_scale = eff_scale;
     ImGui::GetStyle().FontScaleMain = eff_scale;
     ImGui::GetStyle().FontSizeBase  = g_ui.modern_base_size;
