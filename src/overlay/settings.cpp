@@ -91,6 +91,9 @@ void draw_audio_settings_tab() {
         settings_label_row("Max Length");
         int max_len = cfg.metadata_max_length;
         if (ImGui::SliderInt("##meta_max_len", &max_len, 10, 60)) {
+            g_ctx.store->update([&](Config& c) { c.overlay.metadata_max_length = max_len; });
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
             g_ctx.store->patch([&](Config& c) { c.overlay.metadata_max_length = max_len; });
         }
         if (ImGui::IsItemHovered()) {
@@ -102,6 +105,9 @@ void draw_audio_settings_tab() {
     settings_label_row("Logo Grace Period");
     float grace = cfg.metadata_grace_period;
     if (ImGui::SliderFloat("##grace_period", &grace, 0.0f, 10.0f, "%.1fs")) {
+        g_ctx.store->update([&](Config& c) { c.overlay.metadata_grace_period = grace; });
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
         g_ctx.store->patch([&](Config& c) { c.overlay.metadata_grace_period = grace; });
     }
     if (ImGui::IsItemHovered()) {
@@ -193,6 +199,9 @@ void draw_display_settings_tab() {
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::SliderInt("##blur_strength", &strength, 1, 15)) {
             strength = std::clamp(strength, 1, 15);
+            g_ctx.store->update([&](Config& c) { c.overlay.blur_strength = strength; });
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
             g_ctx.store->patch([&](Config& c) { c.overlay.blur_strength = strength; });
         }
 
@@ -201,6 +210,13 @@ void draw_display_settings_tab() {
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::ColorEdit3("##blur_tint", tint,
                               ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)) {
+            g_ctx.store->update([&](Config& c) {
+                c.overlay.blur_tint_r = std::clamp(tint[0], 0.0f, 1.0f);
+                c.overlay.blur_tint_g = std::clamp(tint[1], 0.0f, 1.0f);
+                c.overlay.blur_tint_b = std::clamp(tint[2], 0.0f, 1.0f);
+            });
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
             g_ctx.store->patch([&](Config& c) {
                 c.overlay.blur_tint_r = std::clamp(tint[0], 0.0f, 1.0f);
                 c.overlay.blur_tint_g = std::clamp(tint[1], 0.0f, 1.0f);
@@ -216,6 +232,9 @@ void draw_display_settings_tab() {
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::SliderFloat("##blur_tint_opacity", &tint_opacity, 0.0f, 1.0f, "%.2f")) {
             tint_opacity = std::clamp(tint_opacity, 0.0f, 1.0f);
+            g_ctx.store->update([&](Config& c) { c.overlay.blur_tint_opacity = tint_opacity; });
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
             g_ctx.store->patch([&](Config& c) { c.overlay.blur_tint_opacity = tint_opacity; });
         }
         if (ImGui::IsItemHovered()) {
@@ -227,6 +246,10 @@ void draw_display_settings_tab() {
         ImGui::SetNextItemWidth(-1.0f);
         if (ImGui::SliderFloat("##blur_widget_opacity", &widget_opacity, 0.0f, 1.0f, "%.2f")) {
             widget_opacity = std::clamp(widget_opacity, 0.0f, 1.0f);
+            g_ctx.store->update(
+                [&](Config& c) { c.overlay.blur_widget_opacity = widget_opacity; });
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
             g_ctx.store->patch(
                 [&](Config& c) { c.overlay.blur_widget_opacity = widget_opacity; });
         }
