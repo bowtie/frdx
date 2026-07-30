@@ -1041,3 +1041,70 @@ now does only a mutex lock + config field write + atomic increment per frame,
 with disk persistence deferred to a single `patch()` call on mouse release.
 
 **Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
+
+### 20. settings.cpp — Defer disk I/O for 6 settings sliders to drag-release
+
+**Commit:** f0d0042
+
+Same pattern as the volume bar fix (R19): use `ConfigStore::update()`
+(in-memory only, no disk write or observer notification) during slider
+drag, then `ConfigStore::patch()` (persist to disk + notify observers)
+once on `ImGui::IsItemDeactivatedAfterEdit()`.
+
+Affected sliders:
+- Metadata Max Length (`SliderInt`, `##meta_max_len`)
+- Logo Grace Period (`SliderFloat`, `##grace_period`)
+- Blur Strength (`SliderInt`, `##blur_strength`)
+- Blur Tint Color (`ColorEdit3`, `##blur_tint`)
+- Blur Tint Opacity (`SliderFloat`, `##blur_tint_opacity`)
+- Blur Widget Opacity (`SliderFloat`, `##blur_widget_opacity`)
+
+Each slider previously called `patch()` on every drag frame, causing:
+- `save_config()` disk write per frame
+- Full `Config` copy + observer vector copy per frame
+- Observer callbacks (`set_gain`, `update_config`,
+  `maybe_launch_external_helper`, `set_metadata_truncation`,
+  `set_grace_period_ms`) per frame
+
+During drag, `update()` does only a mutex lock + config field write +
+atomic generation increment. `patch()` fires once on release to persist
+and notify.
+
+**Impact:** Eliminates per-frame disk I/O and observer dispatch for all
+continuous-drag sliders in the settings panel. The volume bar (R19) was
+the most frequently used; these 6 sliders are less frequently adjusted
+but had the same per-frame overhead pattern.
+
+**Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
+
+### Dead code & hot-path audit (R20)
+
+Continued the dead code scan across all `.cpp` static functions in:
+- `d3d12_debug.cpp` — all functions used (debug-only, gated by env var)
+- `overlay/hooks.cpp` — all 10 static functions used
+- `overlay/textures.cpp` — all 9 static functions used
+- `overlay/tex_hooks.cpp` — all static functions used
+- `sandbox_main.cpp` — all 4 static functions used
+- `sources/mpg123_stream.cpp` — `ensure_mpg123_init` used
+- `proxy/dll_main.cpp` — `log_stack_trace` used
+- `helper/worker_client.cpp` — `WorkerClient::stop()` called from destructor
+- `helper/worker_server.cpp` — all functions used
+
+Also verified all inline functions in `overlay_priv.hpp` are in use:
+`snap_ui_scale`, `font_mode_is_modern`, `effective_ui_scale`,
+`layout_scale`, `scale_is_auto`, `transition_barrier`, `patch_dualsense`.
+
+`re_log.hpp` — all functions used (hooks.cpp, textures.cpp).
+
+No new dead code found in this round. The `dualsense_external_helper_should_launch()`
+function in `config.cpp` is only called from tests, but it's DualSense-related
+and the user confirmed that subsystem is feature-complete — left as-is.
+
+Hot-path audit confirmed clean:
+- `enqueue_action` / `std::function` captures — only on user actions, not per-frame
+- `shoutcast_source.cpp` pump — stack buffer, no heap alloc, fast-path return
+- `observe_pcm_for_metadata_sync` — fast-path atomic check, only scans when metadata pending
+- `draw_imgui_ui_impl` — track info cached, only re-fetched on generation change
+- `render_overlay_frame` — cached sc3, config generation check, early-exit when UI hidden
+- `d3d12_debug.cpp` — no release-build overhead (env-gated)
+- `texture_injector.cpp` `std::to_string` calls — background thread, one-shot per artwork
