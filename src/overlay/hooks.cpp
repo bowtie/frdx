@@ -1060,7 +1060,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
                     ImGui::GetStyle().FontSizeBase  = g_ui.modern_base_size;
                 } else {
                     ImGui::GetStyle().FontScaleMain = 1.0f;
-                    ImGui::GetStyle().FontSizeBase  = 16.0f;
+                    ImGui::GetStyle().FontSizeBase  = (g_ui.ui_scale >= 2.0f) ? 32.0f : 16.0f;
                 }
                 g_ui.is_init                   = true;
                 s_current_swapchain            = pSwapChain;

@@ -325,18 +325,28 @@ PlayerBarLayout draw_player_bar(IAudioSource* active) {
         const ImVec2& gsz = s_glyph_sz[glyph];
         const char* gp     = s_glyph_strs[glyph];
         // Center the glyph in the button.  CalcTextSize returns the advance
-        // width and full line height.  Kenney icon glyphs are metrically
-        // symmetric, but some look optically off-center due to their shape
-        // (e.g. a right-pointing triangle's visual weight is on the left).
-        // Apply per-glyph optical nudges to compensate.
-        static const float s_icon_nudge_x[G_COUNT] = {
+        // width and full line height.  Kenney icon glyphs (modern mode) are
+        // metrically symmetric but some look optically off-center due to
+        // their shape (e.g. a right-pointing triangle's visual weight is on
+        // the left).  Apply per-glyph optical nudges to compensate.
+        // In pixel mode the glyphs are Unicode media symbols with different
+        // metrics, so use a uniform nudge that matches the original behavior.
+        static const float s_nudge_modern[G_COUNT] = {
             -1.0f,  // G_PREV  — backward (<<), shift left slightly
             0.0f,   // G_PAUSE — symmetric
             1.5f,   // G_PLAY  — caret right, shift right (visual weight on left)
             1.0f,   // G_NEXT  — forward (>>), shift right slightly
             0.0f,   // G_GEAR  — wrench, nearly symmetric
         };
-        float gx = min.x + (btn_w - gsz.x) * 0.5f + s_icon_nudge_x[glyph] * ui_s;
+        static const float s_nudge_pixel[G_COUNT] = {
+            0.5f,  // uniform +0.5px — matches pre-refactor centering
+            0.5f,
+            0.5f,
+            0.5f,
+            0.5f,
+        };
+        const float* nudge = (g_ui.font_mode == "modern") ? s_nudge_modern : s_nudge_pixel;
+        float gx = min.x + (btn_w - gsz.x) * 0.5f + nudge[glyph] * ui_s;
         float gy = min.y + (btn_h - gsz.y) * 0.5f;
         dl->AddText(ImVec2(gx, gy), col_text, gp);
         return pressed;

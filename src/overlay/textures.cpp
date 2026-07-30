@@ -59,7 +59,7 @@ static void load_pixel_font(float scale) {
         // Reset 1.92 scale fields to neutral so they don't interfere.
         auto& style = ImGui::GetStyle();
         style.FontScaleMain = 1.0f;
-        style.FontSizeBase  = 16.0f;
+        style.FontSizeBase  = (effective_scale >= 2.0f) ? 32.0f : 16.0f;
         io.FontDefault     = (effective_scale >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
         g_ui.ui_scale      = effective_scale;
         log::info("[overlay] loaded Fusion Pixel font at 16px (1x) + 32px (2x), int_scale={}x, FontDefault={} from {}",
@@ -133,10 +133,14 @@ static void load_modern_font(float scale) {
     font_cfg.OversampleV = 1;
     font_cfg.PixelSnapH  = false;
     // Geist's ascent/descent metrics place its baseline ~1px lower than
-    // Fusion Pixel (the pixel-mode reference).  Nudge up 1px so the two
-    // modes align vertically.  GlyphOffset is in font units — ImGui's
-    // FontScaleMain scales it automatically at render time.
-    font_cfg.GlyphOffset.y = -1.0f;
+    // Fusion Pixel (the pixel-mode reference) at 1x.  However, GlyphOffset
+    // is baked at load time and FontScaleMain scales it at render time,
+    // so a -1px nudge correct at 1x becomes -2px at 2x (too much).  Since
+    // the font is loaded once and scale changes don't reload it, we can't
+    // apply a scale-conditional nudge.  The 1px discrepancy is only visible
+    // at 1x and is proportionally negligible at higher scales, so we leave
+    // GlyphOffset at 0 and accept the minor misalignment at 1x.
+    font_cfg.GlyphOffset.y = 0.0f;
     // Set variable font weight via upper 16 bits of FontLoaderFlags.
     // The imgui_freetype patch extracts this and calls
     // FT_Set_Var_Design_Coordinates on the 'wght' axis.
@@ -212,9 +216,7 @@ static void load_modern_font(float scale) {
         // Offset = (primary_ascent - kenney_ascent) * kenney_size
         //        = (1.005 - 0.938) * 15 ≈ 1.0px, plus extra descent
         //        compensation ≈ 2.5px total at 15px/18px combo.
-        // Reduced by 1px to match the primary font's -1px baseline nudge.
-        // ImGui's FontScaleMain scales GlyphOffset automatically at render time.
-        icon_cfg.GlyphOffset.y    = 0.5f;
+        icon_cfg.GlyphOffset.y    = 1.5f;
         io.Fonts->AddFontFromFileTTF(
             kenney_path.string().c_str(), g_ui.modern_icon_size, &icon_cfg);
         log::info("[overlay] merged Kenney Game Icons into modern font (offset y={:.1f})",
@@ -304,7 +306,7 @@ void switch_font_mode(float scale) {
         g_ui.ui_scale = eff;
         ApplyTheme(g_ui.theme_idx);
         style.FontScaleMain = 1.0f;
-        style.FontSizeBase  = 16.0f;
+        style.FontSizeBase  = (eff >= 2.0f) ? 32.0f : 16.0f;
         io.FontDefault      = (eff >= 2.0f) ? g_ui.font_2x : g_ui.font_1x;
         log::info("[overlay] switched to pixel mode (int_scale={}x)", int_scale);
     }
@@ -350,7 +352,9 @@ void set_font_scale(float scale) {
         ApplyTheme(g_ui.theme_idx);
         auto& style = ImGui::GetStyle();
         style.FontScaleMain = 1.0f;
-        style.FontSizeBase  = 16.0f;
+        // FontSizeBase must match the baked font size so ImGui renders at
+        // the correct size — 16px for font_1x, 32px for font_2x.
+        style.FontSizeBase  = (font_sel >= 2) ? 32.0f : 16.0f;
         log::info("[overlay] set UI scale to {}x (font={}px)", int_scale, wanted == g_ui.font_2x ? 32 : 16);
     }
 }
