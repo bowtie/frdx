@@ -1008,3 +1008,36 @@ thread, where every nanosecond matters.
 loads/sec at 48 kHz).
 
 **Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
+
+---
+
+## Round 19 — Defer config disk I/O during volume drag (commit 79503a9)
+
+### Optimization: Eliminate per-frame disk writes during volume bar dragging
+
+**Files:** `include/frdx/config_store.hpp`, `src/config_store.cpp`,
+`src/overlay/player_bar.cpp`
+
+Volume bar dragging was calling `ConfigStore::patch()` on every mouse-move
+frame. Each `patch()` call:
+1. Locks the config mutex and mutates the config
+2. Deep-copies the entire `Config` struct (multiple strings + vectors)
+3. Copies the observers vector
+4. Bumps the generation counter
+5. Serializes the full config to TOML and writes to disk (temp file + rename)
+6. Notifies all observers
+
+During a drag, this fires every frame — meaning disk I/O on the render
+thread every frame while adjusting volume.
+
+Added `ConfigStore::update()` — an in-memory-only mutation that bumps the
+generation counter (so frame-cached snapshots pick up the change) but skips
+disk I/O and observer notification. During the drag, `update()` keeps the
+volume bar responsive; `patch()` is called once when the drag ends to persist
+to disk and notify observers.
+
+**Impact:** Eliminates per-frame disk I/O during volume dragging. The drag
+now does only a mutex lock + config field write + atomic increment per frame,
+with disk persistence deferred to a single `patch()` call on mouse release.
+
+**Verification:** Build succeeds, all 3 tests pass, sandbox runs clean (exit 124).
