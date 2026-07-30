@@ -1171,5 +1171,6 @@ graph complexity:
 - `overlay.cpp`: removed `frdx/dualsense.hpp` (no dualsense:: symbols)
 - `player_bar.cpp`: removed `frdx/texture_injector.hpp` (no TextureInjector refs)
 - `hooks.cpp`: removed `frdx/platform/windows/subprocess.hpp` (no subprocess:: refs)
+- `shoutcast_source.cpp`: removed `frdx/overlay/overlay_priv.hpp` (no overlay_priv symbols)
 
-**Verification:** Build succeeds, all 3 tests pass.
+**Verification:** Build succeeds, all 3 tests pass, sandbox exits 124 (timeout = OK).
