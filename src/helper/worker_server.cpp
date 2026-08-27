@@ -144,16 +144,40 @@ bool http_download(std::string_view url, std::string_view dest_path) {
         HANDLE file = CreateFileW(wdest.c_str(), GENERIC_WRITE, 0, nullptr,
                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file != INVALID_HANDLE_VALUE) {
-            DWORD avail = 0;
-            while (WinHttpQueryDataAvailable(request, &avail) && avail > 0) {
+            // Any mid-stream failure (query/read error, short disk write)
+            // leaves a truncated file — fail the download so the caller
+            // retries instead of feeding a corrupt file to the decoder.
+            bool eof = false;
+            while (ok) {
+                DWORD avail = 0;
+                if (!WinHttpQueryDataAvailable(request, &avail)) {
+                    log::warn("[worker] WinHttpQueryDataAvailable failed mid-stream (err={}): {}",
+                              GetLastError(), url);
+                    ok = false;
+                    break;
+                }
+                if (avail == 0) { eof = true; break; }
                 std::vector<char> buf(avail);
                 DWORD read = 0;
-                if (WinHttpReadData(request, buf.data(), avail, &read) && read > 0) {
-                    DWORD written = 0;
-                    WriteFile(file, buf.data(), read, &written, nullptr);
+                if (!WinHttpReadData(request, buf.data(), avail, &read) || read == 0) {
+                    log::warn("[worker] WinHttpReadData failed mid-stream (err={}): {}",
+                              GetLastError(), url);
+                    ok = false;
+                    break;
+                }
+                DWORD written = 0;
+                if (!WriteFile(file, buf.data(), read, &written, nullptr) || written != read) {
+                    log::warn("[worker] short write to {} ({} of {} bytes, err={})", dest_path,
+                              written, read, GetLastError());
+                    ok = false;
+                    break;
                 }
             }
             CloseHandle(file);
+            if (ok && !eof) {
+                log::warn("[worker] download stream ended early: {}", url);
+                ok = false;
+            }
         } else {
             log::warn("[worker] CreateFileW failed (err={}): {}", GetLastError(), dest_path);
             ok = false;
