@@ -225,6 +225,13 @@ struct UiState {
     std::atomic<bool> player_visible{true}, settings_visible{false}, stations_visible{false};
     std::atomic<bool> console_visible{false}, hud_visible{true};
     std::atomic<bool> mouse_capture{false};
+    // Frame counters for the Debug tab readout.  present_frame_count is
+    // bumped on every non-test Present call (the game's true frame rate,
+    // even when the overlay is hidden);  overlay_frame_count only when the
+    // overlay actually draws.  FPS is derived by sampling in the Debug tab,
+    // so the Present hook pays just one relaxed atomic increment per frame.
+    std::atomic<uint64_t> present_frame_count{0};
+    std::atomic<uint64_t> overlay_frame_count{0};
     bool is_init = false, cursor_visible = true;
     // UI scaling: all hardcoded pixel values are designed for 1080p and
     // multiplied by ui_scale at use sites.  Calculated from the monitor

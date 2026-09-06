@@ -19,3 +19,9 @@ third_party/*
 !third_party/imanim/**
 src.7z
 frdx-dist-*.zip
+
+# PGO training artifacts (scripts/pgo.ps1)
+build-pgo/
+pgo/
+*.profraw
+*.profdata

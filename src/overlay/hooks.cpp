@@ -975,6 +975,7 @@ void cleanup_imgui_resources() {
 
 static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     if (!pSwapChain || !active_queue) return false;
+    g_ui.overlay_frame_count.fetch_add(1, std::memory_order_relaxed);
 
     // Serialize the whole render path. Present can be called from the frame-
     // generation thread (or through a different wrapper), and the static state
@@ -1324,6 +1325,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     if (Flags & DXGI_PRESENT_TEST) {
         return original_Present(pSwapChain, SyncInterval, Flags);
     }
+    g_ui.present_frame_count.fetch_add(1, std::memory_order_relaxed);
 
     ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
 

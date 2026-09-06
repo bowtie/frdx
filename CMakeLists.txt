@@ -412,3 +412,57 @@ if(FRDX_ASAN)
         message(FATAL_ERROR "FRDX_ASAN: could not detect clang resource dir")
     endif()
 endif()
+
+# ── Profile-Guided Optimization (PGO) ──────────────────────────────────────
+# Two-phase build using clang-cl's LLVM instrumentation.  scripts\pgo.ps1
+# automates the whole pipeline; the two flags are what it drives:
+#
+#   cmake -DFRDX_PGO=generate ...       instrumented build (profile-generate)
+#     → run frdx_sandbox --benchmark-blur=<N> as the training workload
+#       (same overlay sources as version.dll, deterministic, exits cleanly
+#       so the .profraw is flushed), then:
+#   llvm-profdata merge → pgo\frdx.profdata
+#   cmake -DFRDX_PGO=use -DFRDX_PGO_DATA=<path> ...
+#     → version.dll + frdx_sandbox rebuilt with profile-guided inlining,
+#       layout, and branch probabilities.
+#
+# Counts transfer from the sandbox EXE to version.dll because profile-use
+# matches by function name and both targets compile the same sources with
+# the same flags.  Revert with -DFRDX_PGO=off.
+set(FRDX_PGO "off" CACHE STRING "PGO mode: off | generate | use")
+set(FRDX_PGO_DATA "" CACHE FILEPATH "Merged .profdata for FRDX_PGO=use")
+
+if(NOT FRDX_PGO MATCHES "^(off|generate|use)$")
+    message(FATAL_ERROR "FRDX_PGO must be off, generate, or use (got: ${FRDX_PGO})")
+endif()
+
+if(FRDX_PGO STREQUAL "generate")
+    target_compile_options(version PRIVATE -fprofile-generate)
+    target_compile_options(frdx_sandbox PRIVATE -fprofile-generate)
+    # lld-link doesn't auto-link the profile runtime the way the clang-cl
+    # driver does when invoked as the linker — link it explicitly from the
+    # clang resource directory (same technique as FRDX_ASAN above).
+    execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} /clang:-print-resource-dir
+        OUTPUT_VARIABLE _pgo_resource_dir
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_pgo_resource_dir AND EXISTS "${_pgo_resource_dir}/lib/windows/clang_rt.profile-x86_64.lib")
+        target_link_libraries(version PRIVATE
+            "${_pgo_resource_dir}/lib/windows/clang_rt.profile-x86_64.lib")
+        target_link_libraries(frdx_sandbox PRIVATE
+            "${_pgo_resource_dir}/lib/windows/clang_rt.profile-x86_64.lib")
+    else()
+        message(FATAL_ERROR "FRDX_PGO=generate: clang_rt.profile-x86_64.lib not found")
+    endif()
+elseif(FRDX_PGO STREQUAL "use")
+    if(NOT FRDX_PGO_DATA)
+        message(FATAL_ERROR "FRDX_PGO=use requires -DFRDX_PGO_DATA=<path to merged .profdata>")
+    endif()
+    if(NOT EXISTS "${FRDX_PGO_DATA}")
+        message(FATAL_ERROR "FRDX_PGO_DATA does not exist: ${FRDX_PGO_DATA}")
+    endif()
+    target_compile_options(version PRIVATE "-fprofile-use=${FRDX_PGO_DATA}")
+    target_compile_options(frdx_sandbox PRIVATE "-fprofile-use=${FRDX_PGO_DATA}")
+endif()

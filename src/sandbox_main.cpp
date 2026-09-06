@@ -11,6 +11,7 @@
 #include "frdx/dualsense.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/overlay/overlay.hpp"
+#include "frdx/overlay/overlay_priv.hpp"
 #include "frdx/log.hpp"
 #include "frdx/sources/shoutcast_source.hpp"
 
@@ -447,7 +448,7 @@ static BenchmarkArgs parse_benchmark_args() {
             }
         } else if (arg.starts_with(L"--benchmark=")) {
             ba.enabled = true;
-            ba.frames  = std::max(1, _wtoi(arg.c_str() + 12));
+            ba.frames  = std::max(1, _wtoi(arg.c_str() + 12)); // 12 == len("--benchmark")
         } else if (arg == L"--benchmark-blur") {
             ba.enabled = true;
             ba.blur    = true;
@@ -458,7 +459,7 @@ static BenchmarkArgs parse_benchmark_args() {
         } else if (arg.starts_with(L"--benchmark-blur=")) {
             ba.enabled = true;
             ba.blur    = true;
-            ba.frames  = std::max(1, _wtoi(arg.c_str() + 16));
+            ba.frames  = std::max(1, _wtoi(arg.c_str() + 17)); // 17 == len("--benchmark-blur=")
         }
     }
     LocalFree(argv);
@@ -989,6 +990,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         }
         if (!running) break;
 
+        // Mirror hook_Present's counter so the Debug tab FPS readout works
+        // in the sandbox too (the Present hook isn't installed here).
+        frdx::overlay::g_ui.present_frame_count.fetch_add(1, std::memory_order_relaxed);
         const auto frame_start = std::chrono::steady_clock::now();
 
         // GPU wait: this blocks until the previous frame's GPU work

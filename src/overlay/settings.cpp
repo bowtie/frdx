@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <imgui.h>
 #include <imfilebrowser.h>
@@ -323,6 +325,42 @@ static int s_inject_mode = 0;
 static bool s_inject_border = true;
 
 void draw_debug_tab() {
+    // ── Frame counter / FPS readout ──
+    // Sample the hook counters on a 500 ms cadence and derive FPS from the
+    // deltas.  All state is on the render thread (this function only runs
+    // there), so plain statics are fine.
+    {
+        struct FpsSampler {
+            std::chrono::steady_clock::time_point last_time{};
+            uint64_t last_present = 0, last_overlay = 0;
+            float game_fps = 0.0f, overlay_fps = 0.0f;
+        };
+        static FpsSampler s_fps;
+        const auto  now           = std::chrono::steady_clock::now();
+        const auto  present_count = g_ui.present_frame_count.load(std::memory_order_relaxed);
+        const auto  overlay_count = g_ui.overlay_frame_count.load(std::memory_order_relaxed);
+        const float elapsed_s =
+            std::chrono::duration<float>(now - s_fps.last_time).count();
+        if (elapsed_s >= 0.5f) {
+            s_fps.game_fps    = static_cast<float>(present_count - s_fps.last_present) / elapsed_s;
+            s_fps.overlay_fps = static_cast<float>(overlay_count - s_fps.last_overlay) / elapsed_s;
+            s_fps.last_time   = now;
+            s_fps.last_present = present_count;
+            s_fps.last_overlay = overlay_count;
+        }
+        ImGui::Text("Game: %.1f fps  (frame %llu)", s_fps.game_fps,
+                    static_cast<unsigned long long>(present_count));
+        ImGui::Text("Overlay: %.1f fps  (%llu frames drawn)", s_fps.overlay_fps,
+                    static_cast<unsigned long long>(overlay_count));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Game = every non-test Present call, including frames where the "
+                              "overlay is hidden.\nOverlay = frames where ImGui actually drew.");
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
+
     ImGui::TextWrapped("Inject a custom image into the radio HUD texture.");
     ImGui::Spacing();
 
