@@ -385,23 +385,76 @@ struct SwapchainMap {
 };
 extern SwapchainMap g_sc;
 
-// ── Multi-queue GPU sync ───────────────────────────────────────────────
+// ── Command-queue registry ─────────────────────────────────────────────
 // The game can submit 3D work to direct queues that are NOT the present
-// queue.  We hook every ID3D12CommandQueue::ExecuteCommandLists and signal a
-// per-queue fence after the submission so callers can CPU-wait on every
-// tracked fence (skipping self to avoid deadlock) before submitting
-// dependent work.
-struct QueueSyncState {
-    wil::com_ptr<ID3D12Fence> fence;
-    HANDLE event = nullptr;
-    UINT64 fence_value = 0;
-};
+// queue.  The ECL hook registers every queue it sees so the swap-chain →
+// queue fallback (hooks.cpp, on cache miss) can find a DIRECT queue on the
+// right device.  This used to also maintain per-queue fences Signaled on
+// every ECL call, but nothing ever waited on them — pure per-submission
+// overhead on the game's hottest path.  Registration is now a lock-free
+// open-addressed set: the steady-state fast path is a single acquire load
+// and a compare.
+//
+// Slot encoding: a 16-bit generation in bits 48..63 packed with the queue
+// pointer in the low 48 bits (user-mode x64 pointers are < 2^48).  A
+// teardown clear bumps the generation once, instantly invalidating every
+// slot — no slot zeroing, no ABA on recycled pointer values.  The 16-bit
+// generation wraps after 65,535 full overlay teardown cycles in one
+// session, which cannot happen in practice.
 struct CommandQueueMap {
-    frdx::Mutex mutex;
-    std::unordered_map<ID3D12CommandQueue*, QueueSyncState> queues FRDX_GUARDED_BY(mutex);
-    FRDX_REQUIRES(mutex)
-    std::unordered_map<ID3D12CommandQueue*, QueueSyncState>& queues_ref() { return queues; }
+    static constexpr size_t kSlots = 256;  // power of two
+    static constexpr uint64_t kGenShift = 48;
+    static constexpr uint64_t kPtrMask   = (uint64_t{1} << kGenShift) - 1;
+
+    std::atomic<uint64_t> slots[kSlots]{};
+    std::atomic<uint64_t> gen{1};
+
+    static size_t hash_ptr(ID3D12CommandQueue* q) noexcept {
+        const auto v = reinterpret_cast<uintptr_t>(q);
+        return static_cast<size_t>((v >> 4) * 0x9E3779B97F4A7C15ull);
+    }
+    static uint64_t encode(ID3D12CommandQueue* q, uint64_t g) noexcept {
+        return (g << kGenShift) | (reinterpret_cast<uint64_t>(q) & kPtrMask);
+    }
+
+    // Register `q`.  Returns quickly (no CAS) when already registered this
+    // generation.  Thread-safe; called from every ECL submission.
+    void insert_if_absent(ID3D12CommandQueue* q) noexcept {
+        if (!q) return;
+        const uint64_t g       = gen.load(std::memory_order_acquire);
+        const uint64_t want    = encode(q, g);
+        size_t i               = hash_ptr(q) & (kSlots - 1);
+        for (size_t probe = 0; probe < kSlots; ++probe, i = (i + 1) & (kSlots - 1)) {
+            uint64_t cur = slots[i].load(std::memory_order_acquire);
+            if (cur == want) return;  // already registered — 1-load fast path
+            if (cur != 0 && (cur >> kGenShift) == g) continue;  // occupied, probe on
+            // Empty or stale slot — claim it.  A lost CAS just re-reads.
+            if (slots[i].compare_exchange_weak(cur, want, std::memory_order_release,
+                                               std::memory_order_acquire)) {
+                return;
+            }
+            if (cur == want) return;  // another thread registered it first
+        }
+        // Table full (>256 live queues): give up.  Registration only feeds
+        // the swap-chain fallback; missing an exotic queue is harmless.
+    }
+
+    // Invalidate every registration (overlay teardown / device loss).
+    void clear() noexcept { gen.fetch_add(1, std::memory_order_acq_rel); }
+
+    // Visit every queue registered in the current generation.  Safe to call
+    // concurrently with insert_if_absent.  `fn` returning false stops early.
+    template <class F> void for_each(F fn) const {
+        const uint64_t g = gen.load(std::memory_order_acquire);
+        for (size_t i = 0; i < kSlots; ++i) {
+            const uint64_t cur = slots[i].load(std::memory_order_acquire);
+            if ((cur >> kGenShift) != g) continue;
+            auto* q = reinterpret_cast<ID3D12CommandQueue*>(cur & kPtrMask);
+            if (q && !fn(q)) return;
+        }
+    }
 };
+static_assert(std::atomic<uint64_t>::is_always_lock_free);
 extern CommandQueueMap g_cq;
 
 struct ActionQueue {

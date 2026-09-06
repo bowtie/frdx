@@ -81,6 +81,9 @@ private:
     std::byte* sample_props_body_ = nullptr;  // current SampleProperties body
     std::uint64_t prev_calls_     = 0;
     int stale_ticks_              = 0;
+    // Drift-correction logging: the mixer callback only bumps counters
+    // (logging there would glitch the real-time thread); the tick reports.
+    std::uint32_t prev_drift_events_ = 0;
     std::chrono::steady_clock::time_point last_reacquire_{}; // cooldown for rediscovery/retune
     // Audibility tracking
     IAudioSource* audible_source_ = nullptr;

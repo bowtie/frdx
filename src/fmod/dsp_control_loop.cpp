@@ -166,6 +166,19 @@ void ControlLoop::run(const std::stop_token& tok) {
         // and back on is the only thing that makes it allocate a fresh
         // channel; retarget_if_needed() then re-attaches the DSP next tick.
         const std::uint64_t c = bridge_.call_count();
+
+        // Report drift corrections recorded by the mixer callback since the
+        // last tick.  The callback can't log itself (real-time thread), so
+        // it bumps counters and we do the formatting here.
+        const std::uint32_t drift_events = bridge_.drift_events();
+        if (drift_events != prev_drift_events_) {
+            log::info("[dsp] drift correction: {} event(s), {} bytes dropped total "
+                      "(last backlog {}ms -> 200ms)",
+                      drift_events - prev_drift_events_,
+                      bridge_.drift_bytes(), bridge_.drift_last_readable() / 192);
+            prev_drift_events_ = drift_events;
+        }
+
         if (busy && c == prev_calls_) {
             if (++stale_ticks_ >= kStaleTickThreshold) {
                 stale_ticks_ = 0;

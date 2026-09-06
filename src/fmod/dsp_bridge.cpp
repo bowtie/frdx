@@ -507,8 +507,10 @@ uint32_t __stdcall DSPBridge::read_callback(void* /*dsp_state*/, float* in_buf, 
     if (readable > kDriftThresholdBytes) {
         const std::size_t excess = readable - kDriftTargetBytes;
         ring.drop(excess);
-        log::info("[dsp] drift correction: dropped {} bytes ({}ms -> {}ms)",
-                  excess, readable / 192, kDriftTargetBytes / 192);
+        // Never log on the real-time mixer thread (formatting + mutex +
+        // fflush would add a glitch on top of the drift we're correcting).
+        // Record it; the control loop's tick logs from a safe thread.
+        b->note_drift(excess, readable);
     }
 
     // Split the mono/stereo conversion into two separate loops so the

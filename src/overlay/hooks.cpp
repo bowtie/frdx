@@ -644,7 +644,7 @@ ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
     if (q && cached_chain.load(std::memory_order_relaxed) == swapChain) return q;
 
     {
-        std::scoped_lock lk{g_sc.mutex, g_cq.mutex};
+        std::scoped_lock lk{g_sc.mutex};
         auto it = g_sc.queues_ref().find(swapChain);
         if (it != g_sc.queues_ref().end()) {
             q = it->second;
@@ -659,10 +659,9 @@ ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
                 raw_sc_device) {
                 wil::com_ptr<ID3D12Device> sc_device;
                 sc_device.attach(raw_sc_device);
-                for (auto& [queue, state] : g_cq.queues_ref()) {
-                    if (!queue) continue;
+                g_cq.for_each([&](ID3D12CommandQueue* queue) {
                     const D3D12_COMMAND_QUEUE_DESC qd = queue->GetDesc();
-                    if (qd.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) continue;
+                    if (qd.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return true;
 
                     ID3D12Device* raw_q_device = nullptr;
                     if (SUCCEEDED(queue->GetDevice(__uuidof(ID3D12Device),
@@ -678,10 +677,11 @@ ID3D12CommandQueue* command_queue_for_swapchain(IDXGISwapChain* swapChain) {
                                 "[present] swapchain 0x{:X} not in g_sc map; fallback to command queue 0x{:X} on same device",
                                 reinterpret_cast<uintptr_t>(swapChain),
                                 reinterpret_cast<uintptr_t>(q));
-                            break;
+                            return false;
                         }
                     }
-                }
+                    return true;
+                });
             }
         }
         cached_queue.store(q, std::memory_order_release);
@@ -1544,26 +1544,24 @@ void shutdown() noexcept {
             g_sc.queues_ref().clear();
         }
 
-        // Close the per-queue sync state created in hook_ExecuteCommandLists.
-        {
-            frdx::ScopedLock lk{g_cq.mutex};
-            for (auto& [queue, state] : g_cq.queues_ref()) {
-                if (state.event) CloseHandle(state.event);
-            }
-            g_cq.queues_ref().clear();
-        }
+        // Invalidate the lock-free command-queue registry populated by
+        // hook_ExecuteCommandLists (generation bump — see CommandQueueMap).
+        g_cq.clear();
 
         g_ui.is_init = false;
         re_log::info("Dear ImGui overlay cleaned up safely");
     }
 }
 
-// ── ID3D12CommandQueue::ExecuteCommandLists hook + multi-queue sync ───
-// Forza can submit 3D rendering onto direct queues other than the
-// present queue.  We hook every queue's ExecuteCommandLists and signal a
-// per-queue fence after the submission.  Callers can CPU-wait for every
-// queued fence value (skipping the present queue to avoid a self-deadlock)
-// before submitting dependent work.
+// ── ID3D12CommandQueue::ExecuteCommandLists hook + queue registry ─────
+// Forza can submit 3D rendering onto direct queues other than the present
+// queue.  We register every queue we see so the swap-chain → queue
+// fallback can find a DIRECT queue on the right device.  Registration is
+// lock-free (single acquire load + compare once warm).  An earlier version
+// also Signaled a per-queue fence after every submission for capture
+// synchronization, but that wait side was removed when the screenshot and
+// texture-injection pipelines grew their own fences — the Signals were
+// pure per-submission overhead on the game's hottest path.
 
 void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumCommandLists,
                                          ID3D12CommandList* const* ppCommandLists) {
@@ -1574,25 +1572,10 @@ void __stdcall hook_ExecuteCommandLists(ID3D12CommandQueue* pQueue, UINT NumComm
 
     // Texture injection: fingerprint detected textures and inject pending artwork
     process_texture_injection(pQueue);
-    // Track every queue type (DIRECT + COMPUTE + COPY) so post-process
-    // middleware (DLSS, XeSS, FSR 2 RT) that uses a COMPUTE queue to
-    // touch the backbuffer still gets flushed before our capture.
-
-    frdx::ScopedLock lk{g_cq.mutex};
-    auto& state     = g_cq.queues_ref()[pQueue];
-    if (!state.fence) {
-        wil::com_ptr<ID3D12Device> dev;
-        if (SUCCEEDED(pQueue->GetDevice(IID_PPV_ARGS(dev.put())))) {
-            if (SUCCEEDED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE,
-                                            IID_PPV_ARGS(state.fence.put())))) {
-                state.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-            }
-        }
-    }
-    if (state.fence) {
-        const UINT64 new_val = ++state.fence_value;
-        pQueue->Signal(state.fence.get(), new_val);
-    }
+    // Track every queue type (DIRECT + COMPUTE + COPY) so the fallback in
+    // command_queue_for_swapchain can pick a suitable DIRECT queue even if
+    // post-process middleware created additional queues.
+    g_cq.insert_if_absent(pQueue);
 }
 
 

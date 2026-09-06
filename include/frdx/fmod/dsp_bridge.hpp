@@ -199,6 +199,21 @@ public:
 
     uint64_t call_count() const noexcept { return calls_.load(std::memory_order_relaxed); }
 
+    // Drift-correction accounting, written by the mixer callback (which must
+    // never log — formatting + mutex + fflush on a real-time thread causes
+    // the very glitches it reports) and read by the control loop's 20ms
+    // tick, which does the logging.
+    uint32_t drift_events() const noexcept { return drift_events_.load(std::memory_order_relaxed); }
+    uint64_t drift_bytes() const noexcept { return drift_bytes_.load(std::memory_order_relaxed); }
+    uint64_t drift_last_readable() const noexcept {
+        return drift_last_readable_.load(std::memory_order_relaxed);
+    }
+    void note_drift(uint64_t dropped, uint64_t readable_before) noexcept {
+        drift_events_.fetch_add(1, std::memory_order_relaxed);
+        drift_bytes_.fetch_add(dropped, std::memory_order_relaxed);
+        drift_last_readable_.store(readable_before, std::memory_order_relaxed);
+    }
+
     AudioSourceManager& manager() noexcept { return mgr_; }
 
     FRDX_NO_THREAD_SAFETY_ANALYSIS
@@ -239,6 +254,10 @@ private:
     std::atomic<uint64_t> dsp_state_{
         PackedDSPState::pack(DSPMode::pcm, 1.0f, true)};
     std::atomic<uint64_t> calls_{0};
+    // Drift-correction stats (see note_drift) — relaxed atomics, audio thread.
+    std::atomic<uint32_t> drift_events_{0};
+    std::atomic<uint64_t> drift_bytes_{0};
+    std::atomic<uint64_t> drift_last_readable_{0};
 };
 
 } // namespace frdx::fmod_bridge

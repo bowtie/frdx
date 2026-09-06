@@ -261,6 +261,20 @@ target_include_directories(dualsense_config_self_test PRIVATE
 
 add_test(NAME dualsense_config_self_test COMMAND dualsense_config_self_test)
 
+# Lock-free command-queue registry stress test (overlay_priv.hpp only —
+# no DX12 runtime needed; the map stores and compares pointers only).
+add_executable(command_queue_map_self_test tests/command_queue_map_test.cpp)
+
+target_include_directories(command_queue_map_self_test PRIVATE
+    include
+    third_party/wil/include
+    third_party/imgui
+    third_party/imgui-animated
+    third_party/imanim
+)
+
+add_test(NAME command_queue_map_self_test COMMAND command_queue_map_self_test)
+
 add_executable(dualsense_settings_coverage_test
     tests/dualsense_settings_coverage_test.cpp
 )
