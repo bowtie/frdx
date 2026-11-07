@@ -28,7 +28,7 @@ radio. Station logos and album art appear on the radio HUD.
 1. Close the game, then extract the download into the folder that contains
    `forzahorizon6.exe`.
 2. In the game, go to **Settings → Audio** and turn **Streamer Mode** on.
-3. Start playing. The radio turns up on its own.
+3. Start playing. The player bar shows up on its own. Pick a station and it plays.
 
 To remove it, delete `version.dll` and the `mods/frdx` folder, then verify
 the game files.
