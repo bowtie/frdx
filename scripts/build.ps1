@@ -225,8 +225,6 @@ if (Test-Path (Join-Path $root "assets\logos")) {
 }
 Copy-Item (Join-Path $root "config.example.toml") (Join-Path $dist "mods\frdx\config.toml")
 Copy-Item (Join-Path $root "stations.example.json") (Join-Path $dist "mods\frdx\stations.json")
-Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.txt") $dist
-Copy-Item (Join-Path $root "LICENSE") $dist
 
 
 $builtDll = Join-Path $dist "version.dll"
