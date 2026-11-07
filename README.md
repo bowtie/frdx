@@ -2,39 +2,29 @@
 
 ![Forza Radio DX player bar in Forza Horizon 6](screenshots/in-game.webp)
 
-Forza Radio DX replaces the radio in Forza Horizon 6 with a list of online
-radio stations. It also adds a few quality-of-life features.
+Replaces the radio in Forza Horizon 6 with a curated set of online radio
+stations.
 
-## What it does
+## Features
 
-### Radio
-
-Pick a station from the player bar. It plays through the game's audio, so the
-in-game volume applies. The radio HUD shows station logos and album art. In
-the settings you can choose logos only, logos plus album art, or no artwork.
-
-### Extras
-
-- **Skip the intro wait.** The game goes straight past the startup screens.
-- **DualSense triggers.** The brake and throttle triggers push back and pulse
-  as you brake, hit ABS or reach the rev limiter. They are off until you
-  turn them on.
-- **Overlay.** Press **Insert** to show or hide the player bar. The station
-  list and settings are on the bar.
-- **Pixel or modern font.** Pixel is the default. Modern is for DPI scaling
-  and higher resolutions, and might look slightly off.
-- **No pause when you tab out.** Optional. The game keeps running and the
-  radio keeps playing when you switch windows.
+- **Online radio.** Pick a station from the player bar. Station logos and album
+  art show on the radio HUD. Artwork can be turned off.
+- **Fast boot.** Skips the intro wait.
+- **DualSense triggers.** Adaptive trigger feedback for braking and
+  acceleration. Off by default.
+- **Overlay.** Press **Insert** to show or hide the player bar.
+- **Pixel or modern font.** Modern is for DPI scaling and might look slightly
+  off.
+- **No pause when you tab out.** Optional.
 
 ## Install
 
-1. Close the game, then extract the download into the folder that contains
+1. Close the game and extract the download into the folder that contains
    `forzahorizon6.exe`.
-2. In the game, go to **Settings → Audio** and turn **Streamer Mode** on.
-3. Start playing. The player bar appears on its own. Pick a station.
+2. In the game, turn on **Settings → Audio → Streamer Mode**.
+3. Start playing and pick a station.
 
-To remove it, delete `version.dll` and the `mods/frdx` folder. The mod doesn't
-change any other game files.
+To remove it, delete `version.dll` and the `mods/frdx` folder.
 
 ## Credits
 
