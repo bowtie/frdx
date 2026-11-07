@@ -175,9 +175,9 @@ void store_snap(Snap s) {
 
 // ───────────────────────── state ─────────────────────────
 // Verbose diagnostic logging (per-poll spin trace, per-file .bk2 opens).
-// Off by default — these flooded the shared console.  Upstream wrote them
-// to a dedicated fastboot.log; here they go to bridge.log + the console,
-// so we keep only the meaningful events unless this is enabled.
+// Off by default because they flood the log.  Upstream wrote them to a
+// dedicated fastboot.log; here they go to bridge.log, so we keep only the
+// meaningful events unless this is enabled.
 constexpr bool kVerbose = false;
 
 std::atomic<uint64_t> g_qpc_n{0};

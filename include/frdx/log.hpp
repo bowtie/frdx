@@ -20,12 +20,6 @@ void init(const std::filesystem::path& log_file) noexcept;
 void set_file_enabled(bool enabled) noexcept;
 void shutdown() noexcept;
 void emit(Level level, std::string_view message) noexcept;
-uint64_t recent_generation() noexcept;
-std::vector<std::string> recent_lines() noexcept;
-// Drops every buffered log line from the in-memory deque and bumps the
-// recent-generation counter so the next `recent_generation()` query
-// triggers the console window to re-fetch.
-void clear_recent() noexcept;
 
 inline void info(std::string_view message) noexcept {
     emit(Level::info, message);

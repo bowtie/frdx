@@ -831,12 +831,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     auto cfg_path    = data_dir / "config.toml";
     frdx::Config cfg = frdx::load_config(cfg_path);
 
-    // In benchmark mode, force the console panel visible so the overlay
-    // actually renders ImGui every frame instead of hitting the all-hidden
-    // early-return in render_overlay_frame.
-    if (bench.enabled) {
-        cfg.overlay.console_visible = true;
-    }
     // In blur benchmark mode, force blur on with maxed settings to measure
     // the worst-case Dual-Kawase capture+blur pipeline every frame.
     if (bench.blur) {

@@ -923,7 +923,7 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
     if (!cfg.blur_enabled) return true; // backbuffer is left in RENDER_TARGET
 
     // Skip the capture+blur pipeline entirely when no window that uses
-    // blur is visible (e.g. only the console is open).  Saves the full
+    // blur is visible (e.g. only the HUD is up).  Saves the full
     // backbuffer copy + multi-pass blur for every such frame.
     if (!any_blur_window_visible()) {
         g_blur_rect_next = {};

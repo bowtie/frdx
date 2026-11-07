@@ -299,13 +299,6 @@ void draw_display_settings_tab() {
                           "OFF = game auto-pauses on focus loss (default)");
     }
 
-    settings_label_row("Log Window");
-    bool show_log = g_ui.console_visible;
-    if (ImGui::Checkbox("##log_window", &show_log)) {
-        g_ui.console_visible = show_log;
-        g_ctx.store->patch([&](Config& c) { c.overlay.console_visible = show_log; });
-    }
-
     ImGui::EndTable();
 }
 
