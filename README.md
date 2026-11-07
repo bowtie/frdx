@@ -34,6 +34,24 @@ To remove it, delete `version.dll` and the `mods/frdx` folder.
 - [HamzaYslmn/Forza-Horizon-DualSense-Python](https://github.com/HamzaYslmn/Forza-Horizon-DualSense-Python):
   the DualSense triggers, ported to C++.
 
+Libraries:
+
+- [Dear ImGui](https://github.com/ocornut/imgui) by Omar Cornut (MIT)
+- [im-anim](https://github.com/soufianekhiat/im-anim) by Soufiane Khiat (MIT)
+- [imgui-animated](https://github.com/interception-team/imgui-animated)
+  (animation helpers)
+- [FreeType](https://github.com/freetype/freetype) (FreeType License)
+- [MinHook](https://github.com/TsudaKageyu/minhook) by Tsuda Kageyu (BSD-2-Clause)
+- [kiero](https://github.com/Rebzzel/kiero) by Rebzzel (MIT)
+- [mpg123](https://www.mpg123.de) (LGPL-2.1)
+- [hidapi](https://github.com/libusb/hidapi) (HIDAPI license)
+- [bc7enc](https://github.com/richgel999/bc7enc) by Richard Geldreich (MIT or public domain)
+- [stb](https://github.com/nothings/stb) by Sean Barrett (public domain)
+- [nlohmann/json](https://github.com/nlohmann/json) (MIT)
+- [toml11](https://github.com/ToruNiina/toml11) by Toru Niina (MIT)
+- [Windows Implementation Libraries](https://github.com/microsoft/wil) (MIT)
+- [IconFontCppHeaders](https://github.com/juliettef/IconFontCppHeaders) by Juliette Foucaut (zlib)
+
 Fonts:
 
 - [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) by TakWolf
