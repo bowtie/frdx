@@ -300,10 +300,17 @@ struct UiState {
     float pending_ui_scale = -1.0f;
     int pending_ui_scale_frames = 0;
     bool pending_ui_scale_immediate = false;
+    // Cursor auto-hide, advanced once per frame by update_interactive_overlay_alpha():
+    //   Visible --system cursor hidden for 250 ms--> Hidden
+    //   Hidden  --1 s--> ChildrenClosed   (player-bar popups closed once, on entry)
+    //   ChildrenClosed --1 s more--> Faded (interactive overlay fades to 0)
+    //   any     --system cursor shown--> Visible
+    // cursor_visible mirrors (cursor_phase == Visible) for the WndProc hook.
+    enum class CursorPhase : uint8_t { Visible, Hidden, ChildrenClosed, Faded };
+    CursorPhase cursor_phase = CursorPhase::Visible;
+    bool cursor_close_children_now = false;  // edge: entered ChildrenClosed this frame
     std::chrono::steady_clock::time_point cursor_hidden_candidate_since{}, cursor_hidden_since{};
     float interactive_alpha = 1.0f, interactive_draw_alpha = 1.0f;
-    bool cursor_child_close_elapsed = false, cursor_hide_delay_elapsed = false;
-    bool cursor_hide_closed_children           = false;
     const char* theme_names[2]                 = {"Bess Dark", "Tokyo Night"};
     int theme_idx                              = 0;
     const char* notification_position_names[6] = {"Top Left",    "Top Center",    "Top Right",

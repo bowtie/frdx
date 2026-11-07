@@ -98,9 +98,13 @@ static UINT64 g_shot_row_pitch = 0;
 static DXGI_FORMAT g_shot_fmt = DXGI_FORMAT_UNKNOWN;
 static std::filesystem::path g_shot_path;
 
-// 0 = idle, 1 = staging copy recorded this frame (need readback next frame),
-// 2 = readback copy recorded this frame (need to map and save after fence).
-static int g_shot_phase = 0;
+// Two-frame backbuffer capture (render thread only):
+//   Idle --capture requested--> StagingRecorded   (backbuffer -> staging)
+//   StagingRecorded --next frame--> ReadbackRecorded (staging -> readback)
+//   ReadbackRecorded --frame fence--> Idle         (map + save PNG)
+//   any --error / timeout / teardown--> Idle
+enum class ShotPhase : uint8_t { Idle, StagingRecorded, ReadbackRecorded };
+static ShotPhase g_shot_phase = ShotPhase::Idle;
 
 static std::filesystem::path make_capture_path() {
     wchar_t temp_path[MAX_PATH]{};
@@ -183,13 +187,13 @@ static void shot_phase1_copy_to_staging(ID3D12GraphicsCommandList* cmd, ID3D12Re
     g_shot_h = desc.Height;
     g_shot_fmt = desc.Format;
     g_shot_path = make_capture_path();
-    g_shot_phase = 1;
+    g_shot_phase = ShotPhase::StagingRecorded;
     re_log::info("[capture] phase 1: copied {}x{} to staging", g_shot_w, g_shot_h);
 }
 
 // Phase 2: copy staging texture → readback buffer.
 static void shot_phase2_copy_to_readback(ID3D12GraphicsCommandList* cmd) {
-    if (!g_shot_staging) { g_shot_phase = 0; return; }
+    if (!g_shot_staging) { g_shot_phase = ShotPhase::Idle; return; }
 
     auto st_desc = g_shot_staging->GetDesc();
 
@@ -226,7 +230,7 @@ static void shot_phase2_copy_to_readback(ID3D12GraphicsCommandList* cmd) {
                 IID_PPV_ARGS(g_shot_readback.put())))) {
             re_log::warn("[capture] failed to create readback buffer");
             g_shot_readback_size = 0;
-            g_shot_phase = 0;
+            g_shot_phase = ShotPhase::Idle;
             return;
         }
         g_shot_readback_size = total_bytes;
@@ -253,17 +257,17 @@ static void shot_phase2_copy_to_readback(ID3D12GraphicsCommandList* cmd) {
     cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     g_shot_row_pitch = footprint.Footprint.RowPitch;
-    g_shot_phase = 2;
+    g_shot_phase = ShotPhase::ReadbackRecorded;
     re_log::info("[capture] phase 2: copied staging to readback");
 }
 
 // Phase 3: map readback buffer and save PNG (called after fence).
 static void shot_phase3_save_png(UINT64 fence_value) {
-    if (!g_shot_readback) { g_shot_phase = 0; return; }
+    if (!g_shot_readback) { g_shot_phase = ShotPhase::Idle; return; }
 
     if (!wait_for_fence(fence_value)) {
         re_log::warn("[capture] timed out waiting for readback fence");
-        g_shot_phase = 0;
+        g_shot_phase = ShotPhase::Idle;
         return;
     }
 
@@ -271,7 +275,7 @@ static void shot_phase3_save_png(UINT64 fence_value) {
     D3D12_RANGE read_range{0, static_cast<SIZE_T>(g_shot_row_pitch) * g_shot_h};
     if (FAILED(g_shot_readback->Map(0, &read_range, reinterpret_cast<void**>(&mapped))) || !mapped) {
         re_log::warn("[capture] failed to map readback buffer");
-        g_shot_phase = 0;
+        g_shot_phase = ShotPhase::Idle;
         return;
     }
 
@@ -305,7 +309,7 @@ static void shot_phase3_save_png(UINT64 fence_value) {
 
     re_log::info("[capture] saved screenshot {}x{} to {}",
                  g_shot_w, g_shot_h, g_shot_path.string());
-    g_shot_phase = 0;
+    g_shot_phase = ShotPhase::Idle;
 }
 
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -948,7 +952,7 @@ void cleanup_imgui_resources() {
     g_shot_staging.reset();
     g_shot_readback.reset();
     g_shot_readback_size = 0;
-    g_shot_phase = 0;
+    g_shot_phase = ShotPhase::Idle;
 
     g_dx.fb_bufs.clear();
     g_dx.fb_rtvs.clear();
@@ -971,6 +975,18 @@ void cleanup_imgui_resources() {
     // This device is the same COM object as the game's dx.device
     // (acquired via pSwapChain->GetDevice in hook_Present).
     g_dx.device.reset();
+}
+
+// The is_init -> !is_init transition, shared by swap-chain replacement and
+// shutdown: wait for the GPU, tear down both ImGui backends and the context,
+// then release every overlay D3D12 resource.
+void destroy_imgui_context() {
+    wait_for_all_overlay_work();
+    ImGui_ImplDX12_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    cleanup_imgui_resources();
+    g_ui.is_init = false;
 }
 
 static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
@@ -1026,12 +1042,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             re_log::info("swap chain changed (0x{:X} -> 0x{:X}); reinitializing overlay",
                          reinterpret_cast<uintptr_t>(s_current_swapchain),
                          reinterpret_cast<uintptr_t>(pSwapChain));
-            wait_for_all_overlay_work();
-            ImGui_ImplDX12_Shutdown();
-            ImGui_ImplWin32_Shutdown();
-            ImGui::DestroyContext();
-            cleanup_imgui_resources();
-            g_ui.is_init = false;
+            destroy_imgui_context();
             s_current_swapchain = nullptr;
             // Clear the cached sc3 pointer so the backbuffer lookup re-queries
             // the new swap chain.
@@ -1273,7 +1284,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
         // Two-frame screenshot:
         // Phase 1: copy backbuffer (with overlay) → staging texture.
         // Phase 2: copy staging → readback (from previous frame's phase 1).
-        if (g_shot_phase == 1) {
+        if (g_shot_phase == ShotPhase::StagingRecorded) {
             // Previous frame copied to staging — now copy to readback.
             shot_phase2_copy_to_readback(g_dx.cmd_list.get());
         } else if (g_capture_backbuffer_requested.exchange(false,
@@ -1306,11 +1317,13 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             // its ImGui vertex/index buffer slot.
             g_dx.fence_ring_push(fence_value);
             // Phase 3: if readback copy was recorded this frame, map and save.
-            if (g_shot_phase == 2) {
+            if (g_shot_phase == ShotPhase::ReadbackRecorded) {
                 shot_phase3_save_png(fence_value);
             }
         } else {
             re_log::warn("failed to signal ImGui GPU fence");
+            // A ReadbackRecorded capture stays pending: the copy was already
+            // submitted, so the next frame's fence covers it.
         }
 
         return true;
@@ -1527,13 +1540,7 @@ void shutdown() noexcept {
     }
 
     if (g_ui.is_init) {
-        wait_for_all_overlay_work();
-
-        ImGui_ImplDX12_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-
-        cleanup_imgui_resources();
+        destroy_imgui_context();
         g_dx.fence_value = 0;
 
         {
@@ -1548,7 +1555,6 @@ void shutdown() noexcept {
         // hook_ExecuteCommandLists (generation bump — see CommandQueueMap).
         g_cq.clear();
 
-        g_ui.is_init = false;
         re_log::info("Dear ImGui overlay cleaned up safely");
     }
 }

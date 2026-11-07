@@ -61,19 +61,22 @@ float update_interactive_overlay_alpha() {
             now - g_ui.cursor_hidden_candidate_since < std::chrono::milliseconds(250);
     }
 
+    using CursorPhase   = UiState::CursorPhase;
+    const auto previous = g_ui.cursor_phase;
     if (g_ui.cursor_visible) {
-        g_ui.cursor_hidden_since         = {};
-        g_ui.cursor_child_close_elapsed  = false;
-        g_ui.cursor_hide_delay_elapsed   = false;
-        g_ui.cursor_hide_closed_children = false;
-    } else if (g_ui.cursor_hidden_since == std::chrono::steady_clock::time_point{}) {
-        g_ui.cursor_hidden_since = now;
+        g_ui.cursor_hidden_since = {};
+        g_ui.cursor_phase        = CursorPhase::Visible;
+    } else {
+        if (g_ui.cursor_hidden_since == std::chrono::steady_clock::time_point{}) {
+            g_ui.cursor_hidden_since = now;
+        }
+        const auto hidden_for = now - g_ui.cursor_hidden_since;
+        g_ui.cursor_phase = hidden_for >= std::chrono::seconds(2)   ? CursorPhase::Faded
+                            : hidden_for >= std::chrono::seconds(1) ? CursorPhase::ChildrenClosed
+                                                                    : CursorPhase::Hidden;
     }
-
-    g_ui.cursor_child_close_elapsed =
-        !g_ui.cursor_visible && now - g_ui.cursor_hidden_since >= std::chrono::seconds(1);
-    g_ui.cursor_hide_delay_elapsed =
-        !g_ui.cursor_visible && now - g_ui.cursor_hidden_since >= std::chrono::seconds(2);
+    g_ui.cursor_close_children_now =
+        previous < CursorPhase::ChildrenClosed && g_ui.cursor_phase >= CursorPhase::ChildrenClosed;
     // When player_bar_always_visible is enabled, keep the overlay at full
     // alpha regardless of cursor visibility — no cinematic fade-out.
     // Sandbox mode also forces always-visible (no game cursor to track).
@@ -81,7 +84,7 @@ float update_interactive_overlay_alpha() {
         g_ctx.is_sandbox ||
         (g_ctx.store && g_ctx.frame_overlay_cfg.player_bar_always_visible);
     const float target = always_visible ? 1.0f
-                                        : (g_ui.cursor_hide_delay_elapsed ? 0.0f : 1.0f);
+                                        : (g_ui.cursor_phase == CursorPhase::Faded ? 0.0f : 1.0f);
     const float dt       = std::min(ImGui::GetIO().DeltaTime, 1.0f / 30.0f);
     const float duration = g_ui.cursor_visible ? 0.45f : 0.75f;
     const float step     = dt / duration;
@@ -416,9 +419,8 @@ void draw_imgui_ui_impl() {
     draw_toasts();
 
     const float interactive_alpha = update_interactive_overlay_alpha();
-    if (g_ui.cursor_child_close_elapsed && !g_ui.cursor_hide_closed_children) {
+    if (g_ui.cursor_close_children_now) {
         close_player_children_except(false, false, false);
-        g_ui.cursor_hide_closed_children = true;
     }
 
     // Log window is INDEPENDENT of the interactive fade.  Draw it BEFORE
