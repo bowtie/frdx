@@ -2,28 +2,26 @@
 
 ![Forza Radio DX player bar in Forza Horizon 6](docs/images/in-game.webp)
 
-Forza Radio DX swaps the radio in Forza Horizon 6 for a hand-picked list of
-online radio stations. It also comes with a few small extras that make the
-game nicer to play.
+Forza Radio DX replaces the radio in Forza Horizon 6 with a list of online
+radio stations. It also adds a few quality-of-life features.
 
 ## What it does
 
-**The radio**
+### Radio
 
 Pick a station from the player bar and it plays in the game like any other
-radio. Station logos and album art show up on the radio HUD.
+radio. Station logos and album art appear on the radio HUD.
 
-**The extras**
+### Extras
 
-- **Skip the intro wait.** The game no longer makes you sit through the
-  startup screens.
-- **DualSense triggers.** Your brake and throttle triggers push back and
-  pulse with the car: braking, ABS, hitting the rev limiter and so on. This
-  is off until you turn it on.
+- **Skip the intro wait.** The game goes straight past the startup screens.
+- **DualSense triggers.** The brake and throttle triggers push back and pulse
+  as you brake, hit ABS or reach the rev limiter. They are off until you
+  turn them on.
 - **Overlay.** Press **Insert** to open the player bar, station list and
   settings.
-- **Keep playing when you tab out.** Optionally stops the game from pausing
-  when you switch windows.
+- **No pause when you tab out.** Optional. The game keeps running and the
+  radio keeps playing when you switch windows.
 
 ## Install
 
