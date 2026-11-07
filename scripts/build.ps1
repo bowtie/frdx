@@ -261,16 +261,8 @@ If yours yeets the file, add the FH6 folder to its exclusions
 list and re-extract.
 
 Once the files are in place, launch the game and head into
-Settings -> Audio. Two switches matter:
-
-    Streamer Mode  ->  ON     (the new station only shows up with
-                                this enabled)
-    Radio DJ       ->  OFF    (otherwise the in-game DJ chimes in
-                                over your tracks)
-
-Now cycle the radio stations in-game until you land on the new one.
-The mod's audio only goes out while that station is the active one --
-flip to another station and it stops broadcasting.
+Settings -> Audio and turn Streamer Mode ON. That's all it takes:
+once you start playing, the mod attaches the radio automatically.
 
 
 Configuring it

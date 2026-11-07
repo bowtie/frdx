@@ -12,8 +12,10 @@ struct GeneralConfig {
 
 struct ShoutcastConfig {
     std::string default_url;
-    std::string last_station_id;
-    std::string last_stream_id;
+    // Station selected when nothing has been played yet (Box Radio, Japan City Pop).
+    // Falls back to the first catalogue entry if stations.json doesn't list it.
+    std::string last_station_id = "boxradio";
+    std::string last_stream_id  = "japan_city_pop";
 };
 
 struct AudioConfig {

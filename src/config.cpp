@@ -69,8 +69,8 @@ Config load_config(const std::filesystem::path& path) {
 
     const auto& sc                = section(root, "shoutcast");
     cfg.shoutcast.default_url     = pick<std::string>(sc, "default_url", "");
-    cfg.shoutcast.last_station_id = pick<std::string>(sc, "last_station_id", "");
-    cfg.shoutcast.last_stream_id  = pick<std::string>(sc, "last_stream_id", "");
+    cfg.shoutcast.last_station_id = pick<std::string>(sc, "last_station_id", cfg.shoutcast.last_station_id);
+    cfg.shoutcast.last_stream_id  = pick<std::string>(sc, "last_stream_id", cfg.shoutcast.last_stream_id);
 
     const auto& au = section(root, "audio");
     cfg.audio.output_gain =

@@ -17,9 +17,11 @@ startup hold, and drives DualSense adaptive triggers.
 - **DualSense triggers** – adaptive trigger feedback driven by Forza's Data
   Out telemetry: brake and throttle resistance, ABS pulses, rev-limiter
   buzz, wheelspin, gear-shift kicks and more. Off by default.
-
-The in-game overlay (player bar, settings, backdrop blur) opens with
-**Insert**.
+- **In-game overlay** – a player bar, station selector and settings panel
+  with a frosted-glass backdrop blur, themes and pixel or modern fonts.
+  Opens with **Insert**.
+- **No pause on alt-tab** – optionally stops the game from pausing when you
+  tab out, so the radio keeps playing.
 
 ## Install
 
@@ -28,10 +30,9 @@ The in-game overlay (player bar, settings, backdrop blur) opens with
    `forzahorizon6.exe`:
    - Steam: `...\steamapps\common\ForzaHorizon6`
    - Xbox app: `...\XboxGames\Forza Horizon 6\Content`
-3. In the game, go to **Settings → Audio**, then set **Streamer Mode: ON**
-   and **Radio DJ: OFF**.
-4. Cycle the radio stations until you land on the new one. The mod's audio
-   only plays while that station is active.
+3. In the game, go to **Settings → Audio** and turn **Streamer Mode: ON**.
+4. Start playing. The mod attaches the radio automatically, defaulting to
+   Box Radio – Japan City Pop.
 
 Some antivirus tools flag the bundled `version.dll` because of how the mod
 hooks the game. If yours removes it, add the game folder to its exclusions

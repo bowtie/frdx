@@ -8,6 +8,8 @@ ring_buffer_mb    = 4
 
 [shoutcast]
 default_url        = ""                          # auto-connect on startup
+last_station_id    = "boxradio"                  # station selected on first run (updated as you switch)
+last_stream_id     = "japan_city_pop"
 
 [audio]
 output_gain = 1.0
