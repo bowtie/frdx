@@ -20,6 +20,8 @@ radio. Station logos and album art appear on the radio HUD.
   turn them on.
 - **Overlay.** Press **Insert** to open the player bar, station list and
   settings.
+- **Pixel or modern font.** Pixel is the default. Modern is meant for
+  DPI scaling and higher resolutions, and might look slightly off.
 - **No pause when you tab out.** Optional. The game keeps running and the
   radio keeps playing when you switch windows.
 

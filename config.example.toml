@@ -17,7 +17,7 @@ force_stereo_audio = false         # false = mono + FMOD_2D (clean 3D spatialisa
 
 [overlay]
 theme = "bess_dark"                # bess_dark, tokyo_night
-font_mode = "pixel"                # pixel (Fusion Pixel bitmap, 1x/2x) or modern (Geist + Source Han Sans CJK, fractional)
+font_mode = "pixel"                # pixel (Fusion Pixel bitmap, 1x/2x) or modern (Geist + Source Han Sans CJK, for DPI scaling; might look slightly off)
 player_bar_always_visible = false  # true = the player bar never fades out
 prevent_focus_loss_pause = true    # keep the game running when you alt-tab
 music_notifications_enabled = false
