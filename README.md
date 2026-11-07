@@ -3,7 +3,8 @@
 ![Forza Radio DX player bar in Forza Horizon 6](docs/images/in-game.webp)
 
 A mod for **Forza Horizon 6** that replaces the in-game radio with a curated
-set of online radio stations.
+set of online radio stations, and ships with a ton of extras that make the
+game nicer to play.
 
 ## Features
 
