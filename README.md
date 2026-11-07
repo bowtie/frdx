@@ -64,6 +64,15 @@ Windows, clang-cl, CMake and Ninja are required.
 .\scripts\install.ps1 -GameDir "C:\path\to\Forza Horizon 6"
 ```
 
+## Credits
+
+- [g0ldyy/fh6-universal-radio](https://github.com/g0ldyy/fh6-universal-radio) –
+  this project started as a mod of it.
+- [TigerHix/fh6_fastboot](https://github.com/TigerHix/fh6_fastboot) – the
+  original fast boot idea and implementation.
+- [HamzaYslmn/Forza-Horizon-DualSense-Python](https://github.com/HamzaYslmn/Forza-Horizon-DualSense-Python) –
+  the DualSense trigger logic was ported to C++ from it.
+
 ## License
 
 GPLv3, see [LICENSE](LICENSE). Unofficial fan project, not affiliated with or

@@ -291,6 +291,15 @@ About the project
 
 This mod is a hobby project released under GPLv3.
 
+Credits:
+  - g0ldyy/fh6-universal-radio (github.com/g0ldyy/fh6-universal-radio):
+    this project started as a mod of it.
+  - TigerHix/fh6_fastboot (github.com/TigerHix/fh6_fastboot): the
+    original fast boot idea and implementation.
+  - HamzaYslmn/Forza-Horizon-DualSense-Python
+    (github.com/HamzaYslmn/Forza-Horizon-DualSense-Python): the
+    DualSense trigger logic was ported to C++ from it.
+
 Unofficial fan project. Nothing here is affiliated with, endorsed by, or
 connected to Turn 10 Studios, Playground Games, Xbox Game Studios, or
 Microsoft. Forza Horizon, Forza Motorsport, and all other names dropped
