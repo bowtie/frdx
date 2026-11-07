@@ -59,14 +59,16 @@ FetchContent_MakeAvailable(freetype)
 # ── mpg123: fetch source and build as static library ────────────────────
 # Eliminates the runtime DLL dependency by compiling libmpg123 directly
 # into version.dll and frdx_sandbox.exe.
-# Pinned: tracking master broke the build when upstream committed a bare
-# `#define` in src/compat/compat.h (0d6f2ca, 2026-11-04).  c1d38c6 is the
-# last commit this project was built and PGO-trained against.  Bump
-# deliberately.  (A commit hash can't be fetched shallowly.)
+# Pinned to a commit (master on 2026-11-04) so a clean configure can't pick
+# up a broken upstream change; bump deliberately.  The mirror has no release
+# tags, and a commit hash can't be fetched shallowly.
+# patch_mpg123.cmake removes a stray `#define` upstream left in
+# src/compat/compat.h (since bf41246) that breaks clang-cl/MSVC builds.
 FetchContent_Declare(
     mpg123
     GIT_REPOSITORY https://github.com/madebr/mpg123.git
-    GIT_TAG        c1d38c66c60a6f79b0b81ab88dc396c2517f9d7e
+    GIT_TAG        0d6f2ca9a7ce6814c2565037fa80ef0440c6b72d
+    PATCH_COMMAND  ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_mpg123.cmake
     SOURCE_SUBDIR  ports/cmake
 )
 set(BUILD_LIBOUT123 OFF CACHE BOOL "Build libout123" FORCE)
