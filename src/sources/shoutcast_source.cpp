@@ -189,7 +189,6 @@ ShoutcastSource::ShoutcastSource(ShoutcastConfig cfg) : cfg_{std::move(cfg)} {
 }
 
 ShoutcastSource::~ShoutcastSource() {
-    reconnect_in_progress_.store(false, std::memory_order_release);
     if (reconnect_thread_.joinable()) reconnect_thread_.join();
     stop_stream_locked();
 }
@@ -223,7 +222,6 @@ bool ShoutcastSource::initialize() {
 
 void ShoutcastSource::shutdown() noexcept {
     metadata_controller_->stop();
-    reconnect_in_progress_.store(false, std::memory_order_release);
     if (reconnect_thread_.joinable()) reconnect_thread_.join();
     {
         frdx::ScopedLock lk{mu_};
@@ -527,6 +525,12 @@ void ShoutcastSource::install_stream_locked(
 void ShoutcastSource::stop_stream_locked() {
     stream_.store(nullptr, std::memory_order_release);
     state_.store(PlaybackState::stopped, std::memory_order_release);
+    // A pending retry belonged to the stream we just dropped.  An in-flight
+    // worker (Connecting) sees stream_ changed and discards its own result.
+    auto backoff = ReconnectPhase::Backoff;
+    reconnect_phase_.compare_exchange_strong(backoff, ReconnectPhase::Idle,
+                                             std::memory_order_acq_rel);
+    reconnect_attempts_.store(0, std::memory_order_release);
 }
 
 void ShoutcastSource::restore_station_display_locked() {
@@ -1012,6 +1016,63 @@ void ShoutcastSource::restart_metadata_for_current() {
                                 ws_filter, ws_hb, ws_sub, md_poll, md_epoch);
 }
 
+// ---- Reconnect worker ----
+
+void ShoutcastSource::run_reconnect(std::shared_ptr<Stream> ended, std::string url,
+                                    void* session, int attempt) {
+    auto stream_result = launch_stream(url, session);
+
+    ReconnectPhase next = ReconnectPhase::Idle;
+    int64_t retry_at    = 0;
+    bool restart_md     = false;
+    {
+        frdx::ScopedLock lk{mu_};
+        // The user paused, stopped or switched station while we were
+        // handshaking: the stream we were reviving is gone, so is our job.
+        if (stream_.load(std::memory_order_acquire) != ended || target_url_ != url) {
+            log::info("[shoutcast] background reconnect superseded (attempt {}), discarding",
+                      attempt);
+        } else if (stream_result && *stream_result) {
+            auto new_stream = std::shared_ptr<Stream>(std::move(*stream_result));
+            new_stream->metadata_epoch = reset_metadata_sync_locked();
+            stream_.store(new_stream, std::memory_order_release);
+            reconnect_attempts_.store(0, std::memory_order_release);
+            state_.store(PlaybackState::buffering, std::memory_order_release);
+            restart_md = true;
+            log::info("[shoutcast] background reconnect succeeded (attempt {})", attempt);
+        } else if (attempt < kReconnectAttemptsPerStation) {
+            log::warn("[shoutcast] background reconnect failed (attempt {})", attempt);
+            next     = ReconnectPhase::Backoff;
+            retry_at = steady_ms() + 1000LL * attempt;
+        } else {
+            log::warn("[shoutcast] background reconnect failed (attempt {}); giving up on station",
+                      attempt);
+            reconnect_attempts_.store(0, std::memory_order_release);
+            next = ReconnectPhase::Backoff;
+            const bool can_cycle = flat_presets_.empty() ? cfg_.presets.size() > 1
+                                                         : flat_presets_.size() > 1;
+            if (can_cycle) {
+                // Moving target_url_ to the next preset makes the next pump()
+                // attempt reconnect there.
+                cycle_preset();
+                restore_station_display_locked();
+                retry_at   = steady_ms();
+                restart_md = true;
+            } else {
+                info_.title  = display_name_;
+                info_.artist = "Unable to reach this station";
+                clear_pending_metadata_locked();
+                info_gen_.fetch_add(1, std::memory_order_release);
+                retry_at = steady_ms() + 10'000;
+            }
+        }
+    }
+    if (restart_md) restart_metadata_for_current();
+    reconnect_retry_at_ms_.store(retry_at, std::memory_order_release);
+    // Last action: tells pump() this worker is done.
+    reconnect_phase_.store(next, std::memory_order_release);
+}
+
 // ---- PCM pump ----
 
 void ShoutcastSource::pump(RingBuffer& ring) {
@@ -1046,89 +1107,36 @@ void ShoutcastSource::pump(RingBuffer& ring) {
         return r;
     };
 
-    // If the stream has ended, kick off a background reconnect so the
-    // remaining ring-buffer audio keeps playing without interruption.
+    // If the stream has ended, reconnect in the background so the remaining
+    // ring-buffer audio keeps playing.  See ReconnectPhase in the header.
     if (ended) {
-        if (reconnect_in_progress_.load(std::memory_order_acquire)) {
-            // Reconnect already in flight — just update position.
+        const auto phase = reconnect_phase_.load(std::memory_order_acquire);
+        if (phase == ReconnectPhase::Connecting ||
+            (phase == ReconnectPhase::Backoff &&
+             steady_ms() < reconnect_retry_at_ms_.load(std::memory_order_acquire))) {
             update_position();
             return;
         }
-        // Launch reconnect on a background thread.  The HTTP handshake
-        // blocks there, not in pump(), so the control loop keeps ticking
-        // and the DSP callback keeps reading from the ring buffer.
-        reconnect_in_progress_.store(true, std::memory_order_release);
-        int attempts = reconnect_attempts_.fetch_add(1, std::memory_order_acq_rel) + 1;
-        // Snapshot the URL and session under lock so the background thread
-        // doesn't need mu_ for the handshake.
+        reconnect_phase_.store(ReconnectPhase::Connecting, std::memory_order_release);
+        const int attempt = reconnect_attempts_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        // Snapshot the URL and session under lock so the worker doesn't need
+        // mu_ for the handshake.
         std::string url;
         void* session = nullptr;
         {
             frdx::ScopedLock lk{mu_};
             url = target_url_;
             session = winhttp_session_;
-            if (attempts <= 3) {
-                info_.title  = display_name_;
-                info_.artist = "Attempting to reconnect to station";
-                clear_pending_metadata_locked();
-                info_gen_.fetch_add(1, std::memory_order_release);
-            } else {
-                reconnect_attempts_.store(0, std::memory_order_release);
-                info_.title  = display_name_;
-                info_.artist = "Unable to reach this station";
-                clear_pending_metadata_locked();
-                info_gen_.fetch_add(1, std::memory_order_release);
-            }
+            info_.title  = display_name_;
+            info_.artist = "Attempting to reconnect to station";
+            clear_pending_metadata_locked();
+            info_gen_.fetch_add(1, std::memory_order_release);
         }
-        // The previous reconnect thread has finished its work (reconnect_in_progress_
-        // was false when we entered this branch, so its lambda already returned).
-        // Detach instead of joining — we're on the audio render thread and even a
-        // brief join is undesirable.  The destructor/shutdown() join the final thread.
+        // The previous worker has finished (phase was not Connecting), so
+        // detach instead of joining — we're on the audio render thread.
         if (reconnect_thread_.joinable()) reconnect_thread_.detach();
-        reconnect_thread_ = std::thread([this, url, session, attempts] {
-            auto stream_result = launch_stream(url, session);
-            if (stream_result && *stream_result) {
-                auto new_stream = std::shared_ptr<Stream>(std::move(*stream_result));
-                {
-                    frdx::ScopedLock lk{mu_};
-                    const auto epoch = reset_metadata_sync_locked();
-                    new_stream->metadata_epoch = epoch;
-                    stream_.store(new_stream, std::memory_order_release);
-                    reconnect_attempts_.store(0, std::memory_order_release);
-                }
-                state_.store(PlaybackState::buffering, std::memory_order_release);
-                restart_metadata_for_current();
-                log::info("[shoutcast] background reconnect succeeded (attempt {})", attempts);
-            } else {
-                log::warn("[shoutcast] background reconnect failed (attempt {})", attempts);
-                // After 3 failures, cycle to next preset and try it.
-                if (attempts >= 3) {
-                    {
-                        frdx::ScopedLock lk{mu_};
-                        if (!cfg_.presets.empty() || !stations_.empty()) {
-                            cycle_preset();
-                        }
-                    }
-                    std::string next_url;
-                    {
-                        frdx::ScopedLock lk{mu_};
-                        next_url = target_url_;
-                    }
-                    auto retry = launch_stream(next_url, session);
-                    if (retry && *retry) {
-                        auto new_stream = std::shared_ptr<Stream>(std::move(*retry));
-                        frdx::ScopedLock lk{mu_};
-                        const auto epoch = reset_metadata_sync_locked();
-                        new_stream->metadata_epoch = epoch;
-                        stream_.store(new_stream, std::memory_order_release);
-                        reconnect_attempts_.store(0, std::memory_order_release);
-                        state_.store(PlaybackState::buffering, std::memory_order_release);
-                    }
-                    restart_metadata_for_current();
-                }
-            }
-            reconnect_in_progress_.store(false, std::memory_order_release);
-        });
+        reconnect_thread_ = std::thread(&ShoutcastSource::run_reconnect, this, p,
+                                        std::move(url), session, attempt);
         update_position();
         return;
     }

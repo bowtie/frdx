@@ -285,17 +285,34 @@ private:
     // Persistent WinHTTP session handle shared across polling connections.
     void* winhttp_session_ = nullptr;
 
-    // Retry counter to preserve active station during brief network dropouts.
-    std::atomic<int> reconnect_attempts_{0};
-
-    // Background reconnect thread: when the stream dies, we launch a new
-    // connection on a separate thread so the remaining ring-buffer audio
-    // keeps playing without interruption.  In pump() the previous thread is
-    // detached (its lambda already returned — reconnect_in_progress_ is false)
-    // rather than joined, to avoid blocking the audio render thread.  The
-    // destructor and shutdown() join the final reconnect_thread_.
-    std::atomic<bool> reconnect_in_progress_{false};
+    // ── Reconnect state machine ──
+    // When the current stream ends, pump() reconnects on a background thread
+    // so the remaining ring-buffer audio keeps playing.  pump() owns the
+    // Idle/Backoff -> Connecting edge; the worker owns every edge out of
+    // Connecting, and its phase store is its last action, so a non-Connecting
+    // phase means the previous worker is done (pump() detaches it rather than
+    // joining on the audio thread; the destructor/shutdown() join the last).
+    //
+    //   Idle       --stream ended--> Connecting (attempt n on this station)
+    //   Backoff    --retry_at passed--> Connecting (attempt n+1)
+    //   Connecting --success--> Idle                (new stream, attempts = 0)
+    //   Connecting --fail, n < kReconnectAttemptsPerStation--> Backoff (n s)
+    //   Connecting --fail, n == limit, other presets--> cycle preset,
+    //                                         attempts = 0, Backoff (now)
+    //   Connecting --fail, n == limit, no other preset--> "Unable to reach",
+    //                                         attempts = 0, Backoff (10 s)
+    //   Connecting --stream_ replaced or stopped meanwhile--> Idle (discard)
+    //   stop_stream_locked() resets Backoff to Idle and clears attempts.
+    enum class ReconnectPhase : std::uint8_t { Idle, Connecting, Backoff };
+    static constexpr int kReconnectAttemptsPerStation = 3;
+    std::atomic<ReconnectPhase> reconnect_phase_{ReconnectPhase::Idle};
+    std::atomic<int> reconnect_attempts_{0};       // attempts on the current station
+    std::atomic<int64_t> reconnect_retry_at_ms_{0}; // Backoff deadline (steady_ms)
     std::thread reconnect_thread_;
+
+    // Worker body for one reconnect attempt (runs on reconnect_thread_).
+    void run_reconnect(std::shared_ptr<Stream> ended, std::string url, void* session,
+                       int attempt) FRDX_EXCLUDES(mu_);
 
     // Background metadata poller (ICY + WebSocket). Allocated on heap so
     // shoutcast_source.hpp only needs a forward declaration (avoids circular
