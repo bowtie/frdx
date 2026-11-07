@@ -69,22 +69,34 @@ bool is_tex_injection_enabled() noexcept {
 // unexpected states.
 static std::atomic<bool> g_radio_active{false};
 
-// Atomic flag: true when g_unverified or g_streamer_mode have entries.
-// Updated by CreateSRV hook (add) and process_texture_injection (remove).
-// This lets the ECL hook fast-path without taking the mutex.
+// Lock-free mirror of "fingerprint work exists" (g_unverified or g_pending_fp
+// non-empty) so the ECL hook can fast-path without taking the mutex.  Only
+// written by refresh_work_pending_locked().
 static std::atomic<bool> g_tex_work_pending{false};
 
 // ── Crash diagnostics ──
 // Tracks the last operation attempted by process_texture_injection so
 // that if a crash occurs, the log shows exactly what was happening.
-static std::atomic<int> g_last_op{0}; // 0=idle, 1=fingerprint, 2=inject, 3=barrier, 4=copy, 5=fence_wait
+enum class TexOp : int { idle = 0, fingerprint, execute, barrier, copy, fence_wait };
+constexpr const char* tex_op_name(int op) noexcept {
+    switch (static_cast<TexOp>(op)) {
+        case TexOp::idle: return "idle";
+        case TexOp::fingerprint: return "fingerprint";
+        case TexOp::execute: return "execute";
+        case TexOp::barrier: return "barrier";
+        case TexOp::copy: return "copy";
+        case TexOp::fence_wait: return "fence_wait";
+    }
+    return "?";
+}
+static std::atomic<int> g_last_op{0}; // a TexOp
 static std::atomic<uint64_t> g_last_op_resource{0}; // resource pointer being operated on
 static std::atomic<uint64_t> g_ecl_count{0};        // total ECL calls processed
 
 // Log the last operation before executing it. If we crash, this is the
 // last line in the log.
 #define TEX_TRACE_OP(op, res) do { \
-    g_last_op.store(op, std::memory_order_release); \
+    g_last_op.store(static_cast<int>(TexOp::op), std::memory_order_release); \
     g_last_op_resource.store(reinterpret_cast<uint64_t>(res), std::memory_order_release); \
 } while(0)
 
@@ -141,11 +153,20 @@ bool is_target_texture(ID3D12Resource* pResource) {
 
 // ── Texture tracking ──
 
+// Per-texture lifecycle.  A texture's state is the container that holds it;
+// g_tracked_resources holds every resource in any of the three, so CreateSRV
+// can dedupe in O(1).
+//
+//   (untracked) --CreateSRV, target dims--> g_unverified
+//   g_unverified --2 s old--> g_pending_fp      (async GPU readback submitted)
+//   g_unverified --5 s old / UI reload gap--> (untracked)
+//   g_pending_fp --readback: placeholder hash--> g_streamer_mode (injected into)
+//   g_pending_fp --readback: other / failed--> (untracked)
+//   g_streamer_mode --over cap / only our ref left--> (untracked)
+//   any --injection disabled / SEH--> (untracked)
 struct TrackedTexture {
     wil::com_ptr<ID3D12Resource> resource;
     std::chrono::steady_clock::time_point first_seen;
-    bool fingerprinted = false;
-    bool is_placeholder = false;
 };
 
 // An in-flight, asynchronous GPU readback kicked off by kickoff_fingerprint().
@@ -172,6 +193,11 @@ std::vector<TrackedTexture> g_streamer_mode;   // fingerprinted as placeholder
 std::vector<PendingFingerprint> g_pending_fp;  // readback submitted, awaiting GPU
 std::chrono::steady_clock::time_point g_last_cleanup;
 
+void refresh_work_pending_locked() {
+    g_tex_work_pending.store(!g_unverified.empty() || !g_pending_fp.empty(),
+                             std::memory_order_release);
+}
+
 void set_tex_injection_enabled(bool enabled) noexcept {
     const bool prev = g_tex_injection_enabled.exchange(enabled, std::memory_order_acq_rel);
     if (prev != enabled) {
@@ -184,7 +210,7 @@ void set_tex_injection_enabled(bool enabled) noexcept {
             g_streamer_mode.clear();
             g_unverified.clear();
             g_tracked_resources.clear();
-            g_tex_work_pending.store(!g_pending_fp.empty(), std::memory_order_release);
+            refresh_work_pending_locked();
         }
     }
 }
@@ -540,7 +566,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
                                            static_cast<UINT>(variant.height));
             srcBox.back = 1;
 
-            TEX_TRACE_OP(3, tt.resource.get()); // barrier
+            TEX_TRACE_OP(barrier, tt.resource.get());
             D3D12_RESOURCE_BARRIER barrier{};
             barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             barrier.Transition.pResource = tt.resource.get();
@@ -549,7 +575,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
             pCmdList->ResourceBarrier(1, &barrier);
 
-            TEX_TRACE_OP(4, tt.resource.get()); // copy
+            TEX_TRACE_OP(copy, tt.resource.get());
             D3D12_TEXTURE_COPY_LOCATION dstLoc{};
             dstLoc.pResource = tt.resource.get();
             dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -557,7 +583,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
 
             pCmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
 
-            TEX_TRACE_OP(3, tt.resource.get()); // barrier back
+            TEX_TRACE_OP(barrier, tt.resource.get()); // barrier back
             std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
             pCmdList->ResourceBarrier(1, &barrier);
             injected_count++;
@@ -565,11 +591,11 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
 
         pCmdList->Close();
 
-        TEX_TRACE_OP(2, nullptr); // execute
+        TEX_TRACE_OP(execute, nullptr);
         ID3D12CommandList* lists[] = {pCmdList.get()};
         original_ExecuteCommandLists(pQueue, 1, lists);
 
-        TEX_TRACE_OP(5, nullptr); // fence wait
+        TEX_TRACE_OP(fence_wait, nullptr);
         wil::com_ptr<ID3D12Fence> pFence;
         if (FAILED(pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE,
                                          IID_PPV_ARGS(pFence.put())))) {
@@ -588,7 +614,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
             return false;
         }
 
-        TEX_TRACE_OP(0, nullptr); // idle
+        TEX_TRACE_OP(idle, nullptr);
         log::info("[texinject] injected BC7 into {} texture(s) (1 variant {}x{})",
                   injected_count, variant.width, variant.height);
         return true;
@@ -598,7 +624,7 @@ bool inject_pixels(ID3D12Device* pDevice, ID3D12CommandQueue* pQueue,
         const int op = g_last_op.load(std::memory_order_acquire);
         const uint64_t res = g_last_op_resource.load(std::memory_order_acquire);
         log::error("[texinject] SEH CRASH during inject (code=0x{:08X} op={} res=0x{:X})",
-                   code, op, res);
+                   code, tex_op_name(op), res);
         return false;
     }
 }
@@ -612,8 +638,11 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
         std::scoped_lock lk{g_tex_mutex};
 
         // Periodic clear: if no target texture has been seen for >1 second,
-        // clear unverified and pending fingerprint entries — the game likely
-        // reloaded its UI and those textures may be gone.  But keep
+        // clear unverified entries — the game likely reloaded its UI and
+        // those textures may be gone.  In-flight readbacks (g_pending_fp)
+        // are left to complete: they own the command allocator/list the GPU
+        // may still be executing, and releasing those early is invalid.
+        // They classify themselves normally when the fence lands.  Also keep
         // g_streamer_mode: those textures were already fingerprinted and
         // the game doesn't re-issue CreateSRV for existing placeholders, so
         // clearing them would make injection permanently unrecoverable.
@@ -623,10 +652,8 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_target_time).count() > 1) {
             for (const auto& tt : g_unverified) g_tracked_resources.erase(tt.resource.get());
-            for (const auto& pf : g_pending_fp) g_tracked_resources.erase(pf.resource.get());
             g_unverified.clear();
-            g_pending_fp.clear();
-            g_tex_work_pending.store(!g_streamer_mode.empty(), std::memory_order_release);
+            refresh_work_pending_locked();
         }
         last_target_time = now;
 
@@ -645,7 +672,7 @@ void __stdcall hook_CreateSRV(ID3D12Device* pDevice, ID3D12Resource* pResource,
             tt.first_seen = std::chrono::steady_clock::now();
             g_tracked_resources.insert(pResource);
             g_unverified.push_back(std::move(tt));
-            g_tex_work_pending.store(true, std::memory_order_release);
+            refresh_work_pending_locked();
         }
 
         // Force MipLevels = 1 to prevent mipmap reads
@@ -683,14 +710,14 @@ void process_texture_injection(ID3D12CommandQueue* pQueue) {
         const int op = g_last_op.load(std::memory_order_acquire);
         const uint64_t res = g_last_op_resource.load(std::memory_order_acquire);
         log::error("[texinject] SEH CRASH in injection (code=0x{:08X} op={} res=0x{:X} ecl={})",
-                   code, op, res, g_ecl_count.load());
+                   code, tex_op_name(op), res, g_ecl_count.load());
         // Clear state to prevent re-entry into broken textures.
         std::scoped_lock lk{g_tex_mutex};
         g_streamer_mode.clear();
         g_unverified.clear();
         g_pending_fp.clear();
         g_tracked_resources.clear();
-        g_tex_work_pending.store(false, std::memory_order_release);
+        refresh_work_pending_locked();
     }
 }
 
@@ -781,7 +808,7 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
     // kickoff_fingerprint's comment for why that distinction matters).
     std::vector<PendingFingerprint> started;
     for (auto* res : to_fingerprint) {
-        TEX_TRACE_OP(1, res); // fingerprint
+        TEX_TRACE_OP(fingerprint, res);
         PendingFingerprint pf;
         if (kickoff_fingerprint(pDevice.get(), pQueue, res, pf)) {
             started.push_back(std::move(pf));
@@ -810,9 +837,7 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
             }
             if (is_placeholder) {
                 TrackedTexture tt;
-                tt.resource       = std::move(it->resource);
-                tt.is_placeholder = true;
-                tt.fingerprinted  = true;
+                tt.resource = std::move(it->resource);
                 g_streamer_mode.push_back(std::move(tt));
                 // Bound unbounded growth: the game has been observed to
                 // keep recreating this SRV as it renders, so cap how many
@@ -831,8 +856,7 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
 
         // Update work-pending flag: keep polling next tick if there's
         // anything still unverified or still in flight on the GPU.
-        g_tex_work_pending.store(!g_unverified.empty() || !g_pending_fp.empty(),
-                                  std::memory_order_release);
+        refresh_work_pending_locked();
     }
     } // end if (fingerprint_due)
 
@@ -897,11 +921,11 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
                       g_unverified.size(),
                       g_pending_fp.size(),
                       g_tex_work_pending.load(std::memory_order_acquire),
-                      g_last_op.load(std::memory_order_acquire));
+                      tex_op_name(g_last_op.load(std::memory_order_acquire)));
         }
     }
 
-    TEX_TRACE_OP(0, nullptr); // idle
+    TEX_TRACE_OP(idle, nullptr);
 }
 
 // ── Install CreateSRV hook ──
