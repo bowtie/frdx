@@ -6,42 +6,44 @@
       {
         "id": "japan_hits",
         "name": "Japan Hits",
-        "url": "https://quincy.torontocast.com:2020/;?type=http"
-      },
-      {
-        "id": "natsukashii",
-        "name": "Natsukashii",
-        "url": "https://quincy.torontocast.com:2070/;?type=http"
+        "url": "https://quincy.torontocast.com:2020/;?type=http",
+        "artwork_url": "logos/asiadreamradio_japan_hits.jpg"
       },
       {
         "id": "jpop_kawaii",
         "name": "J-Pop Kawaii",
-        "url": "https://kathy.torontocast.com:3060/;?type=http"
+        "url": "https://kathy.torontocast.com:3060/;?type=http",
+        "artwork_url": "logos/asiadreamradio_jpop_kawaii.jpg"
       },
       {
         "id": "jpop_power",
         "name": "J-Pop Power",
-        "url": "https://kathy.torontocast.com:3560/;?type=http"
-      },
-      {
-        "id": "jazz_sakura",
-        "name": "Jazz Sakura",
-        "url": "https://kathy.torontocast.com:3330/;?type=http"
+        "url": "https://kathy.torontocast.com:3560/;?type=http",
+        "artwork_url": "logos/asiadreamradio_jpop_power.jpg"
       },
       {
         "id": "jrock",
         "name": "J-Rock",
-        "url": "https://kathy.torontocast.com:3340/;?type=http"
+        "url": "https://kathy.torontocast.com:3340/;?type=http",
+        "artwork_url": "logos/asiadreamradio_jrock.jpg"
       },
       {
         "id": "jclub_hiphop",
         "name": "J-Club / Hip Hop",
-        "url": "https://kathy.torontocast.com:3350/;?type=http"
+        "url": "https://kathy.torontocast.com:3350/;?type=http",
+        "artwork_url": "logos/asiadreamradio_jclub_hiphop.jpg"
       },
       {
-        "id": "bandstand_jazz",
-        "name": "Bandstand Jazz",
-        "url": "https://cast1.torontocast.com/bandstand"
+        "id": "natsukashii",
+        "name": "Natsukashii",
+        "url": "https://quincy.torontocast.com:2070/;?type=http",
+        "artwork_url": "logos/asiadreamradio_natsukashii.jpeg"
+      },
+      {
+        "id": "jazz_sakura",
+        "name": "Jazz Sakura",
+        "url": "https://kathy.torontocast.com:3330/;?type=http",
+        "artwork_url": "logos/asiadreamradio_jazz_sakura.jpg"
       }
     ],
     "metadata": {
@@ -49,20 +51,22 @@
       "url": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
       "stream_url_map": {
         "japan_hits": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=1",
-        "natsukashii": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=3",
         "jpop_kawaii": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=2",
         "jpop_power": "https://kathy.torontocast.com:2650/api/v2/history/?limit=1&offset=0&server=1",
-        "jazz_sakura": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=1",
         "jrock": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=4",
         "jclub_hiphop": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=5",
-        "bandstand_jazz": "https://cast1.torontocast.com:2050/api/v2/history/?limit=1&offset=0&server=1"
+        "natsukashii": "https://quincy.torontocast.com:1970/api/v2/history/?limit=1&offset=0&server=3",
+        "jazz_sakura": "https://kathy.torontocast.com:3310/api/v2/history/?limit=1&offset=0&server=1"
       },
       "poll_interval_secs": 20,
       "mapping": {
         "title": "results.0.title",
         "artist": "results.0.author",
+        "title_fallback": "results.0.metadata",
+        "split_separator": " - ",
         "artwork_url": "results.0.img_large_url"
-      }
+      },
+      "static_artwork_url": "logos/asiadreamradio_japan_hits.jpg"
     }
   },
   {
@@ -72,12 +76,14 @@
       {
         "id": "jpop",
         "name": "J-Pop",
-        "url": "https://listen.moe/stream"
+        "url": "https://listen.moe/fallback",
+        "artwork_url": "logos/listen_moe_jpop.png"
       },
       {
         "id": "kpop",
         "name": "K-Pop",
-        "url": "https://listen.moe/kpop/stream"
+        "url": "https://listen.moe/kpop/fallback",
+        "artwork_url": "logos/listen_moe_kpop.png"
       }
     ],
     "metadata": {
@@ -105,7 +111,8 @@
         "artist_separator": ", ",
         "artwork_url": "song.albums.0.image",
         "artwork_url_template": "https://cdn.listen.moe/covers/{value}"
-      }
+      },
+      "static_artwork_url": "logos/listen_moe_jpop.png"
     }
   },
   {
@@ -115,12 +122,14 @@
       {
         "id": "J1HITS",
         "name": "J1 HITS",
-        "url": "https://jenny.torontocast.com:2000/stream/J1HITS"
+        "url": "https://jenny.torontocast.com:2000/stream/J1HITS",
+        "artwork_url": "logos/j1_J1HITS.png"
       },
       {
         "id": "J1GOLD",
         "name": "J1 GOLD",
-        "url": "https://jenny.torontocast.com:2000/stream/J1GOLD"
+        "url": "https://jenny.torontocast.com:2000/stream/J1GOLD",
+        "artwork_url": "logos/j1_J1GOLD.png"
       }
     ],
     "metadata": {
@@ -140,17 +149,19 @@
         "title": "nowPlaying.title",
         "artist": "nowPlaying.artist",
         "artwork_url": "nowPlaying.imageUrl"
-      }
+      },
+      "static_artwork_url": "logos/j1_J1HITS.png"
     }
   },
   {
     "id": "doujinstyle",
-    "name": "Doujinstyle",
+    "name": "DoujinStyle",
     "streams": [
       {
         "id": "main",
-        "name": "radio_live_stream",
-        "url": "https://streams.radio.co/s5ff57669c/listen"
+        "name": "24/7 Doujin Music",
+        "url": "https://streams.radio.co/s5ff57669c/listen",
+        "artwork_url": "logos/doujinstyle_main.jpg"
       }
     ],
     "metadata": {
@@ -161,28 +172,31 @@
         "title": "data.track_title",
         "artist": "data.track_artist",
         "artwork_url": "data.artwork_urls.large"
-      }
+      },
+      "static_artwork_url": "logos/doujinstyle_main.jpg"
     }
   },
   {
-    "id": "yumico",
-    "name": "Yumi Co. Radio",
+    "id": "mikufm",
+    "name": "Miku Radio",
     "streams": [
       {
         "id": "main",
-        "name": "Future Funk, City Pop & Anime Groove",
-        "url": "https://yumicoradio.net/stream"
+        "name": "24/7 Miku",
+        "url": "https://miku.fm/listen/miku/mp3-320",
+        "artwork_url": "logos/mikufm_main.png"
       }
     ],
     "metadata": {
       "type": "rest",
-      "url": "https://yumicoradio.net/api/nowplaying/1",
+      "url": "https://miku.fm/api/nowplaying/miku",
       "poll_interval_secs": 15,
       "mapping": {
         "title": "now_playing.song.title",
         "artist": "now_playing.song.artist",
         "artwork_url": "now_playing.song.art"
-      }
+      },
+      "static_artwork_url": "logos/mikufm_main.png"
     }
   },
   {
@@ -190,119 +204,49 @@
     "name": "Box Radio",
     "streams": [
       {
-        "id": "chillwave",
-        "name": "Chillwave.",
-        "url": "https://play.streamafrica.net/chillwave",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/47JSJ7yvtr9UeTN7kTH7kBkXWkQqivOCVA1x716D.jpg"
-      },
-      {
-        "id": "dreamscapes",
-        "name": "dreamscapes",
-        "url": "https://play.streamafrica.net/dreamscapes",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/lSrRp52iXyNbPdpMN1b32lhRE4WLr9cFHpRg9Mma.png"
-      },
-      {
-        "id": "game_radio",
-        "name": "Game Radio",
-        "url": "https://play.streamafrica.net/gameradio",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/jq2iVg9dFMSkvTfqiWgrBxA2auH1JGwwMyTVUSLd.png"
-      },
-      {
         "id": "jpop_radio",
         "name": "J-POP Radio",
         "url": "https://play.streamafrica.net/jpopradio",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/if7vjTynWEAN4Q7iOrQxHWUhZBctNkEs8SSo3x3j.jpg"
+        "artwork_url": "logos/boxradio_jpop_radio.jpg"
       },
       {
         "id": "japan_city_pop",
         "name": "Japan City Pop",
         "url": "https://play.streamafrica.net/japancitypop",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/j1kz0ciWwloZg9rRC7X720aC7gBShWfExYDj2WBX.jpg"
+        "artwork_url": "logos/boxradio_japan_city_pop.jpg"
       },
       {
         "id": "kpop_radio",
         "name": "K-POP Radio",
         "url": "https://play.streamafrica.net/kpopradio",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/XZxZczvnQ18CVrJsUNW0XjpWNJjDLZx1j5c5glLd.png"
+        "artwork_url": "logos/boxradio_kpop_radio.png"
       },
       {
         "id": "lofi_radio",
         "name": "Lofi Radio",
         "url": "https://boxradio-edge-00.streamafrica.net/lofi",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/VCrXox9p31yZCoPk7Ta58hGIKMttrqCMzIbFUJYC.jpg"
-      },
-      {
-        "id": "mashup_dancehall",
-        "name": "Mash Up! Dancehall",
-        "url": "https://play.streamafrica.net/mashupradio",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/jRf6B1RLa9XcSPXFSDuxCBlkhln4QTEqA7Mtb49u.jpg"
-      },
-      {
-        "id": "pop",
-        "name": "POP!",
-        "url": "https://play.streamafrica.net/popmusicradio",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/R54nNMJnpH0F0SaaT8uigi64FhepMqvO0VRWBe0z.jpg"
-      },
-      {
-        "id": "pop_dance",
-        "name": "POP! Dance",
-        "url": "https://play.streamafrica.net/popmusicdance",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/myg3wkapZzQxOCum927DlpAymhdtF6VUGKrlZofZ.jpg"
-      },
-      {
-        "id": "radio_6",
-        "name": "Radio 6 — Classic Hip Hop",
-        "url": "https://play.streamafrica.net/radio6hiphop",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/GsLeGLOfsJJxW8PCFI0BBTl8WWBJDUdll2CM85Po.jpg"
-      },
-      {
-        "id": "radio_jazz",
-        "name": "Radio Jazz",
-        "url": "https://play.streamafrica.net/radiojazz",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/XaBn69sSW4nYFaVJ1sh2f0B2ezO4cOgXmokMVada.png"
-      },
-      {
-        "id": "rap",
-        "name": "RAP",
-        "url": "https://play.streamafrica.net/afrofusionrap",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/n2IutmlmIy21O7BPns5wHRdV5fU4cVqCnYJEf3cx.png"
-      },
-      {
-        "id": "reggae_republic",
-        "name": "Reggae Republic",
-        "url": "https://play.streamafrica.net/reggaerepublic",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/jzZomKNcuLAj3zyDy0rhBN3q77UOHLw8yCVyuRun.png"
+        "artwork_url": "logos/boxradio_lofi_radio.jpg"
       },
       {
         "id": "weeb_anime",
         "name": "Weeb Anime Radio",
         "url": "https://play.streamafrica.net/weebanimeradio",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/uec4MZkLSul6g63ifN3FKLlxlgptA22okrR45dUq.png"
+        "artwork_url": "logos/boxradio_weeb_anime.png"
       },
       {
         "id": "xrock",
         "name": "Xrock Radio",
         "url": "https://play.streamafrica.net/xrockradio",
-        "artwork_url": "https://ik.imagekit.io/boxradio/radios/okUh8WJjFilwRkhvyW83rmRFN9vHZGPN0zc9ldBW.jpg"
+        "artwork_url": "logos/boxradio_xrock.jpg"
       }
     ],
     "metadata": {
       "type": "rest",
-      "url": "https://public.radioapi.me/station/2ba1c853-423b-49ce-93cf-dc195332b4e4/nowplaying",
+      "url": "https://public.radioapi.me/station/0ced0370-267e-41b1-94fb-8166d7c1461c/nowplaying",
       "stream_url_map": {
-        "dreamscapes": "https://public.radioapi.me/station/cc05ad27-d362-4def-9970-d687e3838df7/nowplaying",
-        "game_radio": "https://public.radioapi.me/station/794e663b-e816-404a-bb03-a6cb4c75fddb/nowplaying",
-        "jpop_radio": "https://public.radioapi.me/station/0ced0370-267e-41b1-94fb-8166d7c1461c/nowplaying",
         "japan_city_pop": "https://public.radioapi.me/station/4d2701d3-87e9-4977-8c60-ec2bd9a17a79/nowplaying",
         "kpop_radio": "https://public.radioapi.me/station/06f7e465-5f9c-4ea5-b0b0-5b6417779da7/nowplaying",
         "lofi_radio": "https://public.radioapi.me/station/8d3ba53b-2948-44cf-bdbb-df15c54690c7/nowplaying",
-        "mashup_dancehall": "https://public.radioapi.me/station/930f834a-a331-4adc-b05e-fb8de68874a5/nowplaying",
-        "pop": "https://public.radioapi.me/station/e79cde6c-24ae-4607-ab9b-ce9c7a8d5e87/nowplaying",
-        "pop_dance": "https://public.radioapi.me/station/ee9e7f10-8de5-4c44-bb13-15919fe853d2/nowplaying",
-        "radio_6": "https://public.radioapi.me/station/1e3604e2-7107-4986-953d-b267850506ea/nowplaying",
-        "radio_jazz": "https://public.radioapi.me/station/2b022eeb-c3b7-4076-b269-ff0cc53bdb9e/nowplaying",
-        "rap": "https://public.radioapi.me/station/c09b5c85-f42c-4725-8118-685e63864662/nowplaying",
-        "reggae_republic": "https://public.radioapi.me/station/a1fd20fb-f904-43f8-ab27-a3d6933cb4ab/nowplaying",
         "weeb_anime": "https://public.radioapi.me/station/7567051f-33e9-4699-9262-74ae90cb18bd/nowplaying",
         "xrock": "https://public.radioapi.me/station/3ba401a1-93f0-4884-bb25-4872f276149d/nowplaying"
       },
@@ -314,13 +258,60 @@
     }
   },
   {
+    "id": "citypop",
+    "name": "City Pop",
+    "streams": [
+      {
+        "id": "tokyo",
+        "name": "Tokyo",
+        "url": "http://65.21.61.215:8000/citypopone",
+        "artwork_url": "logos/citypop_tokyo.png"
+      },
+      {
+        "id": "seoul",
+        "name": "Seoul",
+        "url": "http://65.21.61.215:8000/citypoptwo",
+        "artwork_url": "logos/citypop_seoul.png"
+      },
+      {
+        "id": "la",
+        "name": "Los Angeles",
+        "url": "http://65.21.61.215:8000/citypopthree",
+        "artwork_url": "logos/citypop_la.png"
+      },
+      {
+        "id": "taipei",
+        "name": "Taipei",
+        "url": "http://65.21.61.215:8000/citypopfour",
+        "artwork_url": "logos/citypop_taipei.png"
+      }
+    ],
+    "metadata": {
+      "type": "rest",
+      "url": "http://65.21.61.215:8000/stats?sid=3&json=1",
+      "stream_url_map": {
+        "tokyo": "http://65.21.61.215:8000/stats?sid=3&json=1",
+        "seoul": "http://65.21.61.215:8000/stats?sid=4&json=1",
+        "la": "http://65.21.61.215:8000/stats?sid=7&json=1",
+        "taipei": "http://65.21.61.215:8000/stats?sid=10&json=1"
+      },
+      "mapping": {
+        "title": "songtitle",
+        "split_separator": " · "
+      },
+      "static_artwork_url": "logos/citypop_tokyo.png",
+      "poll_interval_secs": 10
+    }
+  },
+  {
     "id": "plaza",
     "name": "Nightwave Plaza",
     "streams": [
       {
         "id": "main",
         "name": "Vaporwave & Future Funk",
-        "url": "http://radio.plaza.one/mp3"
+        "url": "http://radio.plaza.one/mp3",
+        "artwork_url": "logos/plaza_main.png"
       }
     ],
     "metadata": {
@@ -330,7 +321,8 @@
         "title": "song.title",
         "artist": "song.artist",
         "artwork_url": "song.artwork_src"
-      }
+      },
+      "static_artwork_url": "logos/plaza_main.png"
     }
   },
   {
@@ -340,7 +332,8 @@
       {
         "id": "main",
         "name": "Summer Radio",
-        "url": "https://s5.radio.co/sc9cb59935/listen"
+        "url": "https://s5.radio.co/sc9cb59935/listen",
+        "artwork_url": "logos/poolsuite_main.png"
       }
     ],
     "metadata": {
@@ -351,28 +344,31 @@
         "title": "data.track_title",
         "artist": "data.track_artist",
         "artwork_url": "data.artwork_urls.large"
-      }
+      },
+      "static_artwork_url": "logos/poolsuite_main.png"
     }
   },
   {
-    "id": "mikufm",
-    "name": "Miku Radio",
+    "id": "yumico",
+    "name": "Yumi Co. Radio",
     "streams": [
       {
         "id": "main",
-        "name": "24/7 Miku",
-        "url": "https://miku.fm/listen/miku/mp3-320"
+        "name": "Future Funk, City Pop & Anime Groove",
+        "url": "https://yumicoradio.net/stream",
+        "artwork_url": "logos/yumico_main.png"
       }
     ],
     "metadata": {
       "type": "rest",
-      "url": "https://miku.fm/api/nowplaying/miku",
+      "url": "https://yumicoradio.net/api/nowplaying/1",
       "poll_interval_secs": 15,
       "mapping": {
         "title": "now_playing.song.title",
         "artist": "now_playing.song.artist",
         "artwork_url": "now_playing.song.art"
-      }
+      },
+      "static_artwork_url": "logos/yumico_main.png"
     }
   }
 ]

@@ -221,6 +221,12 @@ Copy-Item $helperSrc $dist
 if (Test-Path (Join-Path $root "assets\fonts")) {
     Copy-Item -Recurse (Join-Path $root "assets\fonts\*") (Join-Path $dist "mods\frdx\fonts")
 }
+# Station logos referenced as "logos/..." by stations.example.json
+# (stream artwork_url / metadata.static_artwork_url).
+if (Test-Path (Join-Path $root "assets\logos")) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $dist "mods\frdx\logos") | Out-Null
+    Copy-Item -Recurse (Join-Path $root "assets\logos\*") (Join-Path $dist "mods\frdx\logos")
+}
 if ($null -ne $preservedConfig) {
     Set-Content -Path (Join-Path $dist "mods\frdx\config.toml") -Value $preservedConfig -NoNewline -Encoding utf8
 } else {
