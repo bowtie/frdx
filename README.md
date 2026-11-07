@@ -7,8 +7,7 @@ stations.
 
 ## Features
 
-- **Online radio.** Pick a station from the player bar. Station logos and album
-  art show on the radio HUD. Artwork can be turned off.
+- **Online radio.** Curated stations with logos and album art on the radio HUD.
 - **Fast boot.** Skips the intro wait.
 - **DualSense triggers.** Adaptive trigger feedback for braking and
   acceleration. Off by default.
