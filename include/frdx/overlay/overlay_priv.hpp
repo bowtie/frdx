@@ -161,8 +161,10 @@ struct DxResources {
     // full-res texture (blur_tex[0]), downsample it through a mip chain
     // (blur_tex[1..N], each half the previous size) using the 5-tap Kawase
     // downsample kernel, then upsample back to full res with the 8-tap
-    // upsample kernel.  blur_tex[0] holds the final blurred image, which
-    // draw_backdrop_blur() composites behind each ImGui window.
+    // upsample kernel.  The final upsample into level 0 is skipped when the
+    // chain has >= 2 iterations: the result is left in level 1 (half res,
+    // bilinear-upscaled at composite time) and blur_out_level records which
+    // level draw_backdrop_blur() composites behind each ImGui window.
     //
     // We allocate the maximum mip count once (iterationCount maxes out at 4,
     // so 5 textures) and only walk the first (iterationCount + 1) levels per
@@ -188,6 +190,7 @@ struct DxResources {
     DXGI_FORMAT blur_format   = DXGI_FORMAT_UNKNOWN;
     wil::com_ptr<ID3D12RootSignature> blur_root_sig;
     wil::com_ptr<ID3D12PipelineState> blur_down_pso, blur_up_pso;
+    UINT        blur_out_level = 0;    // level holding the finished blur
     bool blur_ready = false;
 };
 

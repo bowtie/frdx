@@ -4,6 +4,7 @@
 #include "frdx/platform/windows/subprocess.hpp"
 #include "frdx/re_log.hpp"
 
+#include <climits>
 #include <IconsKenney.h>
 
 #include <windows.h>
@@ -897,6 +898,21 @@ void release_backdrop_blur() {
     g_dx.blur_height = 0;
 }
 
+// Backbuffer-pixel rectangle covered by the blur windows.  draw_backdrop_blur()
+// accumulates into g_blur_rect_next while ImGui draws; the next frame's
+// capture_and_blur_backbuffer() consumes it (render thread only).  Windows are
+// laid out after the blur runs, so the region is one frame stale; the padding
+// added at capture time covers popups that grow or move in that frame.
+struct BlurRect {
+    int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
+    bool empty() const { return x1 <= x0 || y1 <= y0; }
+    void unite(const BlurRect& r) {
+        x0 = std::min(x0, r.x0); y0 = std::min(y0, r.y0);
+        x1 = std::max(x1, r.x1); y1 = std::max(y1, r.y1);
+    }
+};
+static BlurRect g_blur_rect_next;
+
 bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource* backbuffer) {
     if (!cmd || !backbuffer || !g_dx.blur_ready || !g_dx.blur_down_pso || !g_dx.blur_up_pso ||
         !g_dx.blur_root_sig || !g_dx.blur_tex[0]) {
@@ -909,7 +925,10 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
     // Skip the capture+blur pipeline entirely when no window that uses
     // blur is visible (e.g. only the console is open).  Saves the full
     // backbuffer copy + multi-pass blur for every such frame.
-    if (!any_blur_window_visible()) return true;
+    if (!any_blur_window_visible()) {
+        g_blur_rect_next = {};
+        return true;
+    }
 
     {
         const auto& strengths = blur_strength_table();
@@ -918,12 +937,84 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
             std::min<int>(strengths[s].iteration, static_cast<int>(DxResources::kBlurMaxLevels) - 1);
         const float offset = strengths[s].offset;
 
+        // The last upsample (level 1 -> 0) is the costliest pass: a full-res
+        // write with 8 taps per pixel.  Leave the result in level 1 and let
+        // bilinear filtering upscale it when compositing.  With a single
+        // iteration level 1 is only the raw 5-tap downsample, so keep the
+        // full chain there.
+        const int out_level = iterations >= 2 ? 1 : 0;
+        g_dx.blur_out_level = static_cast<UINT>(out_level);
+
+        // Work out which part of the frame the blur windows actually cover.
+        // Everything the kernels can pull into that area is bounded by the
+        // summed tap radius of all passes (in full-res pixels), so blurring
+        // only the area plus that radius gives identical pixels inside it.
+        const int W = static_cast<int>(g_dx.blur_width);
+        const int H = static_cast<int>(g_dx.blur_height);
+        BlurRect area{0, 0, W, H};
+        bool partial = false;
+        const BlurRect wanted = g_blur_rect_next;
+        g_blur_rect_next      = {};
+        if (!wanted.empty()) {
+            float radius = 2.0f; // bilinear footprint of the final composite
+            for (int j = 1; j <= iterations; ++j) {
+                radius += (0.5f * offset + 1.0f) * static_cast<float>(1 << (j - 1));
+            }
+            for (int j = iterations; j > out_level; --j) {
+                radius += (offset + 1.0f) * static_cast<float>(1 << j);
+            }
+            const int margin = static_cast<int>(std::ceil(radius)) + 4 + std::max(64, W / 32);
+            BlurRect e{std::max(0, wanted.x0 - margin), std::max(0, wanted.y0 - margin),
+                       std::min(W, wanted.x1 + margin), std::min(H, wanted.y1 + margin)};
+            // Not worth the bookkeeping unless it skips a good chunk of the frame.
+            const long long e_area = static_cast<long long>(e.x1 - e.x0) * (e.y1 - e.y0);
+            if (!e.empty() && e_area * 10 < static_cast<long long>(W) * H * 6) {
+                area    = e;
+                partial = true;
+            }
+        }
+        // Scissor rectangle for the pass writing `level` (1 texel of slack).
+        auto level_scissor = [&](UINT level) {
+            const int lw = static_cast<int>(g_dx.blur_level_w[level]);
+            const int lh = static_cast<int>(g_dx.blur_level_h[level]);
+            const int sh = static_cast<int>(level);
+            const int round = (1 << sh) - 1;
+            return D3D12_RECT{std::max(0, (area.x0 >> sh) - 1), std::max(0, (area.y0 >> sh) - 1),
+                              std::min(lw, ((area.x1 + round) >> sh) + 1),
+                              std::min(lh, ((area.y1 + round) >> sh) + 1)};
+        };
+
         // 1) Copy the (RENDER_TARGET) backbuffer into blur_tex[0], then restore it.
-        auto bb_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        transition_to(cmd, backbuffer, bb_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        transition_to(cmd, g_dx.blur_tex[0].get(), g_dx.blur_state[0], D3D12_RESOURCE_STATE_COPY_DEST);
-        cmd->CopyResource(g_dx.blur_tex[0].get(), backbuffer);
-        transition_to(cmd, backbuffer, bb_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        {
+            D3D12_RESOURCE_BARRIER bs[2];
+            UINT n = 0;
+            bs[n++] = transition_barrier(backbuffer, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
+            if (g_dx.blur_state[0] != D3D12_RESOURCE_STATE_COPY_DEST) {
+                bs[n++] = transition_barrier(g_dx.blur_tex[0].get(), g_dx.blur_state[0],
+                                             D3D12_RESOURCE_STATE_COPY_DEST);
+                g_dx.blur_state[0] = D3D12_RESOURCE_STATE_COPY_DEST;
+            }
+            cmd->ResourceBarrier(n, bs);
+        }
+        if (partial) {
+            D3D12_TEXTURE_COPY_LOCATION dst = {};
+            dst.pResource                   = g_dx.blur_tex[0].get();
+            dst.Type                        = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION src = dst;
+            src.pResource                   = backbuffer;
+            const D3D12_BOX box = {static_cast<UINT>(area.x0), static_cast<UINT>(area.y0), 0,
+                                   static_cast<UINT>(area.x1), static_cast<UINT>(area.y1), 1};
+            cmd->CopyTextureRegion(&dst, static_cast<UINT>(area.x0), static_cast<UINT>(area.y0), 0,
+                                   &src, &box);
+        } else {
+            cmd->CopyResource(g_dx.blur_tex[0].get(), backbuffer);
+        }
+        {
+            auto back = transition_barrier(backbuffer, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                           D3D12_RESOURCE_STATE_RENDER_TARGET);
+            cmd->ResourceBarrier(1, &back);
+        }
 
         // Shared pipeline state for every pass.
         // SetDescriptorHeaps is already done by the overlay's main render
@@ -932,10 +1023,19 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
         cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         auto run_pass = [&](UINT read, UINT draw, ID3D12PipelineState* pso) {
-            transition_to(cmd, g_dx.blur_tex[read].get(), g_dx.blur_state[read],
-                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            transition_to(cmd, g_dx.blur_tex[draw].get(), g_dx.blur_state[draw],
-                          D3D12_RESOURCE_STATE_RENDER_TARGET);
+            D3D12_RESOURCE_BARRIER bs[2];
+            UINT n = 0;
+            if (g_dx.blur_state[read] != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) {
+                bs[n++] = transition_barrier(g_dx.blur_tex[read].get(), g_dx.blur_state[read],
+                                             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                g_dx.blur_state[read] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            }
+            if (g_dx.blur_state[draw] != D3D12_RESOURCE_STATE_RENDER_TARGET) {
+                bs[n++] = transition_barrier(g_dx.blur_tex[draw].get(), g_dx.blur_state[draw],
+                                             D3D12_RESOURCE_STATE_RENDER_TARGET);
+                g_dx.blur_state[draw] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            }
+            if (n) cmd->ResourceBarrier(n, bs);
 
             D3D12_VIEWPORT vp = {0.0f,
                                  0.0f,
@@ -943,8 +1043,9 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
                                  static_cast<float>(g_dx.blur_level_h[draw]),
                                  0.0f,
                                  1.0f};
-            D3D12_RECT scissor = {0, 0, static_cast<LONG>(g_dx.blur_level_w[draw]),
-                                  static_cast<LONG>(g_dx.blur_level_h[draw])};
+            // Full-size viewport keeps the shader's uv->texture mapping intact;
+            // only the scissor limits which pixels are shaded.
+            const D3D12_RECT scissor = level_scissor(draw);
             cmd->RSSetViewports(1, &vp);
             cmd->RSSetScissorRects(1, &scissor);
 
@@ -962,13 +1063,14 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
 
         // 2) Downsample chain: blur_tex[i-1] -> blur_tex[i].
         for (int i = 1; i <= iterations; ++i) run_pass(i - 1, i, g_dx.blur_down_pso.get());
-        // 3) Upsample chain back into blur_tex[0]: blur_tex[i] -> blur_tex[i-1].
-        for (int i = iterations; i >= 1; --i) run_pass(i, i - 1, g_dx.blur_up_pso.get());
+        // 3) Upsample chain: blur_tex[i] -> blur_tex[i-1], stopping at out_level.
+        for (int i = iterations; i > out_level; --i) run_pass(i, i - 1, g_dx.blur_up_pso.get());
     }
 
-    // 4) blur_tex[0] now holds the blurred scene; hand it to ImGui.
+    // 4) The out-level texture now holds the blurred scene; hand it to ImGui.
     //    Ensure it's in SRV state.
-    transition_to(cmd, g_dx.blur_tex[0].get(), g_dx.blur_state[0],
+    const UINT out = g_dx.blur_out_level;
+    transition_to(cmd, g_dx.blur_tex[out].get(), g_dx.blur_state[out],
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     return true;
 }
@@ -985,7 +1087,7 @@ void draw_backdrop_blur(float alpha_scalar) {
     const ImVec2 p_max =
         ImVec2(p_min.x + ImGui::GetWindowSize().x, p_min.y + ImGui::GetWindowSize().y);
 
-    // blur_tex[0] covers the whole backbuffer, so the UV at a screen position
+    // The blur texture covers the whole backbuffer, so the UV at a screen position
     // is just (screen - viewport_origin) / viewport_size.  Clamp handles
     // windows that overhang the viewport edges.
     const auto* viewport = ImGui::GetMainViewport();
@@ -1004,9 +1106,15 @@ void draw_backdrop_blur(float alpha_scalar) {
     if (alpha > 1.0f) alpha = 1.0f;
     const float rounding = ImGui::GetStyle().WindowRounding;
 
+    // Record the covered backbuffer area so next frame's capture can skip the rest.
+    g_blur_rect_next.unite({static_cast<int>(std::floor(u0 * static_cast<float>(g_dx.blur_width))),
+                            static_cast<int>(std::floor(v0 * static_cast<float>(g_dx.blur_height))),
+                            static_cast<int>(std::ceil(u1 * static_cast<float>(g_dx.blur_width))),
+                            static_cast<int>(std::ceil(v1 * static_cast<float>(g_dx.blur_height)))});
+
     // 1) The blurred scene (forced opaque via the SRV; faded by alpha_scalar).
     const ImU32 img_col = IM_COL32(255, 255, 255, static_cast<int>(alpha * 255.0f));
-    dl->AddImageRounded(static_cast<ImTextureID>(g_dx.blur_srv_gpu[0].ptr), p_min, p_max,
+    dl->AddImageRounded(static_cast<ImTextureID>(g_dx.blur_srv_gpu[g_dx.blur_out_level].ptr), p_min, p_max,
                         ImVec2(u0, v0), ImVec2(u1, v1), img_col, rounding);
 
     // 2) A translucent frosted-glass tint on top, so opaque widgets have a
