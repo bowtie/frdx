@@ -3,15 +3,17 @@
 ![Forza Radio DX player bar in Forza Horizon 6](docs/images/in-game.webp)
 
 A mod for **Forza Horizon 6** that replaces the in-game radio with a curated
-set of online radio stations, and ships with a ton of extras that make the
-game nicer to play.
+set of online radio stations, plus a few quality-of-life extras.
 
 ## Features
 
 - **Online radio** – curated stations streamed into the game's own audio
   engine, with station logos and album art on the HUD.
-- **Fast boot** – skips the startup black-screen hold.
-- **DualSense triggers** – adaptive trigger feedback for braking, throttle,
+
+Quality of life:
+
+- **Fast boot** – skip the wait on the intro screens at startup.
+- **DualSense triggers** – responsive adaptive triggers for braking, throttle,
   ABS, rev limiter and more (off by default).
 - **Overlay** – player bar, station selector and settings. Press **Insert**.
 - **No pause on alt-tab** – optional.
