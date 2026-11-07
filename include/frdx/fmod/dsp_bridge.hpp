@@ -230,6 +230,8 @@ private:
     uint32_t read_live_handle(std::byte* radio_stream) const noexcept;
     bool ensure_dsp_locked() noexcept;
     void detach_current_handle_locked() noexcept;
+    // Remove the DSP from the channel in its grace period (if any), now.
+    void flush_pending_detach_locked() noexcept;
     void destroy_current_dsp_locked() noexcept;
     void install_dsp_locked(uint32_t handle) noexcept;
 
@@ -243,6 +245,13 @@ private:
     // Deferred detach: when retargeting, we install on the new channel
     // immediately but keep the DSP on the old channel for a short grace
     // period so the new channel has time to ramp up without a cutoff.
+    // Channel attachment (current_handle_, pending_detach_handle_):
+    //   (0, 0)      detached
+    //   (h, 0)      attached to h
+    //   (h, old)    attached to h, still on old until the 200 ms grace ends
+    //   retarget inside the grace: the older `old` is detached first (at
+    //   most one channel in grace); retarget back to `old`: adopt it,
+    //   no second addDSP.  detach(): both removed at once.
     uint32_t pending_detach_handle_ = 0;
     std::chrono::steady_clock::time_point pending_detach_time_;
     mutable uint32_t last_bad_handle_ =

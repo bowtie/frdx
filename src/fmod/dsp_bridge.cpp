@@ -176,14 +176,18 @@ bool DSPBridge::validate_handle(uint32_t handle) const noexcept {
     return inst != nullptr;
 }
 
+void DSPBridge::flush_pending_detach_locked() noexcept {
+    if (!pending_detach_handle_) return;
+    const uint32_t pending = pending_detach_handle_;
+    pending_detach_handle_ = 0;
+    if (!current_dsp_ || !fns_.channel_control_rem_dsp) return;
+    // Result is intentionally discarded: cleanup path, nothing to retry on.
+    (void)seh_call([&] { fns_.channel_control_rem_dsp(pending, current_dsp_); }); // NOLINT(bugprone-unused-return-value)
+}
+
 void DSPBridge::detach_current_handle_locked() noexcept {
-    // Cancel any pending deferred detach — we're detaching everything now.
-    if (pending_detach_handle_ && current_dsp_ && fns_.channel_control_rem_dsp) {
-        const uint32_t pending = pending_detach_handle_;
-        pending_detach_handle_ = 0;
-        // Result is intentionally discarded: cleanup path, nothing to retry on.
-        (void)seh_call([&] { fns_.channel_control_rem_dsp(pending, current_dsp_); }); // NOLINT(bugprone-unused-return-value)
-    }
+    // Detaching everything now, including any channel still in its grace period.
+    flush_pending_detach_locked();
     if (!current_dsp_ || !current_handle_) return;
     const uint32_t old_handle = current_handle_;
     current_handle_           = 0;
@@ -301,14 +305,9 @@ void DSPBridge::retarget_if_needed() noexcept {
 
     // Process any pending deferred detach: if we retargeted recently and
     // the grace period has elapsed, remove the DSP from the old channel.
-    if (pending_detach_handle_ && current_dsp_ && fns_.channel_control_rem_dsp) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now - pending_detach_time_ >= std::chrono::milliseconds(200)) {
-            const uint32_t old = pending_detach_handle_;
-            pending_detach_handle_ = 0;
-            // Result is intentionally discarded: deferred-cleanup path, nothing to retry on.
-            (void)seh_call([&] { fns_.channel_control_rem_dsp(old, current_dsp_); }); // NOLINT(bugprone-unused-return-value)
-        }
+    if (pending_detach_handle_ &&
+        std::chrono::steady_clock::now() - pending_detach_time_ >= std::chrono::milliseconds(200)) {
+        flush_pending_detach_locked();
     }
 
     // Prefer the abstract provider (avoids touching game memory directly);
@@ -327,6 +326,22 @@ void DSPBridge::retarget_if_needed() noexcept {
     }
 
     log::info("[dsp] retargeting -> handle 0x{:X}", handle);
+    // Bounced back to the channel still in its grace period: the DSP is
+    // already on it, so adopt it instead of adding it twice and then
+    // removing it from the live channel when the grace timer fires.
+    if (handle == pending_detach_handle_) {
+        pending_detach_handle_ = 0;
+        const uint32_t prev    = current_handle_;
+        current_handle_        = handle;
+        if (prev) {
+            pending_detach_handle_ = prev;
+            pending_detach_time_   = std::chrono::steady_clock::now();
+        }
+        return;
+    }
+    // Only one channel can be in its grace period; a second retarget inside
+    // the window detaches the older one now rather than leaking it.
+    if (current_handle_) flush_pending_detach_locked();
     // Install on the new channel immediately, but DEFER removing from the
     // old channel by 200ms.  This gives the new FMOD channel time to ramp
     // up and start calling our DSP callback before we cut the old one.
