@@ -46,5 +46,4 @@ Fonts:
 
 ## License
 
-GPLv3, see [LICENSE](LICENSE). This is an unofficial fan project and isn't
-affiliated with Turn 10, Playground Games, Xbox Game Studios or Microsoft.
+GPLv3, see [LICENSE](LICENSE).
