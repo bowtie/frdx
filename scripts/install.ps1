@@ -70,10 +70,20 @@ if (-not (Test-Path $stations)) {
     Copy-Item (Join-Path $dist "mods\frdx\stations.json") $stations
     Write-Host "  + mods\frdx\stations.json  (seeded from example)" -ForegroundColor Yellow
 }
+$helper = Join-Path $dist "mods\frdx\frdx-helper.exe"
+if (Test-Path $helper) {
+    Copy-Item $helper (Join-Path $dataDir "frdx-helper.exe") -Force
+    Write-Host "  + mods\frdx\frdx-helper.exe" -ForegroundColor Yellow
+}
+if (Test-Path (Join-Path $dist "mods\frdx\logos")) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $dataDir "logos") | Out-Null
+    Copy-Item (Join-Path $dist "mods\frdx\logos\*") (Join-Path $dataDir "logos") -Force
+    Write-Host "  + mods\frdx\logos\" -ForegroundColor Yellow
+}
 if (Test-Path (Join-Path $dist "mods\frdx\fonts\FusionPixel12-ja.ttf")) {
     Copy-Item (Join-Path $dist "mods\frdx\fonts\*") (Join-Path $dataDir "fonts") -Force
     Write-Host "  + mods\frdx\fonts\" -ForegroundColor Yellow
 }
 
-Write-Host "`nDone. Launch the game, set Audio -> Radio DJ = Off, Streamer Mode = On." -ForegroundColor Green
+Write-Host "`nDone. Launch the game and set Audio -> Streamer Mode = On." -ForegroundColor Green
 Write-Host "The in-game overlay opens automatically; press Insert to show/hide it."
