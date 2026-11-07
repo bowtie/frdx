@@ -19,7 +19,7 @@ struct ShoutcastConfig {
 };
 
 struct AudioConfig {
-    float output_gain       = 1.0f;
+    float output_gain       = 0.5f;
     bool force_stereo_audio = false; // off => mono + FMOD_2D (clean 3D spatialisation)
 };
 

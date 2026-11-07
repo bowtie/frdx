@@ -11,7 +11,7 @@ last_station_id = "boxradio"       # station selected on first run; updated as y
 last_stream_id = "japan_city_pop"
 
 [audio]
-output_gain = 1.0
+output_gain = 0.5                  # volume, 0..1
 force_stereo_audio = false         # false = mono + FMOD_2D (clean 3D spatialisation)
 
 [overlay]
