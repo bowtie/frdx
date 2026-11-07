@@ -457,7 +457,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
     // ── Step 1: Download (or load from local disk) ──
     bool download_ok = false;
 
-    // Check if the URL is actually a local file path (e.g. "logos/boxradio_jpop.jpg").
+    // Check if the URL is actually a local file path (e.g. "logos/box-radio-jpop-radio.jpg").
     // Station logos are bundled with the dist and referenced as relative paths
     // in stations.json.  Loading from disk is instant (~1ms) vs downloading
     // from the web (~500ms-1s).  Works in both raw and non-raw modes.

@@ -24,7 +24,7 @@ namespace frdx {
 
 // Bundled image shown in the radio HUD when artwork is Off. It matches the
 // game's own streamer-mode placeholder.
-inline constexpr const char* kStreamerLogoUrl = "logos/streamer_mode.png";
+inline constexpr const char* kStreamerLogoUrl = "logos/streamer-mode.png";
 
 class TextureInjector {
 public:
