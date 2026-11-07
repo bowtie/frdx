@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <format>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -39,8 +40,14 @@ std::filesystem::path exe_dir() {
 // Mutes the game process via the Windows Core Audio API (ISimpleAudioVolume).
 // This silences the Bink intro video's audio so the clock-jump skip doesn't
 // produce an abrupt audio cut.  Unmuted when intro_done fires.
+//
+// The mute window is one-way: once released (intro closed, gate finished, or
+// no intro found) the process is never muted again.  Both flags are atomic
+// because BinkClose releases the mute on a game thread while the monitor
+// thread may be mid-retry.
 
-bool g_was_muted = false;  // tracks whether we currently have the process muted
+std::atomic<bool> g_was_muted{false};     // we currently have the process muted
+std::atomic<bool> g_mute_released{false}; // mute window is over; never re-mute
 
 bool set_process_mute(bool mute) {
     // CoInitialize is needed for COM; the game already has it, but be safe.
@@ -108,20 +115,32 @@ bool set_process_mute(bool mute) {
     return muted_count > 0;
 }
 
+void unmute_game_process();
+
 void mute_game_process() {
+    if (g_mute_released.load(std::memory_order_acquire) ||
+        g_was_muted.load(std::memory_order_acquire)) {
+        return;
+    }
     if (set_process_mute(true)) {
-        g_was_muted = true;
+        g_was_muted.store(true, std::memory_order_release);
         frdx::log::info("[fastboot] muted game process for intro skip");
+        // The window may have closed while set_process_mute was running.
+        if (g_mute_released.load(std::memory_order_acquire)) unmute_game_process();
     }
     // Don't log failure here — it's called in a retry loop and will log
     // once it succeeds.  The absence of the success log is the signal.
 }
 
+// Ends the mute window.  If the unmute call fails, g_was_muted stays set so
+// the monitor's next tick retries it.
 void unmute_game_process() {
-    if (!g_was_muted) return;
+    g_mute_released.store(true, std::memory_order_release);
+    if (!g_was_muted.exchange(false, std::memory_order_acq_rel)) return;
     if (set_process_mute(false)) {
-        g_was_muted = false;
         frdx::log::info("[fastboot] unmuted game process (intro done)");
+    } else {
+        g_was_muted.store(true, std::memory_order_release);
     }
 }
 
@@ -471,12 +490,37 @@ void install_hooks() {
 }
 
 // ───────────────────────── boot-phase monitor ─────────────────────────
+// Intro-gate lifecycle.  Owned by the monitor thread; other threads only see
+// its outputs (g_intro_done, g_watch_files, the process mute).
+//
+//   WaitingForIntro --intro .bk2 opened--> Watching
+//   WaitingForIntro --120s, no intro seen--> Finished   (no Enter spam)
+//   Watching  --spin tick--> SpinSeen
+//   SpinSeen  --still active--> Armed      (otherwise back to Watching)
+//   Armed     --collapsed, no jump this cycle--> Watching   (re-armable)
+//   Armed     --not collapsed, 400ms since last jump--> Armed (+ clock jump)
+//   Watching / SpinSeen / Armed --exit condition--> EnterSpam | Finished
+//       exit conditions: intro closed after >=1 jump, CAP jumps, 90s elapsed,
+//       or (Armed only) collapsed after >=1 jump this cycle
+//   EnterSpam --enter_window_ms elapsed--> Finished
+enum class GatePhase : uint8_t { WaitingForIntro, Watching, SpinSeen, Armed, EnterSpam, Finished };
+
+constexpr bool in_intro_window(GatePhase p) noexcept {
+    return p == GatePhase::Watching || p == GatePhase::SpinSeen || p == GatePhase::Armed;
+}
+constexpr bool gate_finished(GatePhase p) noexcept {
+    return p == GatePhase::EnterSpam || p == GatePhase::Finished;
+}
+
 void monitor() {
     constexpr uint64_t SPIN_MULT = 2;
     constexpr uint64_t SPIN_FLOOR = 50'000;
     constexpr size_t WINDOW = 12;
     constexpr uint32_t CAP = 8;
     constexpr uint32_t COLLAPSE_STOP = 3;
+    // Matches boot_window(): after this BinkOpen is no longer tagged, so an
+    // intro can't be recognised any more and waiting longer is pointless.
+    constexpr int64_t NO_INTRO_TIMEOUT_MS = 120'000;
 
     frdx::log::info("[fastboot] SKIP: intro='" + g_cfg.intro_video + "' jump=" +
             std::to_string(g_cfg.jump_ms) + "ms poll=" +
@@ -486,21 +530,36 @@ void monitor() {
     uint64_t pq = g_qpc_n.load(std::memory_order_relaxed);
     uint64_t ring[32] = {};
     size_t ri = 0, filled = 0;
-    uint32_t jumps = 0;
-    int64_t total = 0;
-    bool done = false;
-    int64_t disarm_t = 0;
-    int64_t last_enter_t = 0;
-    uint32_t enters = 0;
-    bool spam_done_logged = false;
-    int64_t last_jump = 0;
     uint64_t peak_dq = 0;
     uint64_t baseline = 0;
-    bool armed = false;
-    bool arm_pending = false;
-    int64_t intro_open_t = 0;
-    uint32_t collapse = 0;
-    uint32_t cycle_jumps = 0;
+
+    GatePhase phase = GatePhase::WaitingForIntro;
+    int64_t intro_open_t = 0;   // when Watching was first entered
+    uint32_t jumps = 0;         // gate jumps across all arm cycles
+    uint32_t cycle_jumps = 0;   // gate jumps in the current Armed cycle
+    uint32_t collapse = 0;      // consecutive inactive polls while Armed
+    int64_t last_jump = 0;
+    int64_t total = 0;          // total clock advance (gate + F8)
+    int64_t disarm_t = 0;       // when the gate finished
+    int64_t last_enter_t = 0;
+    uint32_t enters = 0;
+
+    // Leave the intro window: release the overlay, unmute, stop the file probe.
+    // `spam` = run the Enter spammer afterwards (only when an intro was seen).
+    auto finish_intro = [&](int64_t t, int64_t el, std::string_view detail, bool spam = true) {
+        spam = spam && g_cfg.enter_spammer;
+        phase = spam ? GatePhase::EnterSpam : GatePhase::Finished;
+        disarm_t = t;
+        g_intro_done.store(true, std::memory_order_release);
+        unmute_game_process();
+        g_watch_files.store(false, std::memory_order_relaxed);
+        frdx::log::info("[fastboot] [{}ms] intro window done ({}, total +{}ms)", el, detail, total);
+        if (spam) {
+            frdx::log::info("[fastboot] [{}ms] enter_spammer: Enter every {}ms for {}ms", el,
+                            static_cast<long long>(g_cfg.enter_interval_ms),
+                            static_cast<long long>(g_cfg.enter_window_ms));
+        }
+    };
 
     while (true) {
         Sleep(g_cfg.poll_ms);
@@ -509,8 +568,12 @@ void monitor() {
 
         // Retry the process mute until it succeeds — the game may not have
         // created audio sessions yet when hooks are first installed (FMOD/
-        // Bink not initialized).  Once muted, stop retrying.
-        if (g_cfg.mute_during_intro && !g_was_muted && !done) {
+        // Bink not initialized).  Once muted, stop retrying.  After the mute
+        // window is released (BinkClose may do that before the gate
+        // finishes), only retry a failed unmute.
+        if (g_mute_released.load(std::memory_order_acquire)) {
+            if (g_was_muted.load(std::memory_order_acquire)) unmute_game_process();
+        } else if (g_cfg.mute_during_intro && !gate_finished(phase)) {
             mute_game_process();
         }
 
@@ -525,10 +588,16 @@ void monitor() {
         ri = (ri + 1) % 32;
         if (filled < 32) ++filled;
 
-        if (!g_intro_open.load(std::memory_order_relaxed) && dq > baseline)
-            baseline = dq;
+        if (phase == GatePhase::WaitingForIntro && g_intro_open.load(std::memory_order_relaxed)) {
+            phase = GatePhase::Watching;
+            intro_open_t = t;
+        }
+
+        // Calibrate the spin threshold only before the intro opens.
+        if (phase == GatePhase::WaitingForIntro && dq > baseline) baseline = dq;
         uint64_t spin_min = std::max(baseline * SPIN_MULT, SPIN_FLOOR);
         bool spin = dq >= spin_min;
+        bool active = dq >= spin_min / 2;
 
         if (g_watch_files.load(std::memory_order_relaxed) && el > 180'000) {
             g_watch_files.store(false, std::memory_order_relaxed);
@@ -536,155 +605,96 @@ void monitor() {
 
         if (kVerbose && dq > 200'000 && dq > peak_dq) {
             peak_dq = dq;
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[fastboot] [%lldms] spin peak %llu/poll (thr=%llu, window=%lluB)",
-                     static_cast<long long>(el),
-                     static_cast<unsigned long long>(dq),
-                     static_cast<unsigned long long>(spin_min),
-                     window_read == UINT64_MAX ? 0ULL : window_read);
-            frdx::log::info(buf);
+            frdx::log::info("[fastboot] [{}ms] spin peak {}/poll (thr={}, window={}B)", el, dq,
+                            spin_min, window_read == UINT64_MAX ? 0ULL : window_read);
         }
-        if (kVerbose && g_intro_open.load(std::memory_order_relaxed) && !done) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[fastboot] [%lldms] win dq=%llu thr=%llu armed=%d jumps=%u window=%lluB",
-                     static_cast<long long>(el),
-                     static_cast<unsigned long long>(dq),
-                     static_cast<unsigned long long>(spin_min),
-                     armed ? 1 : 0, jumps,
-                     window_read == UINT64_MAX ? 0ULL : window_read);
-            frdx::log::info(buf);
+        if (kVerbose && in_intro_window(phase)) {
+            frdx::log::info("[fastboot] [{}ms] win dq={} thr={} armed={} jumps={} window={}B", el,
+                            dq, spin_min, phase == GatePhase::Armed ? 1 : 0, jumps,
+                            window_read == UINT64_MAX ? 0ULL : window_read);
         }
 
-        // F8 manual skip
+        // F8 manual skip (any phase)
         if (GetAsyncKeyState(0x77) & 0x8000) {
             jump_clock(g_cfg.jump_ms);
             total += g_cfg.jump_ms;
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[fastboot] [%lldms] F8 -> manual skip (clock +%lldms, total +%lldms)",
-                     static_cast<long long>(el), static_cast<long long>(g_cfg.jump_ms),
-                     static_cast<long long>(total));
-            frdx::log::info(buf);
+            frdx::log::info("[fastboot] [{}ms] F8 -> manual skip (clock +{}ms, total +{}ms)", el,
+                            static_cast<long long>(g_cfg.jump_ms), total);
             Sleep(200); // debounce
         }
 
-        // The gate: act inside the intro video's window
-        if (!done && g_intro_open.load(std::memory_order_relaxed)) {
-            if (intro_open_t == 0) intro_open_t = t;
-            if ((g_intro_closed.load(std::memory_order_relaxed) && jumps >= 1) ||
-                jumps >= CAP || el > 90'000) {
-                done = true;
-                disarm_t = t;
-                g_intro_done.store(true, std::memory_order_release);
-                unmute_game_process();
-                g_watch_files.store(false, std::memory_order_relaxed);
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                         "[fastboot] [%lldms] intro window done (closed=%d, %u jumps, total +%lldms)",
-                         static_cast<long long>(el),
-                         g_intro_closed.load(std::memory_order_relaxed) ? 1 : 0,
-                         jumps, static_cast<long long>(total));
-                frdx::log::info(buf);
-                if (g_cfg.enter_spammer) {
-                    char buf2[256];
-                    snprintf(buf2, sizeof(buf2),
-                             "[fastboot] [%lldms] enter_spammer: Enter every %lldms for %lldms",
-                             static_cast<long long>(el),
-                             static_cast<long long>(g_cfg.enter_interval_ms),
-                             static_cast<long long>(g_cfg.enter_window_ms));
-                    frdx::log::info(buf2);
-                }
-            } else {
-                if (!armed) {
-                    bool active = dq >= spin_min / 2;
-                    if (arm_pending && active) {
-                        armed = true;
-                        collapse = 0;
-                        cycle_jumps = 0;
-                        last_jump = t;
-                        char buf[256];
-                        snprintf(buf, sizeof(buf), "[fastboot] [%lldms] armed (%lldms after intro open)",
-                                 static_cast<long long>(el),
-                                 static_cast<long long>(t - intro_open_t));
-                        frdx::log::info(buf);
-                    } else {
-                        arm_pending = spin;
-                    }
-                }
-                if (armed) {
-                    if (dq < spin_min / 2) {
-                        ++collapse;
-                    } else {
-                        collapse = 0;
-                    }
-                    if (collapse >= COLLAPSE_STOP) {
-                        if (cycle_jumps >= 1) {
-                            done = true;
-                            disarm_t = t;
-                            g_intro_done.store(true, std::memory_order_release);
-                            unmute_game_process();
-                            g_watch_files.store(false, std::memory_order_relaxed);
-                            char buf[256];
-                            snprintf(buf, sizeof(buf),
-                                     "[fastboot] [%lldms] intro window done (collapsed after %u jumps, total +%lldms)",
-                                     static_cast<long long>(el), cycle_jumps,
-                                     static_cast<long long>(total));
-                            frdx::log::info(buf);
-                            if (g_cfg.enter_spammer) {
-                                char buf2[256];
-                                snprintf(buf2, sizeof(buf2),
-                                         "[fastboot] [%lldms] enter_spammer: Enter every %lldms for %lldms",
-                                         static_cast<long long>(el),
-                                         static_cast<long long>(g_cfg.enter_interval_ms),
-                                         static_cast<long long>(g_cfg.enter_window_ms));
-                                frdx::log::info(buf2);
-                            }
-                        } else {
-                            armed = false;
-                            arm_pending = false;
-                            collapse = 0;
-                            char buf[128];
-                            snprintf(buf, sizeof(buf),
-                                     "[fastboot] [%lldms] disarmed (transient, no jump landed -> re-armable)",
-                                     static_cast<long long>(el));
-                            frdx::log::info(buf);
-                        }
-                    } else if ((t - last_jump) > 400) {
-                        jump_clock(g_cfg.jump_ms);
-                        ++jumps;
-                        ++cycle_jumps;
-                        total += g_cfg.jump_ms;
-                        last_jump = t;
-                        char buf[256];
-                        snprintf(buf, sizeof(buf),
-                                 "[fastboot] [%lldms] GATE jump (intro window, dq=%llu, thr=%llu, window=%lluB) -> +%lldms (total +%lldms, #%u)",
-                                 static_cast<long long>(el),
-                                 static_cast<unsigned long long>(dq),
-                                 static_cast<unsigned long long>(spin_min),
-                                 window_read == UINT64_MAX ? 0ULL : window_read,
-                                 static_cast<long long>(g_cfg.jump_ms),
-                                 static_cast<long long>(total), jumps);
-                        frdx::log::info(buf);
-                    }
-                }
+        switch (phase) {
+        case GatePhase::WaitingForIntro:
+            if (el > NO_INTRO_TIMEOUT_MS) {
+                finish_intro(t, el, "no intro detected", /*spam=*/false);
             }
+            break;
+
+        case GatePhase::Watching:
+        case GatePhase::SpinSeen:
+        case GatePhase::Armed: {
+            const bool closed = g_intro_closed.load(std::memory_order_relaxed);
+            if ((closed && jumps >= 1) || jumps >= CAP || el > 90'000) {
+                finish_intro(t, el, std::format("closed={}, {} jumps", closed ? 1 : 0, jumps));
+                break;
+            }
+            if (phase == GatePhase::Watching) {
+                if (spin) phase = GatePhase::SpinSeen;
+                break;
+            }
+            if (phase == GatePhase::SpinSeen) {
+                if (active) {
+                    phase = GatePhase::Armed;
+                    collapse = 0;
+                    cycle_jumps = 0;
+                    last_jump = t;
+                    frdx::log::info("[fastboot] [{}ms] armed ({}ms after intro open)", el,
+                                    t - intro_open_t);
+                } else {
+                    phase = GatePhase::Watching;
+                }
+                break;
+            }
+            // Armed
+            collapse = active ? 0 : collapse + 1;
+            if (collapse >= COLLAPSE_STOP) {
+                if (cycle_jumps >= 1) {
+                    finish_intro(t, el, std::format("collapsed after {} jumps", cycle_jumps));
+                } else {
+                    phase = GatePhase::Watching;
+                    collapse = 0;
+                    frdx::log::info(
+                        "[fastboot] [{}ms] disarmed (transient, no jump landed -> re-armable)", el);
+                }
+            } else if ((t - last_jump) > 400) {
+                jump_clock(g_cfg.jump_ms);
+                ++jumps;
+                ++cycle_jumps;
+                total += g_cfg.jump_ms;
+                last_jump = t;
+                frdx::log::info("[fastboot] [{}ms] GATE jump (intro window, dq={}, thr={}, "
+                                "window={}B) -> +{}ms (total +{}ms, #{})",
+                                el, dq, spin_min, window_read == UINT64_MAX ? 0ULL : window_read,
+                                static_cast<long long>(g_cfg.jump_ms), total, jumps);
+            }
+            break;
         }
 
-        // enter_spammer
-        if (g_cfg.enter_spammer && done) {
-            int64_t since_disarm = t - disarm_t;
-            if (since_disarm < g_cfg.enter_window_ms) {
+        case GatePhase::EnterSpam:
+            if (t - disarm_t < g_cfg.enter_window_ms) {
                 if (t - last_enter_t >= g_cfg.enter_interval_ms) {
                     post_key(VK_RETURN);
                     last_enter_t = t;
                     ++enters;
                 }
-            } else if (!spam_done_logged) {
-                spam_done_logged = true;
-                char buf[128];
-                snprintf(buf, sizeof(buf), "[fastboot] [%lldms] enter_spammer: done (%u Enter sent)",
-                         static_cast<long long>(el), enters);
-                frdx::log::info(buf);
+            } else {
+                phase = GatePhase::Finished;
+                frdx::log::info("[fastboot] [{}ms] enter_spammer: done ({} Enter sent)", el, enters);
             }
+            break;
+
+        case GatePhase::Finished:
+            break;
         }
     }
 }
