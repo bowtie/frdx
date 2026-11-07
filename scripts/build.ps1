@@ -276,7 +276,7 @@ flip to another station and it stops broadcasting.
 Configuring it
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-All settings live in the in-game overlay. Press F10 or Insert while
+All settings live in the in-game overlay. Press Insert while
 the game is running to open it. From there you can switch audio
 sources, adjust volume, and tweak every option.
 

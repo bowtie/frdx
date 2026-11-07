@@ -11,21 +11,28 @@ default_url        = ""                          # auto-connect on startup
 
 [audio]
 output_gain = 1.0
-force_stereo_audio = true   # off => mono + FMOD_2D (clean 3D spatialisation)
+force_stereo_audio = false  # true = stereo; false = mono + FMOD_2D (clean 3D spatialisation)
 
 [overlay]
 theme = "bess_dark"              # bess_dark, tokyo_night
-music_notifications_enabled = true
+font_mode = "pixel"              # pixel (Fusion Pixel bitmap, integer 1x/2x) or modern (Geist + Source Han Sans CJK, fractional scaling)
+music_notifications_enabled = false
+station_notifications_enabled = false
 notification_position = "top_left" # top_left, top_center, top_right, bottom_left, bottom_center, bottom_right
 player_bar_always_visible = false  # true = player bar never fades out (no cinematic hide)
-blur_enabled = false             # Dual-Kawase backdrop blur behind overlay panels
-blur_strength = 5                # 1..15 (downsample iterations + sample offset)
+prevent_focus_loss_pause = true    # keep the game from pausing when you alt-tab
+blur_enabled = true              # Dual-Kawase backdrop blur behind overlay panels
+blur_strength = 8                # 1..15 (downsample iterations + sample offset)
 blur_tint_r = 0.08               # frosted-glass tint colour over the blur (0..1)
 blur_tint_g = 0.08
 blur_tint_b = 0.10
-blur_tint_opacity = 0.35         # 0 = pure blur, 1 = solid tint colour
-blur_widget_opacity = 0.6        # widget bg alpha scale when blur is on (1 = opaque, 0 = invisible)
-font_mode = "pixel"             # pixel (Fusion Pixel bitmap, integer 1x/2x) or modern (Geist + Source Han Sans CJK, fractional scaling)
+blur_tint_opacity = 0.5          # 0 = pure blur, 1 = solid tint colour
+blur_widget_opacity = 0.75       # widget bg alpha scale when blur is on (1 = opaque, 0 = invisible)
+artwork_lookup_enabled = true    # per-track album art from stream metadata (off = station logos only)
+artwork_cache_enabled = false    # cache processed album art on disk
+metadata_truncation_enabled = false
+metadata_max_length = 30         # used when truncation is on
+metadata_grace_period = 2.5      # seconds to hold the station logo before track art replaces it
 
 [dualsense]
 enabled = false             # native HID adaptive triggers; set Forza Data Out to this UDP port

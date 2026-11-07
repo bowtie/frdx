@@ -18,13 +18,13 @@ struct ShoutcastConfig {
 
 struct AudioConfig {
     float output_gain       = 1.0f;
-    bool force_stereo_audio = true; // off => mono + FMOD_2D (clean 3D spatialisation)
+    bool force_stereo_audio = false; // off => mono + FMOD_2D (clean 3D spatialisation)
 };
 
 struct OverlayConfig {
     std::string theme                 = "bess_dark";
-    bool music_notifications_enabled  = true;
-    bool station_notifications_enabled = true;
+    bool music_notifications_enabled  = false;
+    bool station_notifications_enabled = false;
     std::string notification_position = "top_left";
     // When true, the player bar fades out after the cursor is hidden for
     // a few seconds (cinematic mode).  When false, the player bar stays
@@ -36,10 +36,10 @@ struct OverlayConfig {
     // swapchain backbuffer is captured, run through a downsample + upsample
     // mip chain, and ImGui composites the result behind each window.  The
     // strength slider (1..15) maps to a curated {downsample-iterations,
-    // sample-offset} curve ported from KWin's BlurEffect.  Disabled by
-    // default for performance; toggle via Settings > General.
-    bool blur_enabled = false;
-    int blur_strength = 5; // 1..15
+    // sample-offset} curve ported from KWin's BlurEffect.  Toggle via
+    // Settings > Display.
+    bool blur_enabled = true;
+    int blur_strength = 8; // 1..15
     // Frosted-glass tint drawn over the blurred backdrop.  The blur alone is
     // an undimmed copy of the scene, so opaque widgets sitting on it look
     // disconnected and bright scenes wash out the panel; a translucent tint
@@ -48,16 +48,16 @@ struct OverlayConfig {
     float blur_tint_r       = 0.08f;
     float blur_tint_g       = 0.08f;
     float blur_tint_b       = 0.10f;
-    float blur_tint_opacity = 0.35f;
+    float blur_tint_opacity = 0.5f;
     // Scales the alpha of widget backgrounds (Button, FrameBg, Tab, Header,
     // Scrollbar, Separator) when blur is enabled, so the frosted glass shows
     // through the controls instead of being hidden behind fully-opaque widgets.
     // 1.0 = opaque widgets (blur only visible in padding), 0.0 = invisible.
-    float blur_widget_opacity = 0.6f;
+    float blur_widget_opacity = 0.75f;
     // When true, the game won't auto-pause when you alt-tab or lose window
     // focus (alt-tab).  Works by swallowing WM_ACTIVATE / WM_ACTIVATEAPP /
     // WM_SETFOCUS / WM_KILLFOCUS messages so the game never sees focus loss.
-    bool prevent_focus_loss_pause = false;
+    bool prevent_focus_loss_pause = true;
     // When false, the DX12 CreateSRV hook and per-frame texture
     // fingerprinting/injection are fully disabled — zero render-thread
     // overhead.  Useful for diagnosing framerate regressions or running
@@ -74,7 +74,7 @@ struct OverlayConfig {
     bool artwork_cache_enabled = false;
     // When true, long track/station names are truncated in the HUD to
     // fit the display area.  The max length is configurable.
-    bool metadata_truncation_enabled = true;
+    bool metadata_truncation_enabled = false;
     int metadata_max_length = 30;
     // Grace period (seconds) after station selection: hold the station
     // logo + name on-screen before the first track metadata overwrites it.
