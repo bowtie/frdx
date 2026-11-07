@@ -11,8 +11,11 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <cstdint>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -130,6 +133,19 @@ WinHttpConn helpers::winhttp_connect(void* shared_session, const ParsedUrl& pars
     return conn;
 }
 
+// Sleep for `d`, returning early as soon as `stop` is requested.  Every
+// poller backoff goes through this: MetadataController::stop() joins the
+// poller threads on each station switch, so a plain sleep_for here made a
+// switch wait out the whole backoff (5 s after any failed request).
+// Returns false if stopped.
+static bool sleep_unless_stopped(const std::stop_token& stop, std::chrono::milliseconds d) {
+    std::mutex m;
+    std::condition_variable_any cv;
+    std::unique_lock lk{m};
+    cv.wait_for(lk, stop, d, [] { return false; });
+    return !stop.stop_requested();
+}
+
 // ---- MetadataController -------------------------------------------------
 
 MetadataController::MetadataController(OnMetadata on_metadata, void* winhttp_session)
@@ -245,31 +261,31 @@ void MetadataController::run_ws_poller(std::string url,
     while (!stop.stop_requested()) {
         auto conn = winhttp_connect(winhttp_session_, *parsed);
         if (!conn) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         HINTERNET hRequest = conn.request.get();
 
         if (!WinHttpSetOption(hRequest, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
             log::warn("[shoutcast] ws: upgrade failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         if (!WinHttpSendRequest(hRequest, nullptr, 0, nullptr, 0, 0, 0)) {
             log::warn("[shoutcast] ws: SendRequest failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         if (!WinHttpReceiveResponse(hRequest, nullptr)) {
             log::warn("[shoutcast] ws: ReceiveResponse failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
 
         HINTERNET hWebSocket = WinHttpWebSocketCompleteUpgrade(hRequest, 0);
         if (!hWebSocket) {
             log::warn("[shoutcast] ws: upgrade complete failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         ScopedWinHttp ws(hWebSocket);
@@ -455,7 +471,7 @@ void MetadataController::run_ws_poller(std::string url,
                                   nullptr, 0);
         }
         if (stop.stop_requested()) break;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        sleep_unless_stopped(stop, std::chrono::seconds(2));
     }
 }
 
@@ -475,7 +491,7 @@ void MetadataController::run_sse_poller(std::string url,
     while (!stop.stop_requested()) {
         auto conn = winhttp_connect(winhttp_session_, *parsed);
         if (!conn) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         HINTERNET hRequest = conn.request.get();
@@ -492,12 +508,12 @@ void MetadataController::run_sse_poller(std::string url,
         if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
             log::warn("[shoutcast] sse: SendRequest failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         if (!WinHttpReceiveResponse(hRequest, nullptr)) {
             log::warn("[shoutcast] sse: ReceiveResponse failed ({})", GetLastError());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
 
@@ -590,7 +606,7 @@ void MetadataController::run_sse_poller(std::string url,
         WinHttpCloseHandle(hReq);
 
         if (!stop.stop_requested()) {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
+            sleep_unless_stopped(stop, std::chrono::seconds(3));
         }
     }
 }
@@ -682,10 +698,22 @@ void MetadataController::run_rest_poller(std::string url,
     const int interval = poll_interval_secs > 0 ? poll_interval_secs : 15;
     log::info("[shoutcast] rest: polling {} every {}s", url, interval);
 
+    // Log the first failure of a streak (with the WinHTTP error, e.g. 12007 =
+    // name not resolved) and the recovery; stay quiet while it keeps failing.
+    bool failing = false;
+    auto fail = [&](const char* stage) {
+        if (!failing) {
+            log::warn("[shoutcast] rest: {} failed for {} (error {}); retrying every 5s", stage,
+                      url, GetLastError());
+            failing = true;
+        }
+        sleep_unless_stopped(stop, std::chrono::seconds(5));
+    };
+
     while (!stop.stop_requested()) {
         auto conn = winhttp_connect(winhttp_session_, *parsed);
         if (!conn) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            fail("connect");
             continue;
         }
         HINTERNET hRequest = conn.request.get();
@@ -696,12 +724,16 @@ void MetadataController::run_rest_poller(std::string url,
 
         if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            fail("request");
             continue;
         }
         if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            fail("response");
             continue;
+        }
+        if (failing) {
+            log::info("[shoutcast] rest: {} reachable again", url);
+            failing = false;
         }
 
         // Read the full response body.
@@ -721,8 +753,7 @@ void MetadataController::run_rest_poller(std::string url,
         }
 
         if (body.empty()) {
-            for (int i = 0; i < interval && !stop.stop_requested(); ++i)
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+            sleep_unless_stopped(stop, std::chrono::seconds(interval));
             continue;
         }
 
@@ -733,8 +764,7 @@ void MetadataController::run_rest_poller(std::string url,
         } catch (...) {
             log::warn("[shoutcast] rest: failed to parse JSON response ({} bytes)",
                       body.size());
-            for (int i = 0; i < interval && !stop.stop_requested(); ++i)
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+            sleep_unless_stopped(stop, std::chrono::seconds(interval));
             continue;
         }
 
@@ -744,8 +774,7 @@ void MetadataController::run_rest_poller(std::string url,
         const json* data_root = &msg;
         if (msg.is_array()) {
             if (msg.empty()) {
-                for (int i = 0; i < interval && !stop.stop_requested(); ++i)
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                sleep_unless_stopped(stop, std::chrono::seconds(interval));
                 continue;
             }
             data_root = &msg[0];
@@ -780,8 +809,7 @@ void MetadataController::run_rest_poller(std::string url,
             }
         }
 
-        for (int i = 0; i < interval && !stop.stop_requested(); ++i)
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        sleep_unless_stopped(stop, std::chrono::seconds(interval));
     }
 }
 
@@ -800,7 +828,7 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
      try {
         auto conn = winhttp_connect(winhttp_session_, *parsed);
         if (!conn) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         HINTERNET hRequest = conn.request.get();
@@ -812,11 +840,11 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
 
         if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
         if (!WinHttpReceiveResponse(hRequest, nullptr)) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
             continue;
         }
 
@@ -952,14 +980,14 @@ void MetadataController::run_icy_poller(const std::string& stream_url,
         }
 
         if (!stop.stop_requested()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            sleep_unless_stopped(stop, std::chrono::seconds(5));
         }
      } catch (const std::bad_alloc& e) {
          log::warn("[shoutcast] icy: allocation failure ({}), retrying in 5s", e.what());
-         std::this_thread::sleep_for(std::chrono::seconds(5));
+         sleep_unless_stopped(stop, std::chrono::seconds(5));
      } catch (const std::exception& e) {
          log::warn("[shoutcast] icy: exception ({}), retrying in 5s", e.what());
-         std::this_thread::sleep_for(std::chrono::seconds(5));
+         sleep_unless_stopped(stop, std::chrono::seconds(5));
      }
     }
 }

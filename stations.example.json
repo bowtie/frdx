@@ -285,33 +285,7 @@
         "url": "https://play.streamafrica.net/xrockradio",
         "artwork_url": "https://ik.imagekit.io/boxradio/radios/okUh8WJjFilwRkhvyW83rmRFN9vHZGPN0zc9ldBW.jpg"
       }
-    ],
-    "metadata": {
-      "type": "rest",
-      "url": "https://openapi.streamafrica.cloud/metadata/c8053d10-b3b7-496e-a0c3-101c70bc703e",
-      "stream_url_map": {
-        "dreamscapes": "https://openapi.streamafrica.cloud/metadata/55e357ea-b01d-413f-a455-1a701d65e22d",
-        "game_radio": "https://openapi.streamafrica.cloud/metadata/0c01d14a-c98f-4e17-9526-cf34c09b1d88",
-        "jpop_radio": "https://openapi.streamafrica.cloud/metadata/4b7216e7-1a82-49c5-a4e0-b47f237457d0",
-        "japan_city_pop": "https://openapi.streamafrica.cloud/metadata/234a4f28-ff7f-44b4-9a33-0d2c07ab847f",
-        "kpop_radio": "https://openapi.streamafrica.cloud/metadata/ad81329c-6783-443a-9647-fcca0223a028",
-        "lofi_radio": "https://openapi.streamafrica.cloud/metadata/ce5cc6e1-b50f-4b0a-a491-b68a3d0aa977",
-        "mashup_dancehall": "https://openapi.streamafrica.cloud/metadata/39396f28-0ae3-4e65-9b6b-2c5821507f58",
-        "pop": "https://openapi.streamafrica.cloud/metadata/90c1f2ee-280e-4152-8985-a74d64b125e4",
-        "pop_dance": "https://openapi.streamafrica.cloud/metadata/becf3d8f-8f28-4538-adc6-760aabdc714b",
-        "radio_6": "https://openapi.streamafrica.cloud/metadata/3918b41c-bbcd-464f-b5cf-3ea6949c5544",
-        "radio_jazz": "https://openapi.streamafrica.cloud/metadata/c4f54af9-8312-4316-bdf2-33b63521543f",
-        "rap": "https://openapi.streamafrica.cloud/metadata/9715ffea-2651-42fb-bfd1-88be9beccb0a",
-        "reggae_republic": "https://openapi.streamafrica.cloud/metadata/486d840c-7d5e-482d-8601-5ebabdb71b40",
-        "weeb_anime": "https://openapi.streamafrica.cloud/metadata/597342ce-46ad-4678-87ae-6d0717eb5eab",
-        "xrock": "https://openapi.streamafrica.cloud/metadata/54bb9304-a2b4-4f40-b8da-4bc312b0ebfe"
-      },
-      "mapping": {
-        "title": "song",
-        "artist": "artist",
-        "artwork_url": "artwork"
-      }
-    }
+    ]
   },
   {
     "id": "plaza",
