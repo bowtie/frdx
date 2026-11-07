@@ -148,15 +148,29 @@ void wait_for_all_overlay_work() {
     }
 }
 
+void process_station_switches();
+
 void enqueue_action(std::function<void()> action) {
-    g_aq.busy.store(true, std::memory_order_release);
     {
         frdx::ScopedLock lk{g_aq.mutex};
-        if (g_aq.pending_ref().size() >= 8) [[unlikely]] {
-            log::warn("[overlay] action queue full, dropping oldest action");
-            g_aq.pending_ref().pop_front();
+        // Under the lock so the worker's "queue empty -> idle" can't land
+        // between this and the push below.
+        g_aq.busy.store(true, std::memory_order_release);
+        auto& pending = g_aq.pending_ref();
+        if (pending.size() >= 8) [[unlikely]] {
+            // Drop the oldest action, but never the station-switch worker:
+            // while it is queued, worker_queued stays set and nothing else
+            // will ever drain g_station_switch.latest.
+            const auto victim = std::ranges::find_if(pending, [](const auto& fn) {
+                const auto* target = fn.template target<void (*)()>();
+                return !(target && *target == &process_station_switches);
+            });
+            if (victim != pending.end()) {
+                log::warn("[overlay] action queue full, dropping oldest action");
+                pending.erase(victim);
+            }
         }
-        g_aq.pending_ref().push_back(std::move(action));
+        pending.push_back(std::move(action));
     }
     g_aq.cv.notify_one();
 }
@@ -280,7 +294,12 @@ void action_worker_loop() {
         } catch (...) {
             log::warn("[overlay] queued action threw an exception");
         }
-        g_aq.busy.store(false, std::memory_order_release);
+        {
+            // Idle only once nothing else is waiting; clearing busy after
+            // every action made the player bar see a false idle edge.
+            frdx::ScopedLock lk{g_aq.mutex};
+            if (g_aq.pending_ref().empty()) g_aq.busy.store(false, std::memory_order_release);
+        }
     }
 }
 

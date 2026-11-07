@@ -484,6 +484,14 @@ struct PendingStationSwitch {
     // supersede it, coalescing a burst of presses into one stream launch.
     std::chrono::steady_clock::time_point queued_at{};
 };
+// Coalescing station-switch mailbox.  States, by (latest, worker_queued):
+//   (empty, false)  idle
+//   (set,   true)   request waiting; process_station_switches() is queued on
+//                   g_aq or running, and will take it (newest wins)
+//   (empty, true)   worker running with nothing left; it clears worker_queued
+//                   under `mutex` when it finds latest empty and returns
+// enqueue_action() never drops a queued worker, which would strand
+// (set, true) forever.
 struct StationSwitchQueue {
     frdx::Mutex mutex;
     std::optional<PendingStationSwitch> latest FRDX_GUARDED_BY(mutex);
