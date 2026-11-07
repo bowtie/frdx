@@ -33,7 +33,7 @@ static void begin_settings_table(const char* id) {
     ImGui::TableSetupColumn("widget", ImGuiTableColumnFlags_WidthStretch);
 }
 
-// ── Audio tab: audio output + metadata/artwork behaviour ──
+// ── Audio tab: audio output, artwork, metadata and notifications ──
 
 void draw_audio_settings_tab() {
     // Use the per-frame cached config instead of snapshot() — avoids a
@@ -129,10 +129,40 @@ void draw_audio_settings_tab() {
                           "0s = track metadata applies immediately.");
     }
 
+    settings_label_row("Music Notifications");
+    bool music_toasts = cfg.music_notifications_enabled;
+    if (ImGui::Checkbox("##music_toasts", &music_toasts)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = music_toasts; });
+        g_ui.hud_visible = music_toasts || cfg.station_notifications_enabled;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show a toast when the song changes");
+    }
+
+    settings_label_row("Station Notifications");
+    bool station_toasts = cfg.station_notifications_enabled;
+    if (ImGui::Checkbox("##station_toasts", &station_toasts)) {
+        g_ctx.store->patch([&](Config& c) { c.overlay.station_notifications_enabled = station_toasts; });
+        g_ui.hud_visible = station_toasts || cfg.music_notifications_enabled;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show a toast when switching stations");
+    }
+
+    settings_label_row("Notification Position");
+    g_ui.notification_position_idx = notification_position_index(cfg.notification_position);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##notification_position", &g_ui.notification_position_idx,
+                     g_ui.notification_position_names,
+                     IM_ARRAYSIZE(g_ui.notification_position_names))) {
+        const char* position = notification_position_value(g_ui.notification_position_idx);
+        g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
+    }
+
     ImGui::EndTable();
 }
 
-// ── Display tab: visual/overlay behaviour + notifications ──
+// ── Display tab: visual/overlay behaviour ──
 
 void draw_display_settings_tab() {
     // Use the per-frame cached config instead of snapshot().
@@ -269,36 +299,6 @@ void draw_display_settings_tab() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("1 = opaque widgets (blur only in gaps), 0 = invisible widgets");
         }
-    }
-
-    settings_label_row("Music Notifications");
-    bool music_toasts = cfg.music_notifications_enabled;
-    if (ImGui::Checkbox("##music_toasts", &music_toasts)) {
-        g_ctx.store->patch([&](Config& c) { c.overlay.music_notifications_enabled = music_toasts; });
-        g_ui.hud_visible = music_toasts || cfg.station_notifications_enabled;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Show a toast when the song changes");
-    }
-
-    settings_label_row("Station Notifications");
-    bool station_toasts = cfg.station_notifications_enabled;
-    if (ImGui::Checkbox("##station_toasts", &station_toasts)) {
-        g_ctx.store->patch([&](Config& c) { c.overlay.station_notifications_enabled = station_toasts; });
-        g_ui.hud_visible = station_toasts || cfg.music_notifications_enabled;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Show a toast when switching stations");
-    }
-
-    settings_label_row("Notification Position");
-    g_ui.notification_position_idx = notification_position_index(cfg.notification_position);
-    ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::Combo("##notification_position", &g_ui.notification_position_idx,
-                     g_ui.notification_position_names,
-                     IM_ARRAYSIZE(g_ui.notification_position_names))) {
-        const char* position = notification_position_value(g_ui.notification_position_idx);
-        g_ctx.store->patch([&](Config& c) { c.overlay.notification_position = position; });
     }
 
     settings_label_row("Prevent Focus Pause");
