@@ -12,7 +12,6 @@ struct GeneralConfig {
 
 struct ShoutcastConfig {
     std::string default_url;
-    std::vector<std::string> presets;
     std::string last_station_id;
     std::string last_stream_id;
 };

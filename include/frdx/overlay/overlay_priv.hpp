@@ -225,13 +225,6 @@ struct UiState {
     std::atomic<bool> player_visible{true}, settings_visible{false}, stations_visible{false};
     std::atomic<bool> console_visible{false}, hud_visible{true};
     std::atomic<bool> mouse_capture{false};
-    // Frame counters for the Debug tab readout.  present_frame_count is
-    // bumped on every non-test Present call (the game's true frame rate,
-    // even when the overlay is hidden);  overlay_frame_count only when the
-    // overlay actually draws.  FPS is derived by sampling in the Debug tab,
-    // so the Present hook pays just one relaxed atomic increment per frame.
-    std::atomic<uint64_t> present_frame_count{0};
-    std::atomic<uint64_t> overlay_frame_count{0};
     bool is_init = false, cursor_visible = true;
     // UI scaling: all hardcoded pixel values are designed for 1080p and
     // multiplied by ui_scale at use sites.  Calculated from the monitor
@@ -675,10 +668,6 @@ bool capture_and_blur_backbuffer(ID3D12GraphicsCommandList* cmd, ID3D12Resource*
 // between Begin/End).  No-op when blur is disabled or not ready.  alpha_scalar
 // fades the backdrop with the cursor; pass -1.0f to suppress.
 void draw_backdrop_blur(float alpha_scalar = 1.0f);
-
-// Debug: set by the Debug tab to request a backbuffer capture on the next
-// Present.  Cleared (and consumed) by render_overlay_frame in hooks.cpp.
-extern std::atomic<bool> g_capture_backbuffer_requested;
 
 // ── Texture injection hooks (tex_hooks.cpp) ──
 

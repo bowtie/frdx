@@ -8,7 +8,6 @@ ring_buffer_mb    = 4
 
 [shoutcast]
 default_url        = ""                          # auto-connect on startup
-presets            = []                          # e.g. ["http://server:8000/stream"]
 
 [audio]
 output_gain = 1.0

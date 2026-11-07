@@ -242,7 +242,6 @@ private:
 
     mutable frdx::Mutex mu_;
     std::string target_url_          FRDX_GUARDED_BY(mu_);
-    std::size_t preset_idx_          FRDX_GUARDED_BY(mu_) = 0;
     TrackInfo info_                  FRDX_GUARDED_BY(mu_){};
     TrackInfo pending_info_          FRDX_GUARDED_BY(mu_){};
     int64_t pending_info_ms_         FRDX_GUARDED_BY(mu_) = 0;

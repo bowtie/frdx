@@ -438,10 +438,6 @@ bool try_complete_fingerprint(PendingFingerprint& pf, bool& out_is_placeholder) 
         // (streamer mode logo, modified icon) at fixed dimensions; their
         // FNV-1a hashes are known constants.  No uniqueness heuristic —
         // that was catching unrelated UI elements with simple graphics.
-        //
-        // Note: kPlaceholderHash196x104Alt is intentionally NOT matched —
-        // it's a separate radio HUD element (not the album art area) that
-        // we don't want to overwrite.
         out_is_placeholder = (hash == TextureInjector::kPlaceholderHash196x104 ||
                               hash == TextureInjector::kPlaceholderHash196x196 ||
                               hash == TextureInjector::kPlaceholderHash392x208 ||

@@ -456,11 +456,6 @@ void ShoutcastSource::cycle_preset(int direction) {
         log::info("[shoutcast] cycled to station '{}' stream '{}'", new_st.id, new_str.id);
         return;
     }
-
-    // Legacy preset mode: cycle through string URLs.
-    if (cfg_.presets.empty()) return;
-    preset_idx_ = (preset_idx_ + cfg_.presets.size() + direction) % cfg_.presets.size();
-    target_url_ = cfg_.presets[preset_idx_];
 }
 
 std::string ShoutcastSource::start_stream_locked() {
@@ -1049,8 +1044,7 @@ void ShoutcastSource::run_reconnect(std::shared_ptr<Stream> ended, std::string u
                       attempt);
             reconnect_attempts_.store(0, std::memory_order_release);
             next = ReconnectPhase::Backoff;
-            const bool can_cycle = flat_presets_.empty() ? cfg_.presets.size() > 1
-                                                         : flat_presets_.size() > 1;
+            const bool can_cycle = flat_presets_.size() > 1;
             if (can_cycle) {
                 // Moving target_url_ to the next preset makes the next pump()
                 // attempt reconnect there.

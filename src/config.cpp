@@ -71,12 +71,6 @@ Config load_config(const std::filesystem::path& path) {
     cfg.shoutcast.default_url     = pick<std::string>(sc, "default_url", "");
     cfg.shoutcast.last_station_id = pick<std::string>(sc, "last_station_id", "");
     cfg.shoutcast.last_stream_id  = pick<std::string>(sc, "last_stream_id", "");
-    try {
-        if (sc.contains("presets")) {
-            auto v = toml::find<std::vector<std::string>>(sc, "presets");
-            if (!v.empty()) cfg.shoutcast.presets = std::move(v);
-        }
-    } catch (...) {}
 
     const auto& au = section(root, "audio");
     cfg.audio.output_gain =
@@ -343,17 +337,6 @@ struct Emitter {
         if (text.find_first_of(".eE") == std::string_view::npos) out += ".0";
         out += '\n';
     }
-    void kv_strs(std::string_view key, const std::vector<std::string>& v) {
-        out += key;
-        out += " = [";
-        for (std::size_t i = 0; i < v.size(); ++i) {
-            if (i) out += ", ";
-            out += '"';
-            out += v[i];
-            out += '"';
-        }
-        out += "]\n";
-    }
 };
 
 } // namespace
@@ -368,7 +351,6 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     if (!cfg.shoutcast.last_station_id.empty())
         e.kv("last_station_id", cfg.shoutcast.last_station_id);
     if (!cfg.shoutcast.last_stream_id.empty()) e.kv("last_stream_id", cfg.shoutcast.last_stream_id);
-    if (!cfg.shoutcast.presets.empty()) e.kv_strs("presets", cfg.shoutcast.presets);
 
     e.header("audio");
     e.kv("output_gain", static_cast<double>(cfg.audio.output_gain));

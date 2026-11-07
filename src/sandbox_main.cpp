@@ -990,9 +990,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
         }
         if (!running) break;
 
-        // Mirror hook_Present's counter so the Debug tab FPS readout works
-        // in the sandbox too (the Present hook isn't installed here).
-        frdx::overlay::g_ui.present_frame_count.fetch_add(1, std::memory_order_relaxed);
         const auto frame_start = std::chrono::steady_clock::now();
 
         // GPU wait: this blocks until the previous frame's GPU work

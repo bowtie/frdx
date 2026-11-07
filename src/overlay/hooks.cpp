@@ -37,7 +37,6 @@
 #endif
 
 #include <wil/com.h>
-#include "stb_image_write.h"
 
 // Forward WndProc handler (not exposed by imgui_impl_win32.h)
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
@@ -47,9 +46,6 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 namespace frdx::overlay {
 using namespace frdx;
-
-// Debug flag: set by the Debug tab to request a screenshot capture.
-std::atomic<bool> g_capture_backbuffer_requested{false};
 
 // Serialize overlay rendering. Present can be called from the frame-
 // generation thread (or from multiple swap-chain wrappers), and the
@@ -75,241 +71,6 @@ static void imgui_dx12_free_srv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_H
     IM_ASSERT(g_dx.srv_heap.increment > 0);
     const UINT slot = static_cast<UINT>((cpu.ptr - g_dx.srv_heap.cpu_base.ptr) / g_dx.srv_heap.increment);
     g_imgui_srv_heap_free_slots.push_back(slot);
-}
-
-// ── Two-frame GPU screenshot ────────────────────────────────────────────
-// Frame N (screenshot requested):
-//   Copy backbuffer → staging texture (default heap, CopyResource —
-//   identical to the blur code's pattern).
-// Frame N+1:
-//   Copy staging texture → readback buffer, wait for fence, map, save PNG.
-//
-// This avoids copying directly from the backbuffer to a readback buffer
-// in a single frame, which caused device removal.  The staging texture
-// is a stable resource we control, so the readback copy in frame N+1
-// can't interfere with the game's rendering.
-
-static wil::com_ptr<ID3D12Resource> g_shot_staging;       // default-heap texture
-static D3D12_RESOURCE_STATES g_shot_staging_state = D3D12_RESOURCE_STATE_COMMON;
-static wil::com_ptr<ID3D12Resource> g_shot_readback;      // readback buffer
-static UINT64 g_shot_readback_size = 0;  // allocated size of g_shot_readback
-static UINT g_shot_w = 0, g_shot_h = 0;
-static UINT64 g_shot_row_pitch = 0;
-static DXGI_FORMAT g_shot_fmt = DXGI_FORMAT_UNKNOWN;
-static std::filesystem::path g_shot_path;
-
-// Two-frame backbuffer capture (render thread only):
-//   Idle --capture requested--> StagingRecorded   (backbuffer -> staging)
-//   StagingRecorded --next frame--> ReadbackRecorded (staging -> readback)
-//   ReadbackRecorded --frame fence--> Idle         (map + save PNG)
-//   any --error / timeout / teardown--> Idle
-enum class ShotPhase : uint8_t { Idle, StagingRecorded, ReadbackRecorded };
-static ShotPhase g_shot_phase = ShotPhase::Idle;
-
-static std::filesystem::path make_capture_path() {
-    wchar_t temp_path[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, temp_path);
-    auto now = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  now.time_since_epoch()) % 1000;
-    auto t = std::chrono::system_clock::to_time_t(now);
-    std::tm tm{};
-    localtime_s(&tm, &t);
-    char filename[256];
-    std::snprintf(filename, sizeof(filename),
-                  "frdx_capture_%04d%02d%02d_%02d%02d%02d%03d.png",
-                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                  tm.tm_hour, tm.tm_min, tm.tm_sec,
-                  static_cast<int>(ms.count()));
-    return std::filesystem::path(temp_path) / filename;
-}
-
-static bool is_bgra_format(DXGI_FORMAT f) {
-    return f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-}
-
-// Ensure the staging texture matches the backbuffer dimensions/format.
-static bool ensure_shot_staging(const D3D12_RESOURCE_DESC& bb_desc) {
-    if (g_shot_staging) {
-        auto sd = g_shot_staging->GetDesc();
-        if (sd.Width == bb_desc.Width && sd.Height == bb_desc.Height &&
-            sd.Format == bb_desc.Format) return true;
-        g_shot_staging.reset();
-    }
-
-    D3D12_HEAP_PROPERTIES heap{};
-    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    auto desc = bb_desc;
-    desc.Flags &= ~D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-
-    if (FAILED(g_dx.device->CreateCommittedResource(
-            &heap, D3D12_HEAP_FLAG_NONE, &desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-            IID_PPV_ARGS(g_shot_staging.put())))) {
-        re_log::warn("[capture] failed to create staging texture");
-        return false;
-    }
-    g_shot_staging_state = D3D12_RESOURCE_STATE_COPY_DEST;
-    return true;
-}
-
-// Phase 1: copy backbuffer → staging texture (same pattern as blur code).
-static void shot_phase1_copy_to_staging(ID3D12GraphicsCommandList* cmd, ID3D12Resource* bb) {
-    const auto desc = bb->GetDesc();
-    if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc.Width == 0 || desc.Height == 0) {
-        re_log::warn("[capture] unsupported backbuffer");
-        return;
-    }
-    if (!ensure_shot_staging(desc)) return;
-
-    // RENDER_TARGET → COPY_SOURCE on backbuffer
-    auto bb_to_copy = transition_barrier(bb, D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cmd->ResourceBarrier(1, &bb_to_copy);
-
-    // Staging → COPY_DEST (should already be, but be safe)
-    if (g_shot_staging_state != D3D12_RESOURCE_STATE_COPY_DEST) {
-        auto st_to_dest = transition_barrier(g_shot_staging.get(), g_shot_staging_state,
-                                             D3D12_RESOURCE_STATE_COPY_DEST);
-        cmd->ResourceBarrier(1, &st_to_dest);
-        g_shot_staging_state = D3D12_RESOURCE_STATE_COPY_DEST;
-    }
-
-    cmd->CopyResource(g_shot_staging.get(), bb);
-
-    // Backbuffer → RENDER_TARGET
-    auto bb_to_rt = transition_barrier(bb, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
-    cmd->ResourceBarrier(1, &bb_to_rt);
-
-    g_shot_w = static_cast<UINT>(desc.Width);
-    g_shot_h = desc.Height;
-    g_shot_fmt = desc.Format;
-    g_shot_path = make_capture_path();
-    g_shot_phase = ShotPhase::StagingRecorded;
-    re_log::info("[capture] phase 1: copied {}x{} to staging", g_shot_w, g_shot_h);
-}
-
-// Phase 2: copy staging texture → readback buffer.
-static void shot_phase2_copy_to_readback(ID3D12GraphicsCommandList* cmd) {
-    if (!g_shot_staging) { g_shot_phase = ShotPhase::Idle; return; }
-
-    auto st_desc = g_shot_staging->GetDesc();
-
-    // Compute footprint for the readback.
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-    UINT num_rows = 0;
-    UINT64 row_size = 0;
-    UINT64 total_bytes = 0;
-    g_dx.device->GetCopyableFootprints(&st_desc, 0, 1, 0, &footprint,
-                                       &num_rows, &row_size, &total_bytes);
-
-    // (Re)create readback buffer if needed — the buffer must be at least
-    // total_bytes large.  Recreate when the resolution increased since the
-    // last capture (the staging texture is recreated by ensure_shot_staging,
-    // but the readback buffer was only created once, so a larger capture
-    // would overflow it).
-    if (!g_shot_readback || g_shot_readback_size < total_bytes) {
-        g_shot_readback.reset();
-        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_READBACK;
-
-        D3D12_RESOURCE_DESC rb_desc{};
-        rb_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rb_desc.Width = total_bytes;
-        rb_desc.Height = 1;
-        rb_desc.DepthOrArraySize = 1;
-        rb_desc.MipLevels = 1;
-        rb_desc.SampleDesc.Count = 1;
-        rb_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-        if (FAILED(g_dx.device->CreateCommittedResource(
-                &heap, D3D12_HEAP_FLAG_NONE, &rb_desc,
-                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                IID_PPV_ARGS(g_shot_readback.put())))) {
-            re_log::warn("[capture] failed to create readback buffer");
-            g_shot_readback_size = 0;
-            g_shot_phase = ShotPhase::Idle;
-            return;
-        }
-        g_shot_readback_size = total_bytes;
-    }
-
-    // Staging → COPY_SOURCE
-    if (g_shot_staging_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
-        auto to_src = transition_barrier(g_shot_staging.get(), g_shot_staging_state,
-                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cmd->ResourceBarrier(1, &to_src);
-        g_shot_staging_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    }
-
-    D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = g_shot_staging.get();
-    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    src.SubresourceIndex = 0;
-
-    D3D12_TEXTURE_COPY_LOCATION dst{};
-    dst.pResource = g_shot_readback.get();
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    dst.PlacedFootprint = footprint;
-
-    cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    g_shot_row_pitch = footprint.Footprint.RowPitch;
-    g_shot_phase = ShotPhase::ReadbackRecorded;
-    re_log::info("[capture] phase 2: copied staging to readback");
-}
-
-// Phase 3: map readback buffer and save PNG (called after fence).
-static void shot_phase3_save_png(UINT64 fence_value) {
-    if (!g_shot_readback) { g_shot_phase = ShotPhase::Idle; return; }
-
-    if (!wait_for_fence(fence_value)) {
-        re_log::warn("[capture] timed out waiting for readback fence");
-        g_shot_phase = ShotPhase::Idle;
-        return;
-    }
-
-    uint8_t* mapped = nullptr;
-    D3D12_RANGE read_range{0, static_cast<SIZE_T>(g_shot_row_pitch) * g_shot_h};
-    if (FAILED(g_shot_readback->Map(0, &read_range, reinterpret_cast<void**>(&mapped))) || !mapped) {
-        re_log::warn("[capture] failed to map readback buffer");
-        g_shot_phase = ShotPhase::Idle;
-        return;
-    }
-
-    std::vector<uint8_t> pixels(static_cast<size_t>(g_shot_w) * g_shot_h * 4);
-    const bool bgra = is_bgra_format(g_shot_fmt);
-    for (UINT y = 0; y < g_shot_h; ++y) {
-        const uint8_t* src = mapped + static_cast<size_t>(y) * g_shot_row_pitch;
-        uint8_t* dst = pixels.data() + static_cast<size_t>(y) * g_shot_w * 4;
-        if (bgra) {
-            // Swap R and B channels in-place per row, then copy.
-            // Process 4 bytes (one pixel) at a time.
-            for (UINT x = 0; x < g_shot_w; ++x) {
-                const uint8_t* px = src + static_cast<size_t>(x) * 4;
-                uint8_t* op = dst + static_cast<size_t>(x) * 4;
-                op[0] = px[2];
-                op[1] = px[1];
-                op[2] = px[0];
-                op[3] = px[3];
-            }
-        } else {
-            // Already RGBA — straight copy per row.
-            std::memcpy(dst, src, static_cast<size_t>(g_shot_w) * 4);
-        }
-    }
-    D3D12_RANGE written{0, 0};
-    g_shot_readback->Unmap(0, &written);
-
-    stbi_write_png(g_shot_path.string().c_str(), static_cast<int>(g_shot_w),
-                   static_cast<int>(g_shot_h), 4, pixels.data(),
-                   static_cast<int>(g_shot_w * 4));
-
-    re_log::info("[capture] saved screenshot {}x{} to {}",
-                 g_shot_w, g_shot_h, g_shot_path.string());
-    g_shot_phase = ShotPhase::Idle;
 }
 
 using Present_t = HRESULT(__stdcall*)(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -949,11 +710,6 @@ void cleanup_imgui_resources() {
     }
     release_backdrop_blur();
 
-    g_shot_staging.reset();
-    g_shot_readback.reset();
-    g_shot_readback_size = 0;
-    g_shot_phase = ShotPhase::Idle;
-
     g_dx.fb_bufs.clear();
     g_dx.fb_rtvs.clear();
 
@@ -991,7 +747,6 @@ void destroy_imgui_context() {
 
 static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     if (!pSwapChain || !active_queue) return false;
-    g_ui.overlay_frame_count.fetch_add(1, std::memory_order_relaxed);
 
     // Serialize the whole render path. Present can be called from the frame-
     // generation thread (or through a different wrapper), and the static state
@@ -1281,18 +1036,6 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_dx.cmd_list.get());
 
-        // Two-frame screenshot:
-        // Phase 1: copy backbuffer (with overlay) → staging texture.
-        // Phase 2: copy staging → readback (from previous frame's phase 1).
-        if (g_shot_phase == ShotPhase::StagingRecorded) {
-            // Previous frame copied to staging — now copy to readback.
-            shot_phase2_copy_to_readback(g_dx.cmd_list.get());
-        } else if (g_capture_backbuffer_requested.exchange(false,
-                       std::memory_order_acq_rel)) {
-            // New request — copy backbuffer to staging this frame.
-            shot_phase1_copy_to_staging(g_dx.cmd_list.get(), bb);
-        }
-
         // Transition backbuffer back to COMMON — the safe decay state.
         // Present works from COMMON (the runtime handles the final
         // transition), and this avoids assuming we know the exact state
@@ -1316,14 +1059,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             // NumFramesInFlight-th frame can wait on it before reusing
             // its ImGui vertex/index buffer slot.
             g_dx.fence_ring_push(fence_value);
-            // Phase 3: if readback copy was recorded this frame, map and save.
-            if (g_shot_phase == ShotPhase::ReadbackRecorded) {
-                shot_phase3_save_png(fence_value);
-            }
         } else {
             re_log::warn("failed to signal ImGui GPU fence");
-            // A ReadbackRecorded capture stays pending: the copy was already
-            // submitted, so the next frame's fence covers it.
         }
 
         return true;
@@ -1338,8 +1075,6 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     if (Flags & DXGI_PRESENT_TEST) {
         return original_Present(pSwapChain, SyncInterval, Flags);
     }
-    g_ui.present_frame_count.fetch_add(1, std::memory_order_relaxed);
-
     ID3D12CommandQueue* active_queue = command_queue_for_swapchain(pSwapChain);
 
     // First frame: render_overlay_frame handles ImGui initialization.

@@ -95,8 +95,6 @@ public:
     // Expected fingerprint hashes for the placeholder textures.
     // 196x104 streamer mode logo (1080p).
     static constexpr uint64_t kPlaceholderHash196x104 = 0x22BC7164008461C9ull;
-    // 196x104 alternate placeholder (1080p) — second radio HUD element.
-    static constexpr uint64_t kPlaceholderHash196x104Alt = 0xDA394CB4F9EF5EE6ull;
     // 196x196 modified icon (1080p).
     static constexpr uint64_t kPlaceholderHash196x196 = 0xF5223D52CFA65930ull;
     // 392x208 streamer mode logo (high-DPI / 4K).
