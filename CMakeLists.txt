@@ -275,6 +275,11 @@ target_include_directories(command_queue_map_self_test PRIVATE
 
 add_test(NAME command_queue_map_self_test COMMAND command_queue_map_self_test)
 
+# Control-loop audibility state machine (header-only, no FMOD).
+add_executable(audibility_tracker_self_test tests/audibility_tracker_test.cpp)
+target_include_directories(audibility_tracker_self_test PRIVATE include)
+add_test(NAME audibility_tracker_self_test COMMAND audibility_tracker_self_test)
+
 add_executable(dualsense_settings_coverage_test
     tests/dualsense_settings_coverage_test.cpp
 )

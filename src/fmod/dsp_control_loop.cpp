@@ -19,18 +19,6 @@ constexpr auto kIdleDiscoveryRetry = 30s;
 // before we conclude the game tore the radio channel down. 1s @ 20ms.
 constexpr int kStaleTickThreshold = 50;
 
-// Frozen-read ticks before we treat the station as genuinely silenced (pause
-// menu, radio off) and tell the active source to mirror it onto any live
-// player it wraps.  Must be long enough to ride through station transitions
-// and brief FMOD channel rebuilds (~200-500ms) without falsely disconnecting.
-// Loading screens and fast travel may exceed this, but the control loop
-// detects callback resumption and reconnects the stream automatically.
-// 2s @ 20ms.
-constexpr int kInaudibleTicks = 100;
-// Only log callback freezes that persist this long.  Sub-100ms blips
-// are normal FMOD scheduling jitter while driving.  500ms @ 20ms.
-constexpr int kFreezeLogTicks = 25;
-
 // Minimum gap between two off/on station toggles. The toggle blocks ~300ms
 // and the game needs a moment to reallocate the channel, so we leave it well
 // alone in between rather than thrashing the radio.
@@ -217,86 +205,21 @@ void ControlLoop::run(const std::stop_token& tok) {
 
         // Audibility edge: while a source is producing, a frozen read_callback
         // means the game silenced our station. Report the transition so a
-        // source wrapping a live player pauses/resumes it.
-        // Re-arm on every source change and only count once that source has
-        // actually been read, so stale loop state can't fire a phantom edge.
-        // The 10s threshold rides through station transitions, loading screens,
-        // and FMOD channel rebuilds without falsely disconnecting.
-        if (active) {
-            if (active != audible_source_) {
-                audible_source_ = active;
-                idle_ticks_     = 0;
-                audible_primed_ = false;
-                radio_audible_  = true;
-                callback_frozen_ = false;
+        // source wrapping a live player pauses/resumes it.  See
+        // AudibilityTracker for the state machine.
+        {
+            const auto ev = audibility_.update(active, busy, c != prev_calls_, now);
+            if (ev.resumed_after) {
+                log::info("[ctrl] FMOD callback resumed after {}ms ({})", ev.resumed_after->count(),
+                          busy ? "was frozen" : "source stopped");
             }
-            if (busy) {
-                // Source is actively producing audio — track callback
-                // freezes to detect when the game silences our station.
-                if (c != prev_calls_) {
-                    // Callback is alive — log if we were frozen long
-                    // enough to be meaningful (>=500ms).  Sub-100ms
-                    // blips are normal FMOD scheduling jitter while
-                    // driving and happen every few seconds.
-                    if (callback_frozen_) {
-                        const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            now - freeze_start_).count();
-                        if (dur >= 500) {
-                            log::info("[ctrl] FMOD callback resumed after {}ms (was frozen)", dur);
-                        }
-                        callback_frozen_ = false;
-                    }
-                    idle_ticks_     = 0;
-                    audible_primed_ = true;
-                } else if (audible_primed_) {
-                    // Track freeze start, but don't log until we know
-                    // it's meaningful (>=500ms).  Short blips are normal.
-                    if (!callback_frozen_) {
-                        callback_frozen_ = true;
-                        freeze_start_    = now;
-                    }
-                    ++idle_ticks_;
-                    // Log only if the freeze has persisted >=500ms.
-                    if (callback_frozen_ && idle_ticks_ == kFreezeLogTicks) {
-                        log::info("[ctrl] FMOD callback frozen (source busy, no reads)");
-                    }
+            if (ev.froze) log::info("[ctrl] FMOD callback frozen (source busy, no reads)");
+            if (ev.report_audible) {
+                if (*ev.report_audible && !busy) {
+                    log::info("[ctrl] FMOD callback resumed while source stopped; restarting stream");
                 }
-                const bool audible = idle_ticks_ < kInaudibleTicks;
-                if (audible != radio_audible_) {
-                    radio_audible_ = audible;
-                    active->on_radio_audible(audible);
-                }
-            } else {
-                // Source exists but isn't producing (stopped/paused).
-                // This happens after on_radio_audible(false) killed the
-                // pipe.  Watch for FMOD callback resumption (game unpaused)
-                // and restart the stream.  Without this, the else-branch
-                // would silently reset radio_audible_=true without ever
-                // calling on_radio_audible(true), leaving the stream dead.
-                if (c != prev_calls_) {
-                    if (callback_frozen_) {
-                        const auto dur = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            now - freeze_start_).count();
-                        log::info("[ctrl] FMOD callback resumed after {}ms (source stopped)", dur);
-                        callback_frozen_ = false;
-                    }
-                    if (!radio_audible_) {
-                        radio_audible_ = true;
-                        log::info("[ctrl] FMOD callback resumed while source stopped; restarting stream");
-                        active->on_radio_audible(true);
-                    }
-                    idle_ticks_     = 0;
-                    audible_primed_ = true;
-                } else {
-                    idle_ticks_     = 0;
-                    audible_primed_ = false;
-                }
+                active->on_radio_audible(*ev.report_audible);
             }
-        } else {
-            idle_ticks_     = 0;
-            audible_primed_ = false;
-            radio_audible_  = true;
-            audible_source_ = nullptr;
         }
 
         // Skip metadata refresh while inaudible (pause menu, rewind):
@@ -311,7 +234,7 @@ void ControlLoop::run(const std::stop_token& tok) {
 
         if (++meta_tick >= kMetaEveryNTicks || texture_just_finished) {
             meta_tick = 0;
-            if (radio_audible_) {
+            if (audibility_.audible()) {
                 // Re-poll the discovery cache to grab the freshest
                 // SampleProperties body — the game often reallocates this
                 // object entirely when native stations change.

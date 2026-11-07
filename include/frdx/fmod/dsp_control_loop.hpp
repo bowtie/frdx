@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frdx/audio_source.hpp"
+#include "frdx/fmod/audibility_tracker.hpp"
 #include "frdx/fmod/dsp_bridge.hpp"
 #include "frdx/fmod/game_state_probe.hpp"
 #include "frdx/fmod/metadata_injector.hpp"
@@ -85,15 +86,8 @@ private:
     // (logging there would glitch the real-time thread); the tick reports.
     std::uint32_t prev_drift_events_ = 0;
     std::chrono::steady_clock::time_point last_reacquire_{}; // cooldown for rediscovery/retune
-    // Audibility tracking
-    IAudioSource* audible_source_ = nullptr;
-    int idle_ticks_               = 0;
-    bool audible_primed_          = false;
-    bool radio_audible_           = true;
-    bool was_radio_off_           = false; // edge detection for radio_off → on
-    // FMOD callback freeze/resume diagnostics
-    bool callback_frozen_         = false;
-    std::chrono::steady_clock::time_point freeze_start_{};
+    AudibilityTracker audibility_;
+    bool was_radio_off_ = false; // edge detection for radio_off → on
     std::jthread thread_;
 };
 
