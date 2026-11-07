@@ -430,12 +430,7 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
                 return;
             }
             log::info("[texinject] cache hit for {} ({} variant)", url, cached_variants.size());
-            if (!prewarm) {
-                std::scoped_lock lk{pixels_mtx_};
-                pending_variants_ = std::move(cached_variants);
-                has_new_image_ = true;
-                has_pending_pixels_.store(true, std::memory_order_release);
-            }
+            if (!prewarm) publish_pixels(job_id, std::move(cached_variants));
             cleanup();
             return;
         }
@@ -637,15 +632,24 @@ void TextureInjector::process_artwork(const std::string& url, uint64_t job_id, b
         cleanup();
         return;
     }
-    {
-        std::scoped_lock lk{pixels_mtx_};
-        pending_variants_ = std::move(variants);
-        has_new_image_ = true;
-        has_pending_pixels_.store(true, std::memory_order_release);
-    }
+    publish_pixels(job_id, std::move(variants));
 
     // Temp files cleaned up by file_guard destructor.
     cleanup();
+}
+
+bool TextureInjector::publish_pixels(uint64_t job_id, std::vector<PixelVariant> variants) {
+    std::scoped_lock lk{pixels_mtx_};
+    // Checked under pixels_mtx_: a job that finished converting after a
+    // newer job already published must not overwrite the newer artwork.
+    if (job_id != latest_job_id_.load(std::memory_order_acquire)) {
+        log::info("[texinject] job {} superseded before publish; discarding", job_id);
+        return false;
+    }
+    pending_variants_ = std::move(variants);
+    has_new_image_    = true;
+    has_pending_pixels_.store(true, std::memory_order_release);
+    return true;
 }
 
 bool TextureInjector::pop_pending_pixels(std::vector<PixelVariant>& out_variants) {

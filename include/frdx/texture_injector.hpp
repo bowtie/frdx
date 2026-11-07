@@ -121,6 +121,10 @@ private:
     void save_cache(const std::string& url, uint64_t file_hash,
                     bool raw, const std::vector<PixelVariant>& variants);
 
+    // Hand converted pixels to the render thread, unless a newer job has
+    // started since `job_id` (returns false and drops them).
+    bool publish_pixels(uint64_t job_id, std::vector<PixelVariant> variants);
+
     std::mutex mtx_;
     helper::WorkerClient* worker_ = nullptr;
     std::filesystem::path data_dir_;
@@ -132,6 +136,15 @@ private:
     std::vector<PixelVariant> last_variants_;  // cache for reinject_last()
     bool has_new_image_ = false;
 
+    // Artwork job lifecycle.  Each update_artwork_url() takes a new id from
+    // latest_job_id_; only the job holding the latest id may publish or
+    // clear processing_.
+    //   job started --> converting (processing_ = true)
+    //   converting --newer job started--> abandoned (checked between steps
+    //                                     and again at publish)
+    //   converting --done--> published: has_new_image_ (+ atomic mirror
+    //                        has_pending_pixels_) until the render thread pops
+    //   popped --reinject_last()--> published again from last_variants_
     std::atomic<uint64_t> target_dims_{0};
     std::atomic<bool> processing_{false};
     std::atomic<bool> has_pending_pixels_{false};
