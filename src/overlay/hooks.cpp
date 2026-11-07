@@ -301,11 +301,6 @@ void request_ui_scale(float scale, bool immediate) {
     g_ui.pending_ui_scale_immediate = immediate;
 }
 
-// Public wrapper for the Debug tab's "Apply Scale" button.
-float compute_ui_scale_for_current_monitor() {
-    return compute_ui_scale(g_sc_height);
-}
-
 // Re-creates the RTV descriptors and g_dx.fb_bufs immediately after ResizeBuffers
 void post_resize(IDXGISwapChain* swapChain) {
     if (!g_ui.is_init || !g_dx.device) return;
@@ -371,7 +366,7 @@ void post_resize(IDXGISwapChain* swapChain) {
     // snapping: 1080p -> 1x, 1440p/4K -> 2x.  Apply immediately (settle=0)
     // so a resolution change doesn't leave the text at the old scale for
     // multiple frames.
-    if (scale_is_auto()) {
+    {
         const auto new_scale = compute_ui_scale(g_sc_height);
         if (effective_ui_scale(new_scale) != g_ui.ui_scale) {
             request_ui_scale(new_scale, false);
@@ -873,12 +868,9 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             g_sc_width = bb_width;
             g_sc_height = bb_height;
             re_log::info("backbuffer resolution changed to {}x{}", g_sc_width, g_sc_height);
-            // Don't override if the user forced a specific scale via the Debug tab.
-            if (scale_is_auto()) {
-                const auto new_scale = compute_ui_scale(g_sc_height);
-                if (effective_ui_scale(new_scale) != g_ui.ui_scale) {
-                    request_ui_scale(new_scale, false);
-                }
+            const auto new_scale = compute_ui_scale(g_sc_height);
+            if (effective_ui_scale(new_scale) != g_ui.ui_scale) {
+                request_ui_scale(new_scale, false);
             }
         }
 
@@ -963,8 +955,8 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
             log::info("[overlay] font mode switched to: {}", g_ui.font_mode);
         }
 
-        // Apply a pending font scale change from the Debug tab or a
-        // resolution change.  Must happen before NewFrame so all windows
+        // Apply a pending font scale change from a resolution change.
+        // Must happen before NewFrame so all windows
         // pick up the new FontScaleMain during their Begin().
         if (g_ui.pending_ui_scale >= 0.0f) {
             bool should_apply = false;

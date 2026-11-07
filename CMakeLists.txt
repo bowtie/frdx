@@ -170,7 +170,7 @@ set_target_properties(version PROPERTIES
 )
 
 # ── Auto-deploy: copy version.dll to the game folder after build ───────────
-# Enable with: cmake -DFRDX_AUTO_DEPLOY=ON -DFRDX_GAME_DIR="S:/SteamLibrary/steamapps/common/ForzaHorizon6"
+# Enable with: cmake -DFRDX_AUTO_DEPLOY=ON -DFRDX_GAME_DIR="C:/path/to/Forza Horizon 6"
 option(FRDX_AUTO_DEPLOY "Copy version.dll to the game folder after build" OFF)
 set(FRDX_GAME_DIR "" CACHE PATH "Path to the Forza Horizon game install directory")
 

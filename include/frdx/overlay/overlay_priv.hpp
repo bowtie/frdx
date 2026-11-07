@@ -223,13 +223,6 @@ struct UiState {
     // multiplied by ui_scale at use sites.  Calculated from the monitor
     // resolution (not the swap chain, which may use DRS).
     float ui_scale = 1.0f;
-    // Debug overrides: 0 = auto, 1 = force 1x, 2 = force 2x.
-    int debug_ui_scale = 0;
-    int debug_font_scale = 0;
-    // Modern-mode fractional scale override: 0.0 = auto (follow monitor),
-    // otherwise the explicit scale (e.g. 1.5).  When non-zero this takes
-    // priority over debug_ui_scale / debug_font_scale in modern mode.
-    float debug_scale_float = 0.0f;
     // Pre-baked font handles for the two UI scales. Both are loaded once at
     // init with ImFontFlags_LockBakedSizes so their baked sizes are pinned
     // (16px for 1x, 32px for 2x) and ImGui 1.92's dynamic font baking never
@@ -493,20 +486,10 @@ inline bool font_mode_is_modern() {
 }
 
 // Effective UI scale: integer-snapped in pixel mode, raw float in modern mode.
-// In modern mode, debug_scale_float (fractional slider) takes priority, then
-// falls back to debug_ui_scale / debug_font_scale (legacy integer overrides).
-// Auto scale follows monitor height / 1080, clamped to [0.50, 3.0] so
+// The scale follows monitor height / 1080, clamped to [0.50, 3.0] so
 // sub-1080p resolutions get a proportional (sub-1x) scale.
 inline float effective_ui_scale(float raw_scale) {
-    if (font_mode_is_modern()) {
-        if (g_ui.debug_scale_float > 0.0f)
-            return g_ui.debug_scale_float;
-        if (g_ui.debug_font_scale != 0)
-            return static_cast<float>(g_ui.debug_font_scale);
-        if (g_ui.debug_ui_scale != 0)
-            return static_cast<float>(g_ui.debug_ui_scale);
-        return std::clamp(raw_scale, 0.50f, 3.0f);
-    }
+    if (font_mode_is_modern()) return std::clamp(raw_scale, 0.50f, 3.0f);
     return static_cast<float>(snap_ui_scale(raw_scale));
 }
 
@@ -522,20 +505,9 @@ inline float layout_scale() {
     return font_mode_is_modern() ? g_ui.modern_layout_scale : 1.0f;
 }
 
-// Returns true when no manual scale override is active and the auto scale
-// should follow monitor/resolution changes.  In pixel mode this is
-// debug_ui_scale == 0; in modern mode it also checks debug_scale_float.
-inline bool scale_is_auto() {
-    if (font_mode_is_modern())
-        return g_ui.debug_scale_float <= 0.0f &&
-               g_ui.debug_ui_scale == 0 &&
-               g_ui.debug_font_scale == 0;
-    return g_ui.debug_ui_scale == 0;
-}
-
 // Queue a UI scale change. By default the change is applied immediately on
 // the same render frame (settle = 0); passing immediate=true applies it on
-// the next render frame (used by the Debug tab so user toggles stay responsive).
+// the next render frame.
 void request_ui_scale(float scale, bool immediate = false);
 
 inline D3D12_RESOURCE_BARRIER transition_barrier(ID3D12Resource* resource,
@@ -604,7 +576,6 @@ void load_all_fonts(float scale = 1.0f);
 // Instant mode switch (no atlas rebuild).  Requires load_all_fonts at init.
 void switch_font_mode(float scale = 1.0f);
 void set_font_scale(float scale);
-float compute_ui_scale_for_current_monitor();
 void load_background_texture(ID3D12CommandQueue* queue);
 
 // ── Dual-Kawase backdrop blur (KWin-style) ──

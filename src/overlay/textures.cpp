@@ -319,7 +319,6 @@ void switch_font_mode(float scale) {
 // Mode B: sets style.FontScaleMain to the fractional scale value (the 1.92
 //         replacement for the legacy io.FontGlobalScale).  ImGui's dynamic
 //         font baker handles the continuous size change smoothly.
-// Honors the Debug-tab overrides (debug_font_scale / debug_ui_scale).
 // Deferred to next frame via pending_ui_scale since style values are read
 // during Begin().
 void set_font_scale(float scale) {
@@ -345,7 +344,7 @@ void set_font_scale(float scale) {
         const int int_scale = snap_ui_scale(scale);
         const auto effective_scale = static_cast<float>(int_scale);
         g_ui.ui_scale = effective_scale;
-        const int font_sel = (g_ui.debug_font_scale != 0) ? g_ui.debug_font_scale : int_scale;
+        const int font_sel = int_scale;
         ImFont* wanted = (font_sel >= 2) ? g_ui.font_2x : g_ui.font_1x;
         if (wanted) ImGui::GetIO().FontDefault = wanted;
         // ApplyTheme resets the entire ImGuiStyle (via `style = ImGuiStyle()`),
