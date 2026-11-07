@@ -37,7 +37,7 @@ blur_widget_opacity = 0.75         # widget background alpha while blur is on, 0
 #   Off                = texture_injection_enabled = false
 #   Station logos      = texture_injection_enabled = true,  artwork_lookup_enabled = false
 #   Logos + album art  = texture_injection_enabled = true,  artwork_lookup_enabled = true
-texture_injection_enabled = true   # false = never touch the HUD artwork (applies on next launch)
+texture_injection_enabled = true   # false = leave the HUD artwork alone
 artwork_lookup_enabled = true      # per-track album art from the station API
 artwork_cache_enabled = false      # cache processed album art on disk
 metadata_truncation_enabled = false

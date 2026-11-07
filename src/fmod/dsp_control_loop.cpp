@@ -329,6 +329,17 @@ void ControlLoop::push_metadata() noexcept {
         return;
     }
 
+    // Artwork was off and just got switched on: forget what we last sent so
+    // the current station's artwork is pushed again right away instead of
+    // waiting for the next track change.
+    const bool injection_on = overlay::is_tex_injection_enabled();
+    if (injection_on && !prev_injection_on_) {
+        current_artwork_url_.clear();
+        current_artwork_stretch_ = false;
+        metadata_generation_     = 0;
+    }
+    prev_injection_on_ = injection_on;
+
     // When paused or stopped (stream disconnected by on_radio_audible),
     // show the station logo + name instead of the last track.  The stream
     // is disconnected, so the last track's art is stale.

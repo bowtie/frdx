@@ -77,6 +77,7 @@ private:
     TrackInfo metadata_track_;
     std::string metadata_display_name_;
     std::string current_artwork_url_;
+    bool prev_injection_on_ = true; // detects artwork being switched back on
     bool current_artwork_stretch_ = false;
     std::byte* radio_stream_      = nullptr;  // current RadioStreamFmod
     std::byte* sample_props_body_ = nullptr;  // current SampleProperties body

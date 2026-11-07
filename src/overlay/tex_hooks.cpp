@@ -49,10 +49,11 @@ extern kiero::D3D12Output g_kiero_d3d12;
 CreateSRV_t original_CreateSRV = nullptr;
 
 // ── Texture injection enabled flag ──
-// Mirrors OverlayConfig::texture_injection_enabled.  When false, the
-// CreateSRV hook is not installed and process_texture_injection bails
-// immediately — zero overhead on the render thread.  Toggled at runtime
-// from the Settings panel via set_tex_injection_enabled().
+// Mirrors OverlayConfig::texture_injection_enabled.  When false, no artwork
+// is injected, but the CreateSRV hook stays installed and the game's
+// placeholder textures are still tracked and fingerprinted (a one-time,
+// throttled cost), so turning injection back on at runtime works without
+// a restart.  Toggled from the Settings panel via set_tex_injection_enabled().
 static std::atomic<bool> g_tex_injection_enabled{true};
 
 bool is_tex_injection_enabled() noexcept {
@@ -202,16 +203,6 @@ void set_tex_injection_enabled(bool enabled) noexcept {
     const bool prev = g_tex_injection_enabled.exchange(enabled, std::memory_order_acq_rel);
     if (prev != enabled) {
         log::info("[texinject] injection {}", enabled ? "enabled" : "disabled");
-        if (!enabled) {
-            // Drop all tracked state so nothing tries to inject into
-            // stale textures if/when it's re-enabled later.
-            std::scoped_lock lk{g_tex_mutex};
-            for (auto& tt : g_streamer_mode) { if (tt.resource) tt.resource.reset(); }
-            g_streamer_mode.clear();
-            g_unverified.clear();
-            g_tracked_resources.clear();
-            refresh_work_pending_locked();
-        }
     }
 }
 
@@ -692,7 +683,6 @@ static void process_texture_injection_impl(ID3D12CommandQueue* pQueue);
 
 void process_texture_injection(ID3D12CommandQueue* pQueue) {
     if (!pQueue) return;
-    if (!g_tex_injection_enabled.load(std::memory_order_relaxed)) return;
 
     g_ecl_count.fetch_add(1, std::memory_order_relaxed);
 
@@ -928,13 +918,6 @@ void process_texture_injection_impl(ID3D12CommandQueue* pQueue) {
 
 bool install_create_srv_hook(ID3D12Device* pDevice) {
     if (!pDevice) return false;
-
-    // If injection was disabled via the Settings panel before the device
-    // was acquired, skip installing the CreateSRV hook entirely.
-    if (!g_tex_injection_enabled.load(std::memory_order_relaxed)) {
-        log::info("[texinject] CreateSRV hook skipped (injection disabled)");
-        return true; // not a failure — rest of init should proceed
-    }
 
     if (original_CreateSRV) return true; // already hooked
 

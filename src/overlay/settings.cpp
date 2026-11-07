@@ -74,8 +74,7 @@ void draw_audio_settings_tab() {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Off = leave the radio HUD artwork alone\n"
                               "Station logos = show each station's logo only\n"
-                              "Logos + album art = per-track cover art from the station API\n"
-                              "Turning artwork back on after starting with Off needs a restart.");
+                              "Logos + album art = per-track cover art from the station API");
         }
     }
 
