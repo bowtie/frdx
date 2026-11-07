@@ -428,12 +428,8 @@ void draw_imgui_ui_impl() {
 
     // Suppress all interactive overlay UI (toasts, player bar, settings,
     // stations) during the intro skip — showing it over the black screen /
-    // Bink video looks jarring.  The console (below) is independent and
-    // stays available for debugging.
-    if (!fastboot::intro_done()) {
-        draw_console_window();
-        return;
-    }
+    // Bink video looks jarring.
+    if (!fastboot::intro_done()) return;
 
     draw_toasts();
 
@@ -441,12 +437,6 @@ void draw_imgui_ui_impl() {
     if (g_ui.cursor_close_children_now) {
         close_player_children_except(false, false, false);
     }
-
-    // Log window is INDEPENDENT of the interactive fade.  Draw it BEFORE
-    // the alpha pushvar block so it stays visible even when the cursor
-    // hides and the rest of the overlay fades out.  Console open/close
-    // is gated by g_ui.console_visible (F10 toggles it).
-    draw_console_window();
 
     if (interactive_alpha <= 0.01f) return;
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, interactive_alpha);

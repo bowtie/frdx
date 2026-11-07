@@ -10,14 +10,9 @@
 //
 // The D3D12 hook chain (MinHook install / Detours discovery / swapchain
 // interception / multi-queue sync) and DXGI format-detection work
-// route through this namespace so the console's Subsystems popup shows
-// a separate `[re]` column for RE investigations alongside the existing
-// `[overlay]`, `[bridge]`, `[sigcan]`, `[gstate]`, `[meta]`, etc.
-// Subsystem auto-discovery is keyed off the literal `[<name>]` bracket
-// prefix (see classify_console_line + extract_subsystem in
-// src/overlay/console.cpp), so no console-side change is needed to
-// surface the new tag -- it appears the first time a `[re]` line lands
-// in the recent buffer.
+// route through this namespace so their lines carry a `[re]` tag in
+// bridge.log, alongside the existing `[overlay]`, `[bridge]`, `[sigcan]`,
+// `[gstate]`, `[meta]`, etc.
 //
 // Implementation note: the `[re] ` prefix lives OUTSIDE the caller's
 // format string and is concatenated after a single std::format pass on

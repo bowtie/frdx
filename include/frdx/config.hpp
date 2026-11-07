@@ -26,7 +26,6 @@ struct OverlayConfig {
     bool music_notifications_enabled  = true;
     bool station_notifications_enabled = true;
     std::string notification_position = "top_left";
-    bool console_visible = false;
     // When true, the player bar fades out after the cursor is hidden for
     // a few seconds (cinematic mode).  When false, the player bar stays
     // visible at all times.
