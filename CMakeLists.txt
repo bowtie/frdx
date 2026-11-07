@@ -59,11 +59,14 @@ FetchContent_MakeAvailable(freetype)
 # ── mpg123: fetch source and build as static library ────────────────────
 # Eliminates the runtime DLL dependency by compiling libmpg123 directly
 # into version.dll and frdx_sandbox.exe.
+# Pinned: tracking master broke the build when upstream committed a bare
+# `#define` in src/compat/compat.h (0d6f2ca, 2026-11-04).  c1d38c6 is the
+# last commit this project was built and PGO-trained against.  Bump
+# deliberately.  (A commit hash can't be fetched shallowly.)
 FetchContent_Declare(
     mpg123
     GIT_REPOSITORY https://github.com/madebr/mpg123.git
-    GIT_TAG        master
-    GIT_SHALLOW    TRUE
+    GIT_TAG        c1d38c66c60a6f79b0b81ab88dc396c2517f9d7e
     SOURCE_SUBDIR  ports/cmake
 )
 set(BUILD_LIBOUT123 OFF CACHE BOOL "Build libout123" FORCE)
