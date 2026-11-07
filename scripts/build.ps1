@@ -300,6 +300,12 @@ Credits:
     (github.com/HamzaYslmn/Forza-Horizon-DualSense-Python): the
     DualSense trigger logic was ported to C++ from it.
 
+Fonts:
+  - Fusion Pixel Font by TakWolf (SIL OFL)
+  - Geist by Vercel (SIL OFL)
+  - Source Han Sans by Adobe (SIL OFL)
+  - Kenney Game Icons by Kenney (CC0)
+
 Unofficial fan project. Nothing here is affiliated with, endorsed by, or
 connected to Turn 10 Studios, Playground Games, Xbox Game Studios, or
 Microsoft. Forza Horizon, Forza Motorsport, and all other names dropped

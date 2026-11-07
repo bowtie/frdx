@@ -42,6 +42,16 @@ the game files.
 - [HamzaYslmn/Forza-Horizon-DualSense-Python](https://github.com/HamzaYslmn/Forza-Horizon-DualSense-Python):
   the DualSense triggers, ported to C++.
 
+Fonts:
+
+- [Fusion Pixel Font](https://github.com/TakWolf/fusion-pixel-font) by TakWolf
+  (pixel font, SIL OFL).
+- [Geist](https://github.com/vercel/geist-font) by Vercel (modern font, SIL OFL).
+- [Source Han Sans](https://github.com/adobe-fonts/source-han-sans) by Adobe
+  (Japanese and Korean text in the modern font, SIL OFL).
+- [Kenney Game Icons](https://kenney.nl/assets/game-icons) by Kenney (button
+  icons, CC0).
+
 ## License
 
 GPLv3, see [LICENSE](LICENSE). This is an unofficial fan project and isn't
