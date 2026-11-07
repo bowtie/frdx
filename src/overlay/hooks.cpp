@@ -188,7 +188,7 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
     // mouse coordinates from window space to swap chain space so ImGui's
     // mouse position matches its coordinate system.
     const bool route_to_imgui    = g_ui.player_visible || g_ui.settings_visible ||
-                                   g_ui.stations_visible;
+                                   g_ui.stations_visible || g_ui.console_visible;
     const bool block_mouse_input = g_ui.cursor_visible && g_ui.interactive_alpha > 0.05f &&
                                    g_ui.mouse_capture.load(std::memory_order_acquire);
     if (route_to_imgui) {
@@ -219,6 +219,16 @@ LRESULT CALLBACK wnd_proc_hook(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
         g_ui.player_visible = !g_ui.player_visible;
         if (g_ui.is_init) {
             ImGui::GetIO().MouseDrawCursor = should_draw_imgui_cursor();
+        }
+        return 0;
+    }
+
+    if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && wParam == VK_F10) {
+        g_ui.console_visible = !g_ui.console_visible;
+        if (g_ctx.store) {
+            g_ctx.store->patch([&](Config& c) {
+                c.overlay.console_visible = g_ui.console_visible.load();
+            });
         }
         return 0;
     }
@@ -651,7 +661,8 @@ bool init_imgui(IDXGISwapChain* pSwapChain, ID3D12CommandQueue* active_queue) {
     // grow the panel, not shrink it from the top.  Pin to false so all
     // resize happens via the small bottom-right triangle grip (ImGui's
     // original contract).  Player bar / settings / toasts already opt
-    // out via ImGuiWindowFlags_NoResize; setting it here makes the
+    // out via ImGuiWindowFlags_NoResize, so this only affects the
+    // console window in practice -- but setting it here makes the
     // behaviour global and survives any future window that enables
     // resize by default.
     ImGui::GetIO().ConfigWindowsResizeFromEdges = false;
@@ -884,7 +895,7 @@ static bool render_overlay_frame(IDXGISwapChain* pSwapChain, ID3D12CommandQueue*
 
         // Skip ImGui entirely when all UI panels and the HUD are hidden.
         if (!g_ui.player_visible && !g_ui.settings_visible && !g_ui.stations_visible &&
-            !g_ui.hud_visible && !has_visible_toasts()) {
+            !g_ui.console_visible && !g_ui.hud_visible && !has_visible_toasts()) {
             return false;
         }
 
@@ -1076,6 +1087,7 @@ HRESULT __stdcall hook_Present(IDXGISwapChain* pSwapChain, UINT SyncInterval, UI
     if (!g_ui.player_visible.load(std::memory_order_acquire) &&
         !g_ui.settings_visible.load(std::memory_order_acquire) &&
         !g_ui.stations_visible.load(std::memory_order_acquire) &&
+        !g_ui.console_visible.load(std::memory_order_acquire) &&
         !g_ui.hud_visible.load(std::memory_order_acquire) &&
         !has_visible_toasts()) {
         return original_Present(pSwapChain, SyncInterval, Flags);
@@ -1127,6 +1139,7 @@ bool configure_overlay_runtime(AudioSourceManager& mgr, fmod_bridge::DSPBridge& 
     g_ui.hud_visible               = cfg.overlay.music_notifications_enabled ||
                                     cfg.overlay.station_notifications_enabled;
     g_ui.notification_position_idx = notification_position_index(cfg.overlay.notification_position);
+    g_ui.console_visible           = cfg.overlay.console_visible;
     if (!g_runtime_started) {
         start_action_worker();
         g_runtime_started = true;

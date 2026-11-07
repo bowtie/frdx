@@ -204,6 +204,16 @@ struct StationComboCache {
     const void* source_ptr = nullptr;
 };
 
+// Source-subsystem tag for a log line.  Drives the per-category filter in
+// the console window (`g_ui.console_filter_*`); "radio" lumps the FMOD
+// discovery / control-loop chatter that floods the log while RE work is
+// going on, so it has its own (default-muted) filter.
+enum class ConsoleLineKind : uint8_t { normal, error, warn, overlay, dualsense, radio };
+// Per-subsystem filter state.  Built incrementally as subsystems are
+// discovered in log lines; never shrinks so muted entries that fall out
+// of the 500-line buffer keep their row in the popup and remain
+// re-enableable.
+struct SubsystemState { std::string name; bool visible = true; };
 enum class ToastKind : uint8_t { info, success, warn };
 
 struct Toast {
@@ -216,7 +226,7 @@ struct Toast {
 
 struct UiState {
     std::atomic<bool> player_visible{true}, settings_visible{false}, stations_visible{false};
-    std::atomic<bool> hud_visible{true};
+    std::atomic<bool> console_visible{false}, hud_visible{true};
     std::atomic<bool> mouse_capture{false};
     bool is_init = false, cursor_visible = true;
     // UI scaling: all hardcoded pixel values are designed for 1080p and
@@ -312,6 +322,38 @@ struct UiState {
     bool combo_dirty        = true;
     float combo_switch_anim = 1.0f;
     std::string combo_prev_label;
+    std::vector<std::string> console_lines;
+    std::vector<ConsoleLineKind> console_line_kinds;
+    std::vector<size_t> console_line_counts;
+    uint64_t console_log_generation = 0;
+    // Per-category filter for the console window.  "radio" and "dualsense"
+    // are muted by default — those subsystems flood the log with routine
+    // catalogue chatter, which drowns out the overlay / GPU debug lines you
+    // actually want while reversing.  Toggle from the filter row in the
+    // console window's title bar.
+    // The 7 coarse category gates (Errors / Warnings / Overlay / DualSense
+    // / Radio / Normal) were dropped when the Subsystems popup became the
+    // single source of truth for line visibility; kind still classifies each
+    // line, but only as a color hint via console_line_color(kind).
+    bool console_filter_dedup     = false;
+    // Substring search across the filtered log.  Empty == no filter.  Capped
+    // at 127 printable chars (sizeof(buffer)-1) for stable ImGui InputText
+    // handling; ImGui never writes an unterminated buffer so a check on
+    // index 0 is sufficient to know if the search is active.
+    char console_filter_text_search[128] = {};
+    // When ticked, new log lines still arrive but scroll position is left
+    // alone — no SetScrollHereY(1.0f).  Useful for reading mid-scroll during
+    // FMOD scan floods without losing your place.
+    bool console_filter_pause_scroll = false;
+    // Durable subsystem registry — see SubsystemState above.  Each entry's
+    // index is its stable 16-bit id; parallel `console_subsystem_id` stores
+    // each line's id (UINT16_MAX = no subsystem) so passes_filter() is an
+    // O(1) lookup with NO heap allocation on the render thread.  Refresh
+    // inserts new ids but never removes them — muted subsystems that fall
+    // out of the 500-line buffer stay in the registry for re-enabling.
+    std::vector<SubsystemState> console_subsystems;
+    std::unordered_map<std::string, uint16_t> console_subsystem_index;
+    std::vector<uint16_t> console_subsystem_id;
     std::deque<Toast> toasts;
     std::vector<dualsense::ControllerDevice> dualsense_devices;
     dualsense::RuntimeStatus helper_status;
@@ -320,7 +362,7 @@ struct UiState {
     bool helper_status_available = false, dualsense_devices_dirty = true,
          dualsense_reset_armed = false;
     float settings_anim = 0.0f, settings_content_height = 220.0f;
-    float stations_anim = 0.0f;
+    float stations_anim = 0.0f, console_anim = 0.0f;
     bool stations_expanded = false, stations_overflow = false;
     float stations_content_height        = 300.0f;
     int dualsense_tab                    = 0;
@@ -559,6 +601,9 @@ struct PlayerBarLayout {
     ImVec2 size;
 };
 
+void draw_console_window();
+ConsoleLineKind classify_console_line(std::string_view line);
+ImVec4 console_line_color(ConsoleLineKind kind);
 float advance_popup_anim(bool opening, float& anim);
 void mark_overlay_mouse_region();
 
@@ -567,7 +612,7 @@ ImVec4 toast_color(ToastKind kind);
 bool has_visible_toasts();
 
 // Returns true if any window that uses backdrop blur is currently visible
-// (player bar, settings, stations, toasts).
+// (player bar, settings, stations, toasts).  The console does NOT use blur.
 bool any_blur_window_visible();
 void push_toast(ToastKind kind, std::string title, std::string detail, float lifetime);
 bool is_status_artist(std::string_view artist) noexcept;

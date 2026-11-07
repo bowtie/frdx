@@ -103,6 +103,7 @@ add_library(version SHARED
     src/fmod/dsp_control_loop.cpp
     src/overlay/overlay.cpp
     src/overlay/toasts.cpp
+    src/overlay/console.cpp
     src/overlay/dualsense.cpp
     src/overlay/themes.cpp
     src/overlay/textures.cpp
@@ -321,6 +322,7 @@ add_executable(frdx_sandbox
     src/fmod/metadata_injector.cpp
     src/overlay/overlay.cpp
     src/overlay/toasts.cpp
+    src/overlay/console.cpp
     src/overlay/dualsense.cpp
     src/overlay/themes.cpp
     src/overlay/textures.cpp
