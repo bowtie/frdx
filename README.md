@@ -9,8 +9,8 @@ radio stations. It also adds a few quality-of-life features.
 
 ### Radio
 
-Pick a station from the player bar and it plays in the game like any other
-radio. Station logos and album art appear on the radio HUD.
+Pick a station from the player bar. It plays through the game's audio, so the
+in-game volume applies. Station logos and album art appear on the radio HUD.
 
 ### Extras
 
@@ -18,10 +18,10 @@ radio. Station logos and album art appear on the radio HUD.
 - **DualSense triggers.** The brake and throttle triggers push back and pulse
   as you brake, hit ABS or reach the rev limiter. They are off until you
   turn them on.
-- **Overlay.** Press **Insert** to open the player bar, station list and
-  settings.
-- **Pixel or modern font.** Pixel is the default. Modern is meant for
-  DPI scaling and higher resolutions, and might look slightly off.
+- **Overlay.** Press **Insert** to show or hide the player bar. The station
+  list and settings are on the bar.
+- **Pixel or modern font.** Pixel is the default. Modern is for DPI scaling
+  and higher resolutions, and might look slightly off.
 - **No pause when you tab out.** Optional. The game keeps running and the
   radio keeps playing when you switch windows.
 
@@ -30,7 +30,7 @@ radio. Station logos and album art appear on the radio HUD.
 1. Close the game, then extract the download into the folder that contains
    `forzahorizon6.exe`.
 2. In the game, go to **Settings → Audio** and turn **Streamer Mode** on.
-3. Start playing. The player bar shows up on its own. Pick a station and it plays.
+3. Start playing. The player bar appears on its own. Pick a station.
 
 To remove it, delete `version.dll` and the `mods/frdx` folder, then verify
 the game files.
