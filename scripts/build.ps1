@@ -273,9 +273,8 @@ Pulling it back out
 ~~~~~~~~~~~~~~~~~~~
 
 Two things to remove from the FH6 install folder: version.dll
-and the mods/frdx/ folder sitting next to it. After that,
-hit "Verify integrity of game files" (Steam) or "Repair" (Xbox app /
-MS Store) and the patched game assets get pulled back to vanilla.
+and the mods/frdx/ folder sitting next to it. The mod doesn't change
+any other game files, so nothing else needs repairing.
 
 
 About the project

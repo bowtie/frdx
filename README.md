@@ -33,8 +33,8 @@ the settings you can choose logos only, logos plus album art, or no artwork.
 2. In the game, go to **Settings → Audio** and turn **Streamer Mode** on.
 3. Start playing. The player bar appears on its own. Pick a station.
 
-To remove it, delete `version.dll` and the `mods/frdx` folder, then verify
-the game files.
+To remove it, delete `version.dll` and the `mods/frdx` folder. The mod doesn't
+change any other game files.
 
 ## Credits
 
