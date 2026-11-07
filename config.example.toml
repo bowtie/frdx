@@ -1,46 +1,56 @@
-# Example config, copied to `<game>/mods/frdx/config.toml` on first install.
-# Everything is editable from the in-game overlay; you only need to touch this file
-# if you prefer hand edits. Windows paths should use TOML literal strings
-# (single quotes) so backslashes pass through verbatim.
+# Forza Radio DX config. Copied to <game>/mods/frdx/config.toml on install.
+# Everything here can be changed from the in-game overlay; edit this file only
+# if you prefer to. Missing keys fall back to the defaults shown.
 
 [general]
-ring_buffer_mb    = 4
+ring_buffer_mb = 4                 # audio buffer size, 1..256
 
 [shoutcast]
-default_url        = ""                          # auto-connect on startup
-last_station_id    = "boxradio"                  # station selected on first run (updated as you switch)
-last_stream_id     = "japan_city_pop"
+default_url = ""                   # stream URL to connect to on startup (blank = use the station list)
+last_station_id = "boxradio"       # station selected on first run; updated as you switch
+last_stream_id = "japan_city_pop"
 
 [audio]
 output_gain = 1.0
-force_stereo_audio = false  # true = stereo; false = mono + FMOD_2D (clean 3D spatialisation)
+force_stereo_audio = false         # false = mono + FMOD_2D (clean 3D spatialisation)
 
 [overlay]
-theme = "bess_dark"              # bess_dark, tokyo_night
-font_mode = "pixel"              # pixel (Fusion Pixel bitmap, integer 1x/2x) or modern (Geist + Source Han Sans CJK, fractional scaling)
+theme = "bess_dark"                # bess_dark, tokyo_night
+font_mode = "pixel"                # pixel (Fusion Pixel bitmap, 1x/2x) or modern (Geist + Source Han Sans CJK, fractional)
+player_bar_always_visible = false  # true = the player bar never fades out
+prevent_focus_loss_pause = true    # keep the game running when you alt-tab
 music_notifications_enabled = false
 station_notifications_enabled = false
 notification_position = "top_left" # top_left, top_center, top_right, bottom_left, bottom_center, bottom_right
-player_bar_always_visible = false  # true = player bar never fades out (no cinematic hide)
-prevent_focus_loss_pause = true    # keep the game from pausing when you alt-tab
-blur_enabled = true              # Dual-Kawase backdrop blur behind overlay panels
-blur_strength = 8                # 1..15 (downsample iterations + sample offset)
-blur_tint_r = 0.08               # frosted-glass tint colour over the blur (0..1)
+
+# Backdrop blur behind the overlay panels
+blur_enabled = true
+blur_strength = 8                  # 1..15
+blur_tint_r = 0.08                 # frosted-glass tint over the blur, 0..1
 blur_tint_g = 0.08
 blur_tint_b = 0.10
-blur_tint_opacity = 0.5          # 0 = pure blur, 1 = solid tint colour
-blur_widget_opacity = 0.75       # widget bg alpha scale when blur is on (1 = opaque, 0 = invisible)
-artwork_lookup_enabled = true    # per-track album art from stream metadata (off = station logos only)
-artwork_cache_enabled = false    # cache processed album art on disk
+blur_tint_opacity = 0.5            # 0 = pure blur, 1 = solid tint
+blur_widget_opacity = 0.75         # widget background alpha while blur is on, 0..1
+
+# Artwork and track titles
+artwork_lookup_enabled = true      # per-track album art (false = station logos only)
+artwork_cache_enabled = false      # cache processed album art on disk
 metadata_truncation_enabled = false
-metadata_max_length = 30         # used when truncation is on
-metadata_grace_period = 2.5      # seconds to hold the station logo before track art replaces it
+metadata_max_length = 30           # used when truncation is on
+metadata_grace_period = 2.5        # seconds to show the station logo before track art replaces it
 
 [dualsense]
-enabled = false             # native HID adaptive triggers; set Forza Data Out to this UDP port
-external_helper = true      # run trigger output outside the game process
+enabled = false                    # adaptive triggers; point Forza's Data Out at the UDP port below
+external_helper = true             # run trigger output in a separate process instead of inside the game
 udp_port = 5300
 wall_zones = 2
+controller_lock_serial = ""        # lock to one controller by MAC/serial (blank = first found)
+enable_startup_pulse = true
+startup_pulse_force = 150
+enable_reconnect = false
+reconnect_interval_s = 5.0
+
+# Brake
 enable_brake_resistance = true
 brake_deadzone = 50
 brake_baseline_force = 18
@@ -53,6 +63,8 @@ brake_static_wall_at = 128
 brake_static_wall_force = 255
 enable_handbrake_bonus = true
 handbrake_bonus = 60
+
+# ABS
 enable_abs = true
 abs_brake_threshold = 80
 abs_min_speed_kmh = 15.0
@@ -60,6 +72,8 @@ abs_slip_ratio_threshold = 1.0
 abs_combined_slip_threshold = 1.0
 abs_freq = 10
 abs_amp = 20
+
+# Throttle
 enable_throttle_resistance = true
 accel_deadzone = 50
 throttle_baseline_force = 1
@@ -67,6 +81,8 @@ throttle_max_force = 8
 throttle_curve = 5.0
 throttle_wall_engage_at = 250
 throttle_wall_release_at = 200
+
+# Rev limiter, wheelspin, idle
 enable_rev_limiter = true
 rev_limit_ratio = 0.93
 rev_limit_freq = 30
@@ -81,23 +97,20 @@ idle_freq = 30
 idle_amp_low = 1
 idle_amp_high = 30
 idle_period_s = 0.5
+
+# Gear shifts
 enable_gear_shift = true
 enable_gear_shift_brake = true
 gear_shift_freq = 10
 gear_shift_amp = 255
 gear_shift_duration_ms = 100.0
-enable_startup_pulse = true
-startup_pulse_force = 150
-enable_reconnect = false
-reconnect_interval_s = 5.0
-controller_lock_serial = "" # optional controller MAC/serial lock; blank = first found
 
 [fastboot]
-enabled = true               # skip the ~25s startup black-screen hold
-intro_video = "T10_MS_Combined" # startup video filename (substring); skip runs only while this plays
-jump_ms = 30000              # how far to push the clock per detected hold (ms)
-poll_ms = 80                 # monitor poll interval (ms)
-enter_spammer = false        # auto-press Enter through post-skip prompts
-enter_interval_ms = 120      # Enter key interval while spamming (ms)
-enter_window_ms = 12000      # stop spamming this long after the skip (ms)
-mute_during_intro = true     # mute game audio during intro to avoid abrupt cut
+enabled = true                     # skip the ~25s black-screen hold at startup
+intro_video = "T10_MS_Combined"    # startup video filename (substring); the skip only runs while it plays
+jump_ms = 30000                    # how far to advance the clock per detected hold
+poll_ms = 80                       # how often to check, in ms
+mute_during_intro = true           # mute game audio during the intro so the cut isn't abrupt
+enter_spammer = false              # auto-press Enter through prompts after the skip
+enter_interval_ms = 120            # time between Enter presses
+enter_window_ms = 12000            # stop pressing Enter this long after the skip
