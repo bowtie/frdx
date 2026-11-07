@@ -217,6 +217,7 @@ void run_bridge(HMODULE self) noexcept {
     shoutcast->set_artwork_lookup_enabled(cfg.overlay.artwork_lookup_enabled);
     shoutcast->set_grace_period_ms(static_cast<int64_t>(cfg.overlay.metadata_grace_period * 1000.0f));
     TextureInjector::instance().set_cache_enabled(cfg.overlay.artwork_cache_enabled);
+    TextureInjector::instance().set_enabled(cfg.overlay.texture_injection_enabled);
 
     // Initialize texture injector
     TextureInjector::instance().set_worker(worker.is_running() ? &worker : nullptr);
@@ -269,7 +270,7 @@ void run_bridge(HMODULE self) noexcept {
     // on each logo at startup (in a background thread) so that station
     // switches are instant instead of waiting for the first processing.
     // Logos that are already cached (matching file content hash) are skipped.
-    if (shoutcast) {
+    if (shoutcast && cfg.overlay.texture_injection_enabled) {
         std::vector<std::string> logo_urls;
         for (const auto& st : shoutcast->stations()) {
             for (const auto& str : st.streams) {

@@ -179,7 +179,7 @@ TextureInjector& TextureInjector::instance() {
 }
 
 void TextureInjector::update_artwork_url(const std::string& url, bool raw, bool border) {
-    if (url.empty()) return;
+    if (url.empty() || !enabled_.load(std::memory_order_acquire)) return;
     uint64_t job_id = latest_job_id_.fetch_add(1, std::memory_order_acq_rel) + 1;
     processing_.store(true, std::memory_order_release);
     // Detached thread: one per artwork job. Job ID comparison cancels

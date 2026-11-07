@@ -52,18 +52,31 @@ void draw_audio_settings_tab() {
         ImGui::SetTooltip("ON = stereo (non-positional)\nOFF = mono + 3D spatialisation");
     }
 
-    settings_label_row("Album Art Lookup");
-    bool art_lookup = cfg.artwork_lookup_enabled;
-    if (ImGui::Checkbox("##art_lookup", &art_lookup)) {
-        g_ctx.store->patch([&](Config& c) { c.overlay.artwork_lookup_enabled = art_lookup; });
-        if (g_ctx.mgr) {
-            auto* sc = dynamic_cast<frdx::sources::ShoutcastSource*>(g_ctx.mgr->active());
-            if (sc) sc->set_artwork_lookup_enabled(art_lookup);
+    settings_label_row("Artwork");
+    {
+        static const char* const kArtworkModes[] = {"Off", "Station logos", "Logos + album art"};
+        int mode = !cfg.texture_injection_enabled ? 0 : (cfg.artwork_lookup_enabled ? 2 : 1);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo("##artwork_mode", &mode, kArtworkModes, IM_ARRAYSIZE(kArtworkModes))) {
+            const bool inject = mode != 0;
+            const bool lookup = mode == 2;
+            g_ctx.store->patch([&](Config& c) {
+                c.overlay.texture_injection_enabled = inject;
+                c.overlay.artwork_lookup_enabled    = lookup;
+            });
+            set_tex_injection_enabled(inject);
+            frdx::TextureInjector::instance().set_enabled(inject);
+            if (g_ctx.mgr) {
+                auto* sc = dynamic_cast<frdx::sources::ShoutcastSource*>(g_ctx.mgr->active());
+                if (sc) sc->set_artwork_lookup_enabled(lookup);
+            }
         }
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("ON = use per-track artwork from station APIs\n"
-                          "OFF = use station logos only");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Off = leave the radio HUD artwork alone\n"
+                              "Station logos = show each station's logo only\n"
+                              "Logos + album art = per-track cover art from the station API\n"
+                              "Turning artwork back on after starting with Off needs a restart.");
+        }
     }
 
     settings_label_row("Artwork Cache");

@@ -10,7 +10,8 @@ radio stations. It also adds a few quality-of-life features.
 ### Radio
 
 Pick a station from the player bar. It plays through the game's audio, so the
-in-game volume applies. Station logos and album art appear on the radio HUD.
+in-game volume applies. The radio HUD shows station logos and album art. In
+the settings you can choose logos only, logos plus album art, or no artwork.
 
 ### Extras
 
