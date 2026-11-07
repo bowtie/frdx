@@ -65,14 +65,13 @@ void draw_audio_settings_tab() {
                 c.overlay.artwork_lookup_enabled    = lookup;
             });
             set_tex_injection_enabled(inject);
-            frdx::TextureInjector::instance().set_enabled(inject);
             if (g_ctx.mgr) {
                 auto* sc = dynamic_cast<frdx::sources::ShoutcastSource*>(g_ctx.mgr->active());
                 if (sc) sc->set_artwork_lookup_enabled(lookup);
             }
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Off = leave the radio HUD artwork alone\n"
+            ImGui::SetTooltip("Off = show the streamer-mode logo\n"
                               "Station logos = show each station's logo only\n"
                               "Logos + album art = per-track cover art from the station API");
         }

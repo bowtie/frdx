@@ -333,12 +333,18 @@ void ControlLoop::push_metadata() noexcept {
     // the current station's artwork is pushed again right away instead of
     // waiting for the next track change.
     const bool injection_on = overlay::is_tex_injection_enabled();
-    if (injection_on && !prev_injection_on_) {
+    if (injection_on != prev_injection_on_) {
         current_artwork_url_.clear();
         current_artwork_stretch_ = false;
         metadata_generation_     = 0;
     }
     prev_injection_on_ = injection_on;
+    // With artwork Off the HUD shows the bundled streamer-mode logo, stretched
+    // to fill the texture like the game's own placeholder.
+    const auto artwork_for = [injection_on](const std::string& url, bool stretch) {
+        return injection_on ? std::pair<std::string, bool>{url, stretch}
+                            : std::pair<std::string, bool>{kStreamerLogoUrl, true};
+    };
 
     // When paused or stopped (stream disconnected by on_radio_audible),
     // show the station logo + name instead of the last track.  The stream
@@ -358,14 +364,13 @@ void ControlLoop::push_metadata() noexcept {
             [[maybe_unused]] auto _meta = meta_.update(title, "Nothing playing");
             // Re-inject the station logo only when the URL or stretch mode
             // changes — not every tick (which would spam texture injections).
+            const auto [art_url, art_stretch] = artwork_for(track.artwork_url, track.artwork_stretch);
             const bool artwork_changed =
-                track.artwork_url != current_artwork_url_ ||
-                track.artwork_stretch != current_artwork_stretch_;
+                art_url != current_artwork_url_ || art_stretch != current_artwork_stretch_;
             if (artwork_changed) {
-                current_artwork_url_     = track.artwork_url;
-                current_artwork_stretch_ = track.artwork_stretch;
-                if (!current_artwork_url_.empty() &&
-                    overlay::is_tex_injection_enabled()) {
+                current_artwork_url_     = art_url;
+                current_artwork_stretch_ = art_stretch;
+                if (!current_artwork_url_.empty()) {
                     TextureInjector::instance().update_artwork_url(
                         current_artwork_url_, current_artwork_stretch_);
                 }
@@ -408,18 +413,18 @@ void ControlLoop::push_metadata() noexcept {
             // mode changes (e.g. station logo with stretch=true → album art
             // with stretch=false, even if the URL is the same station logo
             // that was used as a fallback for the previous track).
+            const auto [art_url, art_stretch] =
+                artwork_for(metadata_track_.artwork_url, metadata_track_.artwork_stretch);
             const bool artwork_changed =
-                metadata_track_.artwork_url != current_artwork_url_ ||
-                metadata_track_.artwork_stretch != current_artwork_stretch_;
+                art_url != current_artwork_url_ || art_stretch != current_artwork_stretch_;
             if (artwork_changed) {
-                current_artwork_url_     = metadata_track_.artwork_url;
-                current_artwork_stretch_ = metadata_track_.artwork_stretch;
-                if (!current_artwork_url_.empty() &&
-                    overlay::is_tex_injection_enabled()) {
+                current_artwork_url_     = art_url;
+                current_artwork_stretch_ = art_stretch;
+                if (!current_artwork_url_.empty()) {
                     // station_logo_only stations use stretch mode (raw=true)
                     // so the logo fills the entire texture without cropping.
                     TextureInjector::instance().update_artwork_url(
-                        current_artwork_url_, metadata_track_.artwork_stretch);
+                        current_artwork_url_, current_artwork_stretch_);
                 }
             }
         } catch (...) {

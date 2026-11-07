@@ -34,10 +34,10 @@ blur_tint_opacity = 0.5            # 0 = pure blur, 1 = solid tint
 blur_widget_opacity = 0.75         # widget background alpha while blur is on, 0..1
 
 # Artwork on the radio HUD. Overlay setting "Artwork":
-#   Off                = texture_injection_enabled = false
+#   Off (streamer logo) = texture_injection_enabled = false
 #   Station logos      = texture_injection_enabled = true,  artwork_lookup_enabled = false
 #   Logos + album art  = texture_injection_enabled = true,  artwork_lookup_enabled = true
-texture_injection_enabled = true   # false = leave the HUD artwork alone
+texture_injection_enabled = true   # false = show the streamer-mode logo instead of station artwork
 artwork_lookup_enabled = true      # per-track album art from the station API
 artwork_cache_enabled = false      # cache processed album art on disk
 metadata_truncation_enabled = false

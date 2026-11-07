@@ -22,6 +22,10 @@
 
 namespace frdx {
 
+// Bundled image shown in the radio HUD when artwork is Off. It matches the
+// game's own streamer-mode placeholder.
+inline constexpr const char* kStreamerLogoUrl = "logos/streamer_mode.png";
+
 class TextureInjector {
 public:
     static TextureInjector& instance();
@@ -40,8 +44,6 @@ public:
     // of the same track load instantly.  Station logos are always
     // cached (they're bundled files that only change on mod update).
     void set_cache_enabled(bool enabled) noexcept { cache_enabled_.store(enabled, std::memory_order_release); }
-    // When false, update_artwork_url() does nothing (artwork mode "Off").
-    void set_enabled(bool enabled) noexcept { enabled_.store(enabled, std::memory_order_release); }
 
     // Pre-warm the BC7 disk cache for station logos.  Scans all given
     // logo URLs, checks if each has a valid cache entry (file content
@@ -150,7 +152,6 @@ private:
     std::atomic<bool> has_pending_pixels_{false};
     std::atomic<uint64_t> latest_job_id_{0};
     std::atomic<bool> cache_enabled_{false};
-    std::atomic<bool> enabled_{true};
 };
 
 } // namespace frdx
