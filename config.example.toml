@@ -4,6 +4,7 @@
 
 [general]
 ring_buffer_mb = 4                 # audio buffer size, 1..256
+log_to_file = false                # write bridge.log and dualsense_external.log (applies on next launch)
 
 [shoutcast]
 default_url = ""                   # stream URL to connect to on startup (blank = use the station list)

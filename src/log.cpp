@@ -16,6 +16,7 @@ namespace {
 using frdx::detail::unique_file;
 
 unique_file g_file;
+std::filesystem::path g_path;
 std::mutex g_mu;
 std::deque<std::string> g_recent;
 std::atomic<uint64_t> g_recent_generation{0};
@@ -32,7 +33,21 @@ constexpr std::string_view level_name(Level l) noexcept {
 
 void init(const std::filesystem::path& log_file) noexcept {
     std::scoped_lock lk{g_mu};
-    g_file.reset(_wfopen(log_file.c_str(), L"a")); // closes old file, adopts new
+    g_path = log_file;
+    g_file.reset(); // closes any previous file
+}
+
+void set_file_enabled(bool enabled) noexcept {
+    std::scoped_lock lk{g_mu};
+    if (!enabled) {
+        g_file.reset();
+        return;
+    }
+    if (g_file || g_path.empty()) return;
+    g_file.reset(_wfopen(g_path.c_str(), L"a"));
+    if (!g_file) return;
+    for (const auto& line : g_recent) std::println(g_file.get(), "{}", line);
+    std::fflush(g_file.get());
 }
 
 void shutdown() noexcept {

@@ -8,6 +8,9 @@ namespace frdx {
 
 struct GeneralConfig {
     int ring_buffer_mb = 32;
+    // Write bridge.log (and the DualSense helper's log) next to the config.
+    // Off by default; applies on the next launch.
+    bool log_to_file = false;
 };
 
 struct ShoutcastConfig {

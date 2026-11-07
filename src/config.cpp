@@ -63,6 +63,7 @@ Config load_config(const std::filesystem::path& path) {
     }
 
     const auto& g = section(root, "general");
+    cfg.general.log_to_file = pick<bool>(g, "log_to_file", cfg.general.log_to_file);
     cfg.general.ring_buffer_mb =
         std::clamp(pick<int>(g, "ring_buffer_mb", cfg.general.ring_buffer_mb), kMinRingBufferMb,
                    kMaxRingBufferMb);
@@ -345,6 +346,7 @@ void save_config(const std::filesystem::path& path, const Config& cfg) {
     Emitter e;
     e.header("general");
     e.kv("ring_buffer_mb", static_cast<int64_t>(cfg.general.ring_buffer_mb));
+    e.kv("log_to_file", cfg.general.log_to_file);
 
     e.header("shoutcast");
     e.kv("default_url", cfg.shoutcast.default_url);

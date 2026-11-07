@@ -12,7 +12,12 @@ namespace frdx::log {
 
 enum class Level { info, warn, error };
 
+// Remembers where the log file goes. Nothing is written to disk until
+// set_file_enabled(true), so call that once the config is loaded.
 void init(const std::filesystem::path& log_file) noexcept;
+// Turns the log file on or off. Turning it on writes the lines buffered so
+// far (startup messages) first.
+void set_file_enabled(bool enabled) noexcept;
 void shutdown() noexcept;
 void emit(Level level, std::string_view message) noexcept;
 uint64_t recent_generation() noexcept;

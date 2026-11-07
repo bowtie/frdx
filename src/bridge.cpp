@@ -171,6 +171,7 @@ void run_bridge(HMODULE self) noexcept {
 
     ConfigStore store{data_dir / "config.toml", load_config(data_dir / "config.toml")};
     auto cfg = store.snapshot();
+    log::set_file_enabled(cfg.general.log_to_file);
 
     // Always launch the unified external helper via Task Scheduler.  It
     // runs in a separate session (needed for DualSense HID access since

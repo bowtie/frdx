@@ -817,6 +817,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     std::filesystem::create_directories(data_dir / "fonts", ec);
 
     frdx::log::init(data_dir / "sandbox.log");
+    frdx::log::set_file_enabled(true);
     frdx::log::info("[sandbox] starting ÔÇö overlay will hook into this process{}",
                     bench.enabled ? " [BENCHMARK MODE]" : "");
 

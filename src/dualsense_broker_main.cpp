@@ -168,6 +168,7 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     }
 
     frdx::Config cfg = frdx::load_config(config_path);
+    frdx::log::set_file_enabled(cfg.general.log_to_file);
     if (port_override > 0) cfg.dualsense.udp_port = port_override;
     if (!locked_serial.empty()) cfg.dualsense.controller_lock_serial = locked_serial;
     if (cfg.dualsense.reconnect_interval_s <= 0.0f) cfg.dualsense.reconnect_interval_s = 1.0f;
