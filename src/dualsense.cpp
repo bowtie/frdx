@@ -17,7 +17,9 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -501,6 +503,18 @@ std::vector<HidApiCandidate> enumerate_hidapi_controllers() {
     return out;
 }
 
+// The helper rescans devices every tick, so per-device messages would repeat
+// forever. Returns true only the first time a (kind, path) pair is seen.
+bool first_time_seen(std::string_view kind, std::wstring_view path) {
+    static std::mutex mu;
+    static std::set<std::wstring> seen;
+    std::wstring key(kind.begin(), kind.end());
+    key += L'|';
+    key += path;
+    std::scoped_lock lk{mu};
+    return seen.insert(std::move(key)).second;
+}
+
 bool contains_controller_path(const std::vector<ControllerInfo>& controllers,
                               std::wstring_view path) {
     return std::ranges::any_of(controllers,
@@ -537,16 +551,20 @@ void append_rawinput_dualsense_devices(std::vector<ControllerInfo>& out,
         ++stats.dualsense_paths;
         const bool col03     = path_is_col03(path);
         const bool bluetooth = path_is_bluetooth(path);
-        log::info("[dualsense] Raw Input DualSense path{}: {}", col03 ? " (col03)" : "",
-                  utf8_from_wide(path));
+        if (first_time_seen("rawinput", path)) {
+            log::info("[dualsense] Raw Input DualSense path{}: {}", col03 ? " (col03)" : "",
+                      utf8_from_wide(path));
+        }
         if (contains_controller_path(out, path)) continue;
 
         detail::unique_handle h = open_hid_query_handle(path.c_str());
         if (!h) {
             const DWORD err = GetLastError();
-            log::warn("[dualsense] Raw Input saw DualSense path but HID open is blocked "
-                      "(win32 err {}): {}",
-                      err, utf8_from_wide(path));
+            if (first_time_seen("rawinput-blocked", path)) {
+                log::warn("[dualsense] Raw Input saw DualSense path but HID open is blocked "
+                          "(win32 err {}): {}",
+                          err, utf8_from_wide(path));
+            }
             out.push_back({path, L"DualSense", {}, bluetooth, false, false, col03});
             continue;
         }
@@ -565,8 +583,10 @@ void append_rawinput_dualsense_devices(std::vector<ControllerInfo>& out,
         HidD_GetProductString(h.get(), product, sizeof(product));
         out.push_back({path, product[0] ? product : L"DualSense", read_controller_serial(h.get()),
                        bluetooth, false, gamepad_usage, col03});
-        log::info("[dualsense] Raw Input fallback found DualSense HID path: {}",
-                  utf8_from_wide(path));
+        if (first_time_seen("rawinput-found", path)) {
+            log::info("[dualsense] Raw Input fallback found DualSense HID path: {}",
+                      utf8_from_wide(path));
+        }
     }
 }
 
@@ -601,16 +621,20 @@ std::vector<ControllerInfo> enumerate_controllers() {
         const bool path_bluetooth = path_dualsense && path_is_bluetooth(detail->DevicePath);
         if (path_dualsense) {
             ++stats.dualsense_paths;
-            log::info("[dualsense] SetupAPI DualSense path{}: {}", path_col03 ? " (col03)" : "",
-                      utf8_from_wide(detail->DevicePath));
+            if (first_time_seen("setupapi", detail->DevicePath)) {
+                log::info("[dualsense] SetupAPI DualSense path{}: {}", path_col03 ? " (col03)" : "",
+                          utf8_from_wide(detail->DevicePath));
+            }
         }
         detail::unique_handle h = open_hid_query_handle(detail->DevicePath);
         if (!h) {
             if (path_dualsense) {
                 const DWORD err = GetLastError();
-                log::warn(
-                    "[dualsense] DualSense HID path is present but blocked (win32 err {}): {}", err,
-                    utf8_from_wide(detail->DevicePath));
+                if (first_time_seen("setupapi-blocked", detail->DevicePath)) {
+                    log::warn(
+                        "[dualsense] DualSense HID path is present but blocked (win32 err {}): {}",
+                        err, utf8_from_wide(detail->DevicePath));
+                }
                 out.push_back({detail->DevicePath,
                                L"DualSense",
                                {},

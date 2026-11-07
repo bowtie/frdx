@@ -212,6 +212,8 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
     frdx::log::info("[dualsense-external] worker server started on {}",
                     frdx::subprocess::narrow(worker_pipe));
 
+    int logged_port = cfg.dualsense.udp_port;
+    std::string logged_serial = cfg.dualsense.controller_lock_serial;
     auto last_config_check = std::chrono::steady_clock::now();
     auto last_config_write = std::filesystem::file_time_type{};
     if (std::filesystem::exists(config_path, ec)) {
@@ -280,11 +282,16 @@ int run_external_controller(const std::filesystem::path& config_path, int port_o
                 next.dualsense.enable_reconnect = true;
                 next.dualsense.external_helper  = true;
                 service.update_config(next.dualsense);
-                frdx::log::info("[dualsense-external] reloaded config; udp_port={} serial_lock={}",
-                                next.dualsense.udp_port,
-                                next.dualsense.controller_lock_serial.empty()
-                                    ? std::string{"<none>"}
-                                    : next.dualsense.controller_lock_serial);
+                // The overlay rewrites the config on every slider tweak, so
+                // only log when something this helper cares about changed.
+                if (next.dualsense.udp_port != logged_port ||
+                    next.dualsense.controller_lock_serial != logged_serial) {
+                    logged_port   = next.dualsense.udp_port;
+                    logged_serial = next.dualsense.controller_lock_serial;
+                    frdx::log::info(
+                        "[dualsense-external] reloaded config; udp_port={} serial_lock={}",
+                        logged_port, logged_serial.empty() ? std::string{"<none>"} : logged_serial);
+                }
                 std::println("[frdx-dualsense] reloaded config; UDP port: {}",
                              next.dualsense.udp_port);
                 std::fflush(stdout);
