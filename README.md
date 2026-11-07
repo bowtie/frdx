@@ -1,6 +1,6 @@
 # Forza Radio DX
 
-![Forza Radio DX player bar in Forza Horizon 6](docs/images/in-game.webp)
+![Forza Radio DX player bar in Forza Horizon 6](screenshots/in-game.webp)
 
 Forza Radio DX replaces the radio in Forza Horizon 6 with a list of online
 radio stations. It also adds a few quality-of-life features.
