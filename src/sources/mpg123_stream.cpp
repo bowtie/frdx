@@ -116,7 +116,7 @@ Mpg123Stream::create(const std::string& url, void* winhttp_session) {
     // ── WinHTTP connect ──
     HINTERNET session = winhttp_session
         ? static_cast<HINTERNET>(winhttp_session)
-        : WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        : WinHttpOpen(L"forza-radio-dx/" FRDX_VERSION_W, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
 
     if (!session) {

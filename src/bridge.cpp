@@ -167,7 +167,7 @@ void run_bridge(HMODULE self) noexcept {
     std::filesystem::create_directories(data_dir, ec);
 
     log::init(data_dir / "bridge.log");
-    log::info("[bridge] Forza Radio DX starting; data_dir={}", data_dir.string());
+    log::info("[bridge] Forza Radio DX {} starting; data_dir={}", FRDX_VERSION, data_dir.string());
 
     ConfigStore store{data_dir / "config.toml", load_config(data_dir / "config.toml")};
     auto cfg = store.snapshot();

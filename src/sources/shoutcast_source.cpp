@@ -200,7 +200,7 @@ bool ShoutcastSource::initialize() {
     }
 
     // Create a persistent shared WinHTTP session with default timeouts.
-    ScopedWinHttp session(WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    ScopedWinHttp session(WinHttpOpen(L"forza-radio-dx/" FRDX_VERSION_W, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (session) {
         DWORD to = 3000; // 3 seconds timeout

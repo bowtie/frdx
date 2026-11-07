@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(forza_radio_dx LANGUAGES C CXX)
+project(forza_radio_dx VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +34,8 @@ if(MSVC)
     add_link_options("$<$<CONFIG:Release>:/LTCG;/OPT:REF;/OPT:ICF>")
 endif()
 
-add_compile_definitions(_WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
+add_compile_definitions(FRDX_VERSION="${PROJECT_VERSION}" FRDX_VERSION_W=L"${PROJECT_VERSION}"
+                        _WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX
                         _CRT_SECURE_NO_WARNINGS UNICODE _UNICODE)
 
 # ── FreeType: fetch and build as static library for ImGui font rasterizing ─

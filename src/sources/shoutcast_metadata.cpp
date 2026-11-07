@@ -103,7 +103,7 @@ WinHttpConn helpers::winhttp_connect(void* shared_session, const ParsedUrl& pars
     HINTERNET hSession =
         shared_session ? static_cast<HINTERNET>(shared_session) : nullptr;
     if (!hSession) {
-        hSession = WinHttpOpen(L"forza-radio-dx/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        hSession = WinHttpOpen(L"forza-radio-dx/" FRDX_VERSION_W, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
         if (!hSession) {
             log::warn("[shoutcast] WinHttpOpen failed ({})", GetLastError());
