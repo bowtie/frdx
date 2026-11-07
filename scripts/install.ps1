@@ -76,4 +76,4 @@ if (Test-Path (Join-Path $dist "mods\frdx\fonts\FusionPixel12-ja.ttf")) {
 }
 
 Write-Host "`nDone. Launch the game, set Audio -> Radio DJ = Off, Streamer Mode = On." -ForegroundColor Green
-Write-Host "The in-game overlay opens automatically; press F10 or Insert to show/hide it."
+Write-Host "The in-game overlay opens automatically; press Insert to show/hide it."
